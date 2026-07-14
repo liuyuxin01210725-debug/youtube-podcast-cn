@@ -12,11 +12,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
+
+from tts_backends import SynthesisUsage
+from tts_cache import FragmentCache
 
 
 def load_tts_module():
@@ -58,6 +60,164 @@ class VoiceSlotTests(unittest.TestCase):
         self.assertEqual(
             tts_cn.parse_segments("这是纯文本。"), [("female_1", "这是纯文本。")]
         )
+
+
+class FragmentCacheOrchestrationTests(unittest.TestCase):
+    class FakeBackend:
+        name = "fake"
+        file_suffix = ".wav"
+        max_chars = 450
+        concurrency = 1
+
+        def __init__(self, model: str = "fake-model") -> None:
+            self.model = model
+            self.calls = 0
+
+        def resolve_voice(self, voice_slot: str) -> str:
+            return f"resolved-{voice_slot}"
+
+        def fingerprint(self) -> dict[str, object]:
+            return {
+                "backend": self.name,
+                "model": self.model,
+                "voice": "resolved-female_1",
+            }
+
+        async def synthesize(self, request, output):
+            self.calls += 1
+            output.write_bytes(b"valid-audio")
+            return SynthesisUsage(
+                request_id=f"request-{self.calls}",
+                input_tokens=11,
+                output_tokens=22,
+                audio_tokens=20,
+            )
+
+    def test_second_run_uses_cache_without_provider_call_or_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = self.FakeBackend()
+            cache = FragmentCache(
+                root / "cache", backend.fingerprint(), backend.file_suffix
+            )
+            segments = [("female_1", "测试正文。")]
+
+            with mock.patch.object(
+                tts_cn,
+                "audio_is_decodable",
+                side_effect=lambda path: path.read_bytes() == b"valid-audio",
+            ):
+                first_files, first_stats = asyncio.run(
+                    tts_cn.synth_all(
+                        segments,
+                        root / "first",
+                        backend=backend,
+                        style="conversation",
+                        cache=cache,
+                    )
+                )
+                second_files, second_stats = asyncio.run(
+                    tts_cn.synth_all(
+                        segments,
+                        root / "second",
+                        backend=backend,
+                        style="conversation",
+                        cache=cache,
+                    )
+                )
+
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(first_stats["provider_calls"], 1)
+            self.assertEqual(first_stats["cached"], 0)
+            self.assertEqual(first_stats["audio_tokens"], 20)
+            self.assertEqual(second_stats["provider_calls"], 0)
+            self.assertEqual(second_stats["cached"], 1)
+            self.assertEqual(second_stats["audio_tokens"], 0)
+            self.assertEqual(first_files, second_files)
+
+    def test_style_change_uses_a_different_cache_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = self.FakeBackend()
+            cache = FragmentCache(
+                root / "cache", backend.fingerprint(), backend.file_suffix
+            )
+            segments = [("female_1", "测试正文。")]
+            with mock.patch.object(tts_cn, "audio_is_decodable", return_value=True):
+                asyncio.run(
+                    tts_cn.synth_all(
+                        segments,
+                        root / "first",
+                        backend=backend,
+                        style="conversation",
+                        cache=cache,
+                    )
+                )
+                asyncio.run(
+                    tts_cn.synth_all(
+                        segments,
+                        root / "second",
+                        backend=backend,
+                        style="documentary",
+                        cache=cache,
+                    )
+                )
+            self.assertEqual(backend.calls, 2)
+
+    def test_duplicate_fragments_share_one_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = self.FakeBackend()
+            cache = FragmentCache(
+                root / "cache", backend.fingerprint(), backend.file_suffix
+            )
+            with mock.patch.object(tts_cn, "audio_is_decodable", return_value=True):
+                files, stats = asyncio.run(
+                    tts_cn.synth_all(
+                        [("female_1", "相同正文。"), ("female_1", "相同正文。")],
+                        root / "generated",
+                        backend=backend,
+                        style="conversation",
+                        cache=cache,
+                    )
+                )
+            self.assertEqual(len(files), 2)
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(stats["provider_calls"], 1)
+            self.assertEqual(stats["cached"], 1)
+
+    def test_corrupt_cached_fragment_is_regenerated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = self.FakeBackend()
+            cache = FragmentCache(
+                root / "cache", backend.fingerprint(), backend.file_suffix
+            )
+            request = tts_cn.SynthesisRequest(
+                text="测试正文。", voice_slot="female_1", style="conversation"
+            )
+            corrupt = cache.path_for(request)
+            corrupt.parent.mkdir(parents=True)
+            corrupt.write_bytes(b"corrupt")
+
+            with mock.patch.object(
+                tts_cn,
+                "audio_is_decodable",
+                side_effect=lambda path: path.read_bytes() == b"valid-audio",
+            ):
+                _, stats = asyncio.run(
+                    tts_cn.synth_all(
+                        [("female_1", "测试正文。")],
+                        root / "generated",
+                        backend=backend,
+                        style="conversation",
+                        cache=cache,
+                    )
+                )
+
+            self.assertEqual(backend.calls, 1)
+            self.assertEqual(stats["cached"], 0)
+            self.assertEqual(corrupt.read_bytes(), b"valid-audio")
 
 
 class NoiseParagraphTests(unittest.TestCase):
@@ -148,7 +308,7 @@ class OutputIntegrityTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_run_rejects_partial_synthesis_before_merge(self) -> None:
-        async def fake_synth_all(segments, tmp, *, backend, style):
+        async def fake_synth_all(segments, tmp, *, backend, style, cache):
             return [(tmp / "seg.mp3", "voice")], {
                 "failed": 1,
                 "ok": 1,
@@ -174,7 +334,7 @@ class OutputIntegrityTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"old audio")
 
     def test_run_merges_to_temporary_file_before_publishing(self) -> None:
-        async def fake_synth_all(segments, tmp, *, backend, style):
+        async def fake_synth_all(segments, tmp, *, backend, style, cache):
             return [(tmp / "seg.mp3", "voice")], {
                 "failed": 0,
                 "ok": 1,

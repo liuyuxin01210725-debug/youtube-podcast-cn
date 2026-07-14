@@ -64,6 +64,7 @@ from pathlib import Path
 from pydub import AudioSegment
 
 from tts_backends import SynthesisRequest, TTSBackend, build_backend
+from tts_cache import FragmentCache
 
 RETRIES = int(os.getenv("TTS_RETRIES", "3"))
 PAUSE_SAME_MS = int(os.getenv("PAUSE_SAME_MS", "200"))
@@ -304,11 +305,14 @@ async def synth_all(
     tmp: Path,
     backend: TTSBackend,
     style: str,
+    cache: FragmentCache,
 ) -> tuple[list[tuple[Path, str]], dict]:
     """
     并行合成所有片段, 失败自动重试。
     返回 ([(file_path, voice), ...] 按原序, stats)
     """
+    tmp.mkdir(parents=True, exist_ok=True)
+
     # 把每段拆成多个 part, 展平成 task list
     tasks: list[tuple[int, int, str, str, Path]] = []
     for i, (voice_slot, text) in enumerate(segments):
@@ -330,36 +334,69 @@ async def synth_all(
     )
 
     sem = asyncio.Semaphore(backend.concurrency)
-    stats = {"total": total, "ok": 0, "failed": 0, "retried": 0}
+    stats = {
+        "total": total,
+        "ok": 0,
+        "failed": 0,
+        "retried": 0,
+        "cached": 0,
+        "provider_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "audio_tokens": 0,
+    }
     progress_lock = asyncio.Lock()
+    key_locks: dict[str, asyncio.Lock] = {}
 
     async def worker(
         seg_i: int, part_j: int, voice_slot: str, text: str, out: Path
     ):
-        async with sem:
-            last_err: Exception | None = None
-            for attempt in range(RETRIES):
-                try:
-                    request = SynthesisRequest(
-                        text=text, voice_slot=voice_slot, style=style
-                    )
-                    await backend.synthesize(request, out)
-                    async with progress_lock:
-                        stats["ok"] += 1
-                        if attempt > 0:
-                            stats["retried"] += 1
-                        if stats["ok"] % 20 == 0 or stats["ok"] == total:
-                            log(f"  进度 {stats['ok']}/{total}")
-                    return (out, voice_slot)
-                except Exception as e:
-                    last_err = e
-                    if attempt < RETRIES - 1:
-                        # 退避: 0.5s, 1.0s, 1.5s, ...
-                        await asyncio.sleep(0.5 * (attempt + 1))
-            async with progress_lock:
-                stats["failed"] += 1
-            log(f"  ✗ 片段 {seg_i}-{part_j} 失败 ({RETRIES} 次): {last_err}")
-            return None
+        request = SynthesisRequest(
+            text=text, voice_slot=voice_slot, style=style
+        )
+        cache_key = cache.key_for(request)
+        key_lock = key_locks.setdefault(cache_key, asyncio.Lock())
+
+        async with key_lock:
+            cached_path = cache.get(request, audio_is_decodable)
+            if cached_path is not None:
+                async with progress_lock:
+                    stats["ok"] += 1
+                    stats["cached"] += 1
+                return (cached_path, voice_slot)
+
+            async with sem:
+                last_err: Exception | None = None
+                for attempt in range(RETRIES):
+                    try:
+                        async with progress_lock:
+                            stats["provider_calls"] += 1
+                        usage = await backend.synthesize(request, out)
+                        if not audio_is_decodable(out):
+                            raise RuntimeError("生成的音频片段无法解码")
+                        cached_path = cache.store(request, out)
+                        async with progress_lock:
+                            stats["ok"] += 1
+                            stats["input_tokens"] += usage.input_tokens
+                            stats["output_tokens"] += usage.output_tokens
+                            stats["audio_tokens"] += usage.audio_tokens
+                            if attempt > 0:
+                                stats["retried"] += 1
+                            if stats["ok"] % 20 == 0 or stats["ok"] == total:
+                                log(f"  进度 {stats['ok']}/{total}")
+                        return (cached_path, voice_slot)
+                    except Exception as e:
+                        last_err = e
+                        if attempt < RETRIES - 1:
+                            # 退避: 0.5s, 1.0s, 1.5s, ...
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                async with progress_lock:
+                    stats["failed"] += 1
+                log(
+                    f"  ✗ 片段 {seg_i}-{part_j} 失败 "
+                    f"({RETRIES} 次): {last_err}"
+                )
+                return None
 
     results = await asyncio.gather(
         *[worker(i, j, slot, text, path) for i, j, slot, text, path in tasks]
@@ -378,6 +415,16 @@ def ensure_all_synthesized(stats: dict[str, int]) -> None:
     total = stats.get("total", 0)
     if ok != total:
         raise RuntimeError(f"音频片段不完整:成功 {ok}/{total},未生成最终 MP3")
+
+
+def audio_is_decodable(path: Path) -> bool:
+    """Return whether a fragment is non-empty and can be decoded by pydub."""
+    try:
+        return path.is_file() and path.stat().st_size > 0 and len(
+            AudioSegment.from_file(path)
+        ) > 0
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -479,8 +526,17 @@ async def run(
 
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
+        cache = FragmentCache(
+            output_path.parent / ".tts-cache",
+            backend.fingerprint(),
+            backend.file_suffix,
+        )
         files_with_voices, stats = await synth_all(
-            segments, tmp, backend=backend, style=style
+            segments,
+            tmp,
+            backend=backend,
+            style=style,
+            cache=cache,
         )
         ensure_all_synthesized(stats)
 
