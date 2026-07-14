@@ -13,4 +13,7 @@ test-podcast:
 	@$(PYTHON) tests/test_podcast_cn.py
 
 test-tts:
-	@$(PYTHON) tests/test_tts_cn.py
+	@$(PYTHON) -m unittest \
+		tests.test_tts_cn \
+		tests.test_tts_backends \
+		tests.test_tts_cache

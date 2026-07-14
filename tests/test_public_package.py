@@ -71,6 +71,12 @@ class PublicPackageTests(unittest.TestCase):
         )
         self.assertIn("yt-dlp==2026.3.17", requirements)
 
+    def test_makefile_runs_every_tts_test_module(self) -> None:
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn("tests.test_tts_cn", makefile)
+        self.assertIn("tests.test_tts_backends", makefile)
+        self.assertIn("tests.test_tts_cache", makefile)
+
     def test_tts_wrapper_loads_qwen_key_only_for_qwen_backend(self) -> None:
         wrapper = (ROOT / "bin/tts-cn.sh").read_text(encoding="utf-8")
         self.assertIn("qwen3-api", wrapper)
