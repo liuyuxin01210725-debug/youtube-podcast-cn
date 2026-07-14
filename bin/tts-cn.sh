@@ -23,4 +23,50 @@ if [ ! -x "$VENV_PY" ]; then
   exit 1
 fi
 
+TTS_BACKEND="edge"
+EXPECT_TTS=0
+SKIP_TTS_KEY=0
+for ARG in "$@"; do
+  if [ "$EXPECT_TTS" -eq 1 ]; then
+    TTS_BACKEND="$ARG"
+    EXPECT_TTS=0
+    continue
+  fi
+  case "$ARG" in
+    --tts)
+      EXPECT_TTS=1
+      ;;
+    --tts=*)
+      TTS_BACKEND="${ARG#--tts=}"
+      ;;
+    --dump-segments|-h|--help)
+      SKIP_TTS_KEY=1
+      ;;
+  esac
+done
+
+if [ "$TTS_BACKEND" = "qwen3-api" ] \
+  && [ "$SKIP_TTS_KEY" -eq 0 ] \
+  && [ -z "${DASHSCOPE_API_KEY:-}" ]; then
+  KEYCHAIN_ACCOUNT="${USER:-$(id -un)}"
+  KEYCHAIN_VALUE="$(
+    security find-generic-password \
+      -a "$KEYCHAIN_ACCOUNT" \
+      -s "podcast-cn-qwen" \
+      -w 2>/dev/null || true
+  )"
+  if [ -n "$KEYCHAIN_VALUE" ]; then
+    export DASHSCOPE_API_KEY="$KEYCHAIN_VALUE"
+  fi
+  unset KEYCHAIN_VALUE
+fi
+
+if [ "$TTS_BACKEND" = "qwen3-api" ] \
+  && [ "$SKIP_TTS_KEY" -eq 0 ] \
+  && [ -z "${DASHSCOPE_API_KEY:-}" ]; then
+  echo "错误:还没有配置 DASHSCOPE_API_KEY。" >&2
+  echo "首次使用请运行: bash $PROJECT_ROOT/bin/setup-podcast-model.sh qwen" >&2
+  exit 2
+fi
+
 exec "$VENV_PY" "$PROJECT_ROOT/scripts/tts-cn.py" "$@"

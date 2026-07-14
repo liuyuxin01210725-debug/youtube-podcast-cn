@@ -40,6 +40,50 @@ def load_tts_module():
 tts_cn = load_tts_module()
 
 
+class CliTests(unittest.TestCase):
+    def test_defaults_to_edge_conversation(self) -> None:
+        args = tts_cn.build_parser().parse_args(["episode.md"])
+        self.assertEqual(args.tts, "edge")
+        self.assertEqual(args.style, "conversation")
+        self.assertIsNone(args.preview_paragraphs)
+
+    def test_accepts_qwen_documentary_preview(self) -> None:
+        args = tts_cn.build_parser().parse_args(
+            [
+                "episode.md",
+                "--tts",
+                "qwen3-api",
+                "--style",
+                "documentary",
+                "--preview-paragraphs",
+                "8",
+            ]
+        )
+        self.assertEqual(args.tts, "qwen3-api")
+        self.assertEqual(args.style, "documentary")
+        self.assertEqual(args.preview_paragraphs, 8)
+
+    def test_preview_slices_paragraphs_and_speaker_sequence_together(self) -> None:
+        cleaned = "第一段。\n\n第二段。\n\n第三段。"
+        rendered = tts_cn.apply_speaker_sequence(
+            cleaned,
+            ["主持人-女", "嘉宾-男", "主持人-女"],
+            preview_paragraphs=2,
+        )
+        self.assertIn("第一段", rendered)
+        self.assertIn("第二段", rendered)
+        self.assertNotIn("第三段", rendered)
+
+    def test_preview_validates_full_speaker_sequence_before_slicing(self) -> None:
+        cleaned = "第一段。\n\n第二段。\n\n第三段。"
+        with self.assertRaisesRegex(ValueError, "speaker 序列行数"):
+            tts_cn.apply_speaker_sequence(
+                cleaned,
+                ["主持人-女", "嘉宾-男"],
+                preview_paragraphs=2,
+            )
+
+
 class VoiceSlotTests(unittest.TestCase):
     def test_assigns_stable_semantic_slots_by_gender(self) -> None:
         assigned: dict[str, str] = {}

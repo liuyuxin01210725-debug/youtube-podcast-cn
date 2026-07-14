@@ -202,6 +202,36 @@ def drop_noise_paragraphs(paras: list[str]) -> list[str]:
     return out
 
 
+def apply_speaker_sequence(
+    cleaned: str,
+    sequence: list[str],
+    preview_paragraphs: int | None = None,
+) -> str:
+    """Validate speakers against the full text, then apply an optional preview."""
+    paras = drop_noise_paragraphs(split_into_paragraphs(cleaned))
+    if len(sequence) != len(paras):
+        raise ValueError(
+            f"speaker 序列行数 ({len(sequence)}) ≠ 段落数 ({len(paras)}),对不齐。\n"
+            "先跑  --dump-segments  确认段落数,序列文件必须每段正好一行。"
+        )
+
+    if preview_paragraphs is not None:
+        paras = paras[:preview_paragraphs]
+        sequence = sequence[:preview_paragraphs]
+    return "\n\n".join(
+        f"[{label}] {paragraph}"
+        for label, paragraph in zip(sequence, paras)
+    )
+
+
+def apply_preview_limit(cleaned: str, preview_paragraphs: int | None) -> str:
+    """Slice plain cleaned text by paragraph only when preview mode is active."""
+    if preview_paragraphs is None:
+        return cleaned
+    paras = drop_noise_paragraphs(split_into_paragraphs(cleaned))
+    return "\n\n".join(paras[:preview_paragraphs])
+
+
 # --------------------------------------------------------------------------
 # Speaker → voice 映射
 # --------------------------------------------------------------------------
@@ -329,8 +359,9 @@ async def synth_all(
 
     total = len(tasks)
     log(
-        f"合成 {total} 个片段(来自 {len(segments)} 段),"
-        f"并发 {backend.concurrency}, 重试 {RETRIES}..."
+        f"合成 {total} 个片段(来自 {len(segments)} 段) | "
+        f"后端 {backend.name} | 模型 {backend.model} | 风格 {style} | "
+        f"并发 {backend.concurrency} | 重试 {RETRIES}"
     )
 
     sem = asyncio.Semaphore(backend.concurrency)
@@ -496,6 +527,7 @@ async def run(
     speakers_file: Path | None = None,
     backend: TTSBackend | None = None,
     style: str = "conversation",
+    preview_paragraphs: int | None = None,
 ) -> None:
     start = time.time()
     backend = backend or build_backend("edge")
@@ -503,20 +535,24 @@ async def run(
     cleaned = strip_markdown(raw)
 
     if speakers_file is not None:
-        paras = drop_noise_paragraphs(split_into_paragraphs(cleaned))
         seq: list[str] = []
         for ln in speakers_file.read_text(encoding="utf-8").splitlines():
             ln = ln.strip()
             if not ln or ln.startswith("#"):
                 continue
             seq.append(ln.strip("[]").strip())
-        if len(seq) != len(paras):
-            sys.exit(
-                f"speaker 序列行数 ({len(seq)}) ≠ 段落数 ({len(paras)}),对不齐。\n"
-                f"先跑  --dump-segments  确认段落数,序列文件必须每段正好一行。"
+        try:
+            cleaned = apply_speaker_sequence(
+                cleaned,
+                seq,
+                preview_paragraphs=preview_paragraphs,
             )
-        cleaned = "\n\n".join(f"[{lab}] {p}" for lab, p in zip(seq, paras))
-        log(f"speaker 序列模式: {len(paras)} 段已贴标签")
+        except ValueError as exc:
+            sys.exit(str(exc))
+        selected_count = len(split_into_paragraphs(cleaned))
+        log(f"speaker 序列模式: {selected_count} 段已贴标签")
+    else:
+        cleaned = apply_preview_limit(cleaned, preview_paragraphs)
 
     segments = parse_segments(cleaned)
     if not segments:
@@ -577,6 +613,17 @@ async def run(
         f"失败 {stats['failed']}",
         f"重试成功 {stats['retried']}",
     ]
+    optional_totals = (
+        ("provider_calls", "服务调用"),
+        ("cached", "缓存命中"),
+        ("input_tokens", "输入 tokens"),
+        ("output_tokens", "输出 tokens"),
+        ("audio_tokens", "音频 tokens"),
+    )
+    for key, label in optional_totals:
+        value = stats.get(key, 0)
+        if value:
+            summary_parts.append(f"{label} {value}")
     if duration_s is not None:
         mm, ss = divmod(int(duration_s), 60)
         summary_parts.insert(0, f"音频时长 {mm}m{ss:02d}s")
@@ -585,8 +632,8 @@ async def run(
     log("  " + " | ".join(summary_parts))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="中文 transcript → mp3 (免费 EdgeTTS)")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="中文 transcript → mp3")
     parser.add_argument("input", help="中文 markdown 或 txt 文件路径")
     parser.add_argument("output", nargs="?", help=f"输出 mp3 路径 (默认 {DEFAULT_OUTPUT_DIR}/<同名>.mp3)")
     parser.add_argument(
@@ -597,7 +644,32 @@ def main() -> None:
         "--speakers", metavar="FILE",
         help="speaker 序列文件:每行一个标签([主持人-女]/[嘉宾-男]),与段落一一对应",
     )
+    parser.add_argument(
+        "--tts",
+        choices=("edge", "qwen3-api"),
+        default="edge",
+        help="语音后端: edge 免费稳定; qwen3-api 高质量且消耗百炼额度",
+    )
+    parser.add_argument(
+        "--style",
+        choices=("conversation", "documentary"),
+        default="conversation",
+        help="表达预设: conversation 访谈; documentary 知识讲解",
+    )
+    parser.add_argument(
+        "--preview-paragraphs",
+        type=int,
+        help="只合成清理后的前 N 段,用于短试听；不指定则合成全文",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
+
+    if args.preview_paragraphs is not None and args.preview_paragraphs <= 0:
+        parser.error("--preview-paragraphs 必须大于 0")
 
     in_path = Path(args.input).expanduser().resolve()
     if not in_path.exists():
@@ -628,13 +700,20 @@ def main() -> None:
         DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         out_path = DEFAULT_OUTPUT_DIR / (in_path.stem + ".mp3")
 
+    api_key = os.getenv("DASHSCOPE_API_KEY") if args.tts == "qwen3-api" else None
+    try:
+        backend = build_backend(args.tts, api_key=api_key)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     asyncio.run(
         run(
             in_path,
             out_path,
             speakers_file,
-            backend=build_backend("edge"),
-            style="conversation",
+            backend=backend,
+            style=args.style,
+            preview_paragraphs=args.preview_paragraphs,
         )
     )
 

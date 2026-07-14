@@ -71,6 +71,14 @@ class PublicPackageTests(unittest.TestCase):
         )
         self.assertIn("yt-dlp==2026.3.17", requirements)
 
+    def test_tts_wrapper_loads_qwen_key_only_for_qwen_backend(self) -> None:
+        wrapper = (ROOT / "bin/tts-cn.sh").read_text(encoding="utf-8")
+        self.assertIn("qwen3-api", wrapper)
+        self.assertIn("podcast-cn-qwen", wrapper)
+        self.assertIn("DASHSCOPE_API_KEY", wrapper)
+        self.assertIn("--dump-segments", wrapper)
+        self.assertNotIn("sk-", wrapper)
+
     def test_readme_documents_both_translation_providers(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("DeepSeek", readme)
