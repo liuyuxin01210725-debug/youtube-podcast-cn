@@ -1095,6 +1095,7 @@ class CommandLineTests(unittest.TestCase):
                 "pydub==0.25.1",
                 'audioop-lts==0.2.2; python_version >= "3.13"',
                 "yt-dlp==2026.3.17",
+                "dashscope==1.24.5",
             ],
         )
 
