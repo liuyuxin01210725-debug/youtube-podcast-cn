@@ -61,23 +61,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import edge_tts
 from pydub import AudioSegment
 
-# 兼容旧变量: VOICE_MALE/VOICE_FEMALE 优先作为 _1 的默认
-_LEGACY_MALE = os.getenv("VOICE_MALE")
-_LEGACY_FEMALE = os.getenv("VOICE_FEMALE")
+from tts_backends import SynthesisRequest, TTSBackend, build_backend
 
-VOICE_MALE_1 = os.getenv("VOICE_MALE_1", _LEGACY_MALE or "zh-CN-YunyangNeural")
-VOICE_MALE_2 = os.getenv("VOICE_MALE_2", "zh-CN-YunjianNeural")
-VOICE_FEMALE_1 = os.getenv("VOICE_FEMALE_1", _LEGACY_FEMALE or "zh-CN-XiaoxiaoNeural")
-VOICE_FEMALE_2 = os.getenv("VOICE_FEMALE_2", "zh-CN-XiaoyiNeural")
-VOICE_DEFAULT = os.getenv("VOICE_DEFAULT", VOICE_FEMALE_1)
-
-MALE_POOL = [VOICE_MALE_1, VOICE_MALE_2]
-FEMALE_POOL = [VOICE_FEMALE_1, VOICE_FEMALE_2]
-
-CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "8"))
 RETRIES = int(os.getenv("TTS_RETRIES", "3"))
 PAUSE_SAME_MS = int(os.getenv("PAUSE_SAME_MS", "200"))
 PAUSE_SWITCH_MS = int(os.getenv("PAUSE_SWITCH_MS", "500"))
@@ -219,7 +206,7 @@ def drop_noise_paragraphs(paras: list[str]) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-def voice_for_label(label: str, assigned: dict[str, str]) -> str:
+def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
     """
     根据标签决定声音。同一个标签字符串始终映射到同一个声音
     (即使同性别有多嘉宾, 也能保持一致)。
@@ -235,35 +222,35 @@ def voice_for_label(label: str, assigned: dict[str, str]) -> str:
         return assigned[label]
 
     if "男" in label:
-        used = sum(1 for v in assigned.values() if v in MALE_POOL)
-        voice = MALE_POOL[used % len(MALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("male_"))
+        voice_slot = ("male_1", "male_2")[used % 2]
     elif "女" in label:
-        used = sum(1 for v in assigned.values() if v in FEMALE_POOL)
-        voice = FEMALE_POOL[used % len(FEMALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("female_"))
+        voice_slot = ("female_1", "female_2")[used % 2]
     elif "主持" in label:
-        used = sum(1 for v in assigned.values() if v in FEMALE_POOL)
-        voice = FEMALE_POOL[used % len(FEMALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("female_"))
+        voice_slot = ("female_1", "female_2")[used % 2]
     else:
-        used = sum(1 for v in assigned.values() if v in MALE_POOL)
-        voice = MALE_POOL[used % len(MALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("male_"))
+        voice_slot = ("male_1", "male_2")[used % 2]
 
-    assigned[label] = voice
-    return voice
+    assigned[label] = voice_slot
+    return voice_slot
 
 
 def parse_segments(text: str) -> list[tuple[str, str]]:
     """返回 [(voice, text), ...] 按出现顺序。"""
     pattern = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
     segments: list[tuple[str, str]] = []
-    current_voice: str | None = None
+    current_voice_slot: str | None = None
     current_buf: list[str] = []
     assigned: dict[str, str] = {}
 
     def flush() -> None:
-        if current_voice and current_buf:
+        if current_voice_slot and current_buf:
             joined = " ".join(s.strip() for s in current_buf if s.strip())
             if joined:
-                segments.append((current_voice, joined))
+                segments.append((current_voice_slot, joined))
 
     for line in text.split("\n"):
         line = line.strip()
@@ -273,7 +260,7 @@ def parse_segments(text: str) -> list[tuple[str, str]]:
         if m:
             flush()
             label, rest = m.group(1), m.group(2).strip()
-            current_voice = voice_for_label(label, assigned)
+            current_voice_slot = voice_slot_for_label(label, assigned)
             current_buf = [rest] if rest else []
         else:
             current_buf.append(line)
@@ -282,7 +269,7 @@ def parse_segments(text: str) -> list[tuple[str, str]]:
     if not segments:
         cleaned = " ".join(s.strip() for s in text.split("\n") if s.strip())
         if cleaned:
-            segments = [(VOICE_DEFAULT, cleaned)]
+            segments = [("female_1", cleaned)]
     return segments
 
 
@@ -312,13 +299,11 @@ def chunk_long(text: str, max_chars: int = 2500) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-async def synth_one(text: str, voice: str, out: Path) -> None:
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(str(out))
-
-
 async def synth_all(
-    segments: list[tuple[str, str]], tmp: Path
+    segments: list[tuple[str, str]],
+    tmp: Path,
+    backend: TTSBackend,
+    style: str,
 ) -> tuple[list[tuple[Path, str]], dict]:
     """
     并行合成所有片段, 失败自动重试。
@@ -326,30 +311,46 @@ async def synth_all(
     """
     # 把每段拆成多个 part, 展平成 task list
     tasks: list[tuple[int, int, str, str, Path]] = []
-    for i, (voice, text) in enumerate(segments):
-        for j, part in enumerate(chunk_long(text)):
-            tasks.append((i, j, voice, part, tmp / f"seg-{i:04d}-{j:03d}.mp3"))
+    for i, (voice_slot, text) in enumerate(segments):
+        for j, part in enumerate(chunk_long(text, max_chars=backend.max_chars)):
+            tasks.append(
+                (
+                    i,
+                    j,
+                    voice_slot,
+                    part,
+                    tmp / f"seg-{i:04d}-{j:03d}{backend.file_suffix}",
+                )
+            )
 
     total = len(tasks)
-    log(f"合成 {total} 个片段(来自 {len(segments)} 段),并发 {CONCURRENCY}, 重试 {RETRIES}...")
+    log(
+        f"合成 {total} 个片段(来自 {len(segments)} 段),"
+        f"并发 {backend.concurrency}, 重试 {RETRIES}..."
+    )
 
-    sem = asyncio.Semaphore(CONCURRENCY)
+    sem = asyncio.Semaphore(backend.concurrency)
     stats = {"total": total, "ok": 0, "failed": 0, "retried": 0}
     progress_lock = asyncio.Lock()
 
-    async def worker(seg_i: int, part_j: int, voice: str, text: str, out: Path):
+    async def worker(
+        seg_i: int, part_j: int, voice_slot: str, text: str, out: Path
+    ):
         async with sem:
             last_err: Exception | None = None
             for attempt in range(RETRIES):
                 try:
-                    await synth_one(text, voice, out)
+                    request = SynthesisRequest(
+                        text=text, voice_slot=voice_slot, style=style
+                    )
+                    await backend.synthesize(request, out)
                     async with progress_lock:
                         stats["ok"] += 1
                         if attempt > 0:
                             stats["retried"] += 1
                         if stats["ok"] % 20 == 0 or stats["ok"] == total:
                             log(f"  进度 {stats['ok']}/{total}")
-                    return (out, voice)
+                    return (out, voice_slot)
                 except Exception as e:
                     last_err = e
                     if attempt < RETRIES - 1:
@@ -361,7 +362,7 @@ async def synth_all(
             return None
 
     results = await asyncio.gather(
-        *[worker(i, j, v, t, p) for i, j, v, t, p in tasks]
+        *[worker(i, j, slot, text, path) for i, j, slot, text, path in tasks]
     )
     successful = [r for r in results if r is not None]
     return successful, stats
@@ -393,7 +394,7 @@ def merge(files_with_voices: list[tuple[Path, str]], out: Path) -> None:
     prev_voice: str | None = None
     for f, voice in files_with_voices:
         try:
-            seg = AudioSegment.from_mp3(f)
+            seg = AudioSegment.from_file(f)
         except Exception as e:
             raise RuntimeError(f"音频片段无法解码:{f.name}: {e}") from e
         if prev_voice is None:
@@ -443,9 +444,14 @@ def fix_mp3_header(mp3: Path) -> None:
 
 
 async def run(
-    input_path: Path, output_path: Path, speakers_file: Path | None = None
+    input_path: Path,
+    output_path: Path,
+    speakers_file: Path | None = None,
+    backend: TTSBackend | None = None,
+    style: str = "conversation",
 ) -> None:
     start = time.time()
+    backend = backend or build_backend("edge")
     raw = input_path.read_text(encoding="utf-8")
     cleaned = strip_markdown(raw)
 
@@ -473,7 +479,9 @@ async def run(
 
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
-        files_with_voices, stats = await synth_all(segments, tmp)
+        files_with_voices, stats = await synth_all(
+            segments, tmp, backend=backend, style=style
+        )
         ensure_all_synthesized(stats)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -564,7 +572,15 @@ def main() -> None:
         DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         out_path = DEFAULT_OUTPUT_DIR / (in_path.stem + ".mp3")
 
-    asyncio.run(run(in_path, out_path, speakers_file))
+    asyncio.run(
+        run(
+            in_path,
+            out_path,
+            speakers_file,
+            backend=build_backend("edge"),
+            style="conversation",
+        )
+    )
 
 
 if __name__ == "__main__":

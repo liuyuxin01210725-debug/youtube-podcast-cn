@@ -14,6 +14,9 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
 
 def load_tts_module():
@@ -33,6 +36,28 @@ def load_tts_module():
 
 
 tts_cn = load_tts_module()
+
+
+class VoiceSlotTests(unittest.TestCase):
+    def test_assigns_stable_semantic_slots_by_gender(self) -> None:
+        assigned: dict[str, str] = {}
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("主持人-女", assigned), "female_1"
+        )
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("嘉宾甲-男", assigned), "male_1"
+        )
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("嘉宾乙-男", assigned), "male_2"
+        )
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("主持人-女", assigned), "female_1"
+        )
+
+    def test_plain_text_uses_female_one_slot(self) -> None:
+        self.assertEqual(
+            tts_cn.parse_segments("这是纯文本。"), [("female_1", "这是纯文本。")]
+        )
 
 
 class NoiseParagraphTests(unittest.TestCase):
@@ -105,7 +130,7 @@ class OutputIntegrityTests(unittest.TestCase):
                 return FakeSegment()
 
             @staticmethod
-            def from_mp3(path):
+            def from_file(path):
                 raise ValueError("corrupt mp3")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -123,7 +148,7 @@ class OutputIntegrityTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_run_rejects_partial_synthesis_before_merge(self) -> None:
-        async def fake_synth_all(segments, tmp):
+        async def fake_synth_all(segments, tmp, *, backend, style):
             return [(tmp / "seg.mp3", "voice")], {
                 "failed": 1,
                 "ok": 1,
@@ -149,7 +174,7 @@ class OutputIntegrityTests(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b"old audio")
 
     def test_run_merges_to_temporary_file_before_publishing(self) -> None:
-        async def fake_synth_all(segments, tmp):
+        async def fake_synth_all(segments, tmp, *, backend, style):
             return [(tmp / "seg.mp3", "voice")], {
                 "failed": 0,
                 "ok": 1,
