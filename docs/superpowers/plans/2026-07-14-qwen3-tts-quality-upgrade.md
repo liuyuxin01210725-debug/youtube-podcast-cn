@@ -1182,8 +1182,8 @@ git commit -m "docs: explain Qwen TTS quality mode"
 
 **Files:**
 - Verify: all tracked files
-- Runtime only, never commit: `/Users/liuyuxin/Desktop/音频/Qwen3音质对比/`
-- Source only, never modify or commit: three existing private transcripts under `/Users/liuyuxin/Desktop/音频/`
+- Runtime only, never commit: `$HOME/Desktop/音频/Qwen3音质对比/`
+- Source only, never modify or commit: three existing private transcripts under `$HOME/Desktop/音频/`
 
 **Interfaces:**
 - Consumes: the complete CLI and cache from Tasks 1-5.
@@ -1220,13 +1220,13 @@ This presence check does not prove that the stored key was rotated. Before conti
 Run:
 
 ```bash
-mkdir -p "/Users/liuyuxin/Desktop/音频/Qwen3音质对比"
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/健康日常的科学公式.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/冒烟测试.mp3" \
+mkdir -p "$HOME/Desktop/音频/Qwen3音质对比"
+bash bin/tts-cn.sh "$HOME/Desktop/音频/健康日常的科学公式.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/冒烟测试.mp3" \
   --tts qwen3-api --style documentary --preview-paragraphs 2
 ffprobe -v error -show_entries format=duration \
   -of default=noprint_wrappers=1:nokey=1 \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/冒烟测试.mp3"
+  "$HOME/Desktop/音频/Qwen3音质对比/冒烟测试.mp3"
 ```
 
 Expected: Qwen reports zero failed fragments; `ffprobe` prints a positive duration; the log contains no key or signed URL.
@@ -1244,37 +1244,37 @@ Use 10 preview paragraphs for each source so both providers receive identical cl
 Pair 1, two-person business interview:
 
 ```bash
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/2026企业AI现状-Aaron Levie访谈.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/企业AI-edge.mp3" \
-  --speakers "/Users/liuyuxin/Desktop/音频/2026企业AI现状-Aaron Levie访谈.speakers.txt" \
+bash bin/tts-cn.sh "$HOME/Desktop/音频/2026企业AI现状-Aaron Levie访谈.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/企业AI-edge.mp3" \
+  --speakers "$HOME/Desktop/音频/2026企业AI现状-Aaron Levie访谈.speakers.txt" \
   --tts edge --style conversation --preview-paragraphs 10
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/2026企业AI现状-Aaron Levie访谈.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/企业AI-qwen.mp3" \
-  --speakers "/Users/liuyuxin/Desktop/音频/2026企业AI现状-Aaron Levie访谈.speakers.txt" \
+bash bin/tts-cn.sh "$HOME/Desktop/音频/2026企业AI现状-Aaron Levie访谈.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/企业AI-qwen.mp3" \
+  --speakers "$HOME/Desktop/音频/2026企业AI现状-Aaron Levie访谈.speakers.txt" \
   --tts qwen3-api --style conversation --preview-paragraphs 10
 ```
 
 Pair 2, technical interview with English proper nouns:
 
 ```bash
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/Gemini技术访谈-edge.mp3" \
-  --speakers "/Users/liuyuxin/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.speakers.txt" \
+bash bin/tts-cn.sh "$HOME/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/Gemini技术访谈-edge.mp3" \
+  --speakers "$HOME/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.speakers.txt" \
   --tts edge --style conversation --preview-paragraphs 10
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/Gemini技术访谈-qwen.mp3" \
-  --speakers "/Users/liuyuxin/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.speakers.txt" \
+bash bin/tts-cn.sh "$HOME/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/Gemini技术访谈-qwen.mp3" \
+  --speakers "$HOME/Desktop/音频/Gemini联席负责人谈世界模型与强化学习.speakers.txt" \
   --tts qwen3-api --style conversation --preview-paragraphs 10
 ```
 
 Pair 3, single-narrator knowledge explanation:
 
 ```bash
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/健康日常的科学公式.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/健康知识-edge.mp3" \
+bash bin/tts-cn.sh "$HOME/Desktop/音频/健康日常的科学公式.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/健康知识-edge.mp3" \
   --tts edge --style documentary --preview-paragraphs 10
-bash bin/tts-cn.sh "/Users/liuyuxin/Desktop/音频/健康日常的科学公式.md" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/健康知识-qwen.mp3" \
+bash bin/tts-cn.sh "$HOME/Desktop/音频/健康日常的科学公式.md" \
+  "$HOME/Desktop/音频/Qwen3音质对比/健康知识-qwen.mp3" \
   --tts qwen3-api --style documentary --preview-paragraphs 10
 ```
 
@@ -1285,18 +1285,18 @@ Expected: six complete MP3 files, no failed fragments, and each matched pair has
 Before sharing, make neutral copies with a different provider position across samples:
 
 ```bash
-cp "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/企业AI-qwen.mp3" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/样本1-A.mp3"
-cp "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/企业AI-edge.mp3" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/样本1-B.mp3"
-cp "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/Gemini技术访谈-edge.mp3" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/样本2-A.mp3"
-cp "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/Gemini技术访谈-qwen.mp3" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/样本2-B.mp3"
-cp "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/健康知识-qwen.mp3" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/样本3-A.mp3"
-cp "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/健康知识-edge.mp3" \
-  "/Users/liuyuxin/Desktop/音频/Qwen3音质对比/样本3-B.mp3"
+cp "$HOME/Desktop/音频/Qwen3音质对比/企业AI-qwen.mp3" \
+  "$HOME/Desktop/音频/Qwen3音质对比/样本1-A.mp3"
+cp "$HOME/Desktop/音频/Qwen3音质对比/企业AI-edge.mp3" \
+  "$HOME/Desktop/音频/Qwen3音质对比/样本1-B.mp3"
+cp "$HOME/Desktop/音频/Qwen3音质对比/Gemini技术访谈-edge.mp3" \
+  "$HOME/Desktop/音频/Qwen3音质对比/样本2-A.mp3"
+cp "$HOME/Desktop/音频/Qwen3音质对比/Gemini技术访谈-qwen.mp3" \
+  "$HOME/Desktop/音频/Qwen3音质对比/样本2-B.mp3"
+cp "$HOME/Desktop/音频/Qwen3音质对比/健康知识-qwen.mp3" \
+  "$HOME/Desktop/音频/Qwen3音质对比/样本3-A.mp3"
+cp "$HOME/Desktop/音频/Qwen3音质对比/健康知识-edge.mp3" \
+  "$HOME/Desktop/音频/Qwen3音质对比/样本3-B.mp3"
 ```
 
 Keep the provider mapping out of the user-facing message until the user chooses.
