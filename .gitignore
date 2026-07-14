@@ -1,0 +1,15 @@
+.DS_Store
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+.env
+.env.*
+*.key
+*.pem
+
+.podcast-jobs/
+*.mp3
+*.segments.txt
+*.speakers.txt
