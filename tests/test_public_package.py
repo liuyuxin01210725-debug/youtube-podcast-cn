@@ -79,6 +79,22 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("--dump-segments", wrapper)
         self.assertNotIn("sk-", wrapper)
 
+    def test_readme_documents_qwen_tts_without_changing_default(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("--tts qwen3-api", readme)
+        self.assertIn("--tts edge", readme)
+        self.assertIn("EdgeTTS 仍是默认", readme)
+        self.assertIn(".tts-cache", readme)
+
+    def test_skill_distinguishes_translation_provider_from_tts_backend(self) -> None:
+        skill = (ROOT / "skills/podcast-translate/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("--provider qwen", skill)
+        self.assertIn("--tts qwen3-api", skill)
+        self.assertIn("千问翻译", skill)
+        self.assertIn("千问语音", skill)
+
     def test_readme_documents_both_translation_providers(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("DeepSeek", readme)

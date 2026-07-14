@@ -1,11 +1,20 @@
 ---
 name: podcast-translate
-description: "Use when the user wants to turn a YouTube English podcast or video into Chinese audio with DeepSeek or Qwen, or synthesize an existing Chinese transcript into MP3. Trigger on: 把英文播客翻成中文, 转成中文 podcast, 英文音频翻译, podcast 翻译, 转中文音频, 用通义千问翻译这个播客, 把这个 YouTube 视频做成中文音频, 把中文逐字稿转成音频, translate this podcast."
+description: "Use when the user wants to turn a YouTube English podcast or video into Chinese audio, synthesize an existing Chinese transcript into MP3, or explicitly requests Qwen3-TTS or high-quality Chinese speech. Trigger on: 把英文播客翻成中文, 转成中文 podcast, 英文音频翻译, podcast 翻译, 转中文音频, 千问翻译, 千问语音, Qwen3-TTS, 高质量音质, 把这个 YouTube 视频做成中文音频, 把中文逐字稿转成音频, translate this podcast."
 ---
 
 # podcast-translate: YouTube URL / 中文稿 → 中文 mp3
 
-YouTube URL 是默认主线:自动抓英文字幕 → DeepSeek / 通义千问翻译 → speaker 判断 → EdgeTTS 合成。默认使用 DeepSeek；用户明确说“通义千问”“千问”或“Qwen”时使用千问。URL 翻译需要所选模型的 API Key；已有中文稿只做 TTS 时不需要翻译 API。
+YouTube URL 是默认主线:自动抓英文字幕 → DeepSeek / 通义千问翻译 → speaker 判断 → EdgeTTS / 千问语音合成。翻译默认 DeepSeek，语音默认 Edge。**千问翻译**和**千问语音**是两个独立选择，不能因为用户只提到其中一个就同时切换两段流程。
+
+| 用户表达 | 翻译选择 | 语音选择 |
+|---|---|---|
+| 未指定模型 | DeepSeek | Edge（默认） |
+| “用千问翻译”“用千问把这个播客翻成中文” | `--provider qwen` | Edge |
+| “千问语音”“Qwen3-TTS”“高质量音质”“用千问合成声音” | DeepSeek（URL 默认） | `--tts qwen3-api` |
+| 明确要求千问翻译并用千问语音 | `--provider qwen` | `--tts qwen3-api` |
+
+URL 翻译需要所选翻译模型的 API Key；已有中文稿只做 Edge TTS 时不需要 API，使用千问语音时需要百炼 Key 并消耗用户额度。
 
 **核心设计(2026-07)**:Agent **不重写、不长篇翻译、不清理** transcript 正文。翻译模型按稳定字幕 ID 分批翻译并落盘，Agent 只判断每段是谁说的；文本清理交给 Python。任何翻译缺段或 TTS 片段失败都会中止，不发布残缺 MP3。翻译缓存同时绑定供应商、模型和接口地址，切换模型不会误用旧稿。
 
@@ -62,13 +71,13 @@ YouTube URL 是默认主线:自动抓英文字幕 → DeepSeek / 通义千问翻
 bash "__PODCAST_TRANSLATE_ROOT__/bin/podcast-cn.sh" "$YOUTUBE_URL"
 ```
 
-用户明确提到“通义千问”“千问”或“Qwen”时，必须选择千问:
+用户明确要求“千问翻译”或“用千问把播客翻成中文”时，选择千问翻译:
 
 ```bash
 bash "__PODCAST_TRANSLATE_ROOT__/bin/podcast-cn.sh" "$YOUTUBE_URL" --provider qwen
 ```
 
-当前只支持 DeepSeek 和通义千问。用户要求 Kimi、豆包、MiniMax、智谱或其他平台时，说明尚未加入该预设；不要偷偷映射到 DeepSeek 或千问，也不要把任意接口地址当成已验证平台。
+这里的 `--provider` 只控制翻译，不控制语音。当前只支持 DeepSeek 和通义千问这两种翻译供应商。用户要求 Kimi、豆包、MiniMax、智谱或其他平台时，说明尚未加入该预设；不要偷偷映射到 DeepSeek 或千问，也不要把任意接口地址当成已验证平台。
 
 脚本只抓字幕、不下载视频或原音频。它优先人工英文字幕，没有时才用英文自动字幕。成功时 stdout 只有两行:`英文标题:` 和 `中文字幕:`。记住第二行的中文稿路径。
 
@@ -80,17 +89,17 @@ DeepSeek（环境变量 `DEEPSEEK_API_KEY`）:
 bash "__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-model.sh" deepseek
 ```
 
-通义千问（环境变量 `DASHSCOPE_API_KEY`）:
+通义千问翻译或千问语音（共用环境变量 `DASHSCOPE_API_KEY`）:
 
 ```bash
 bash "__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-model.sh" qwen
 ```
 
-Key 会进入各自的 macOS 钥匙串，后续 `podcast-cn.sh` 自动读取。**不要让用户把任何翻译 API Key 粘贴到对话、稿件、文件或命令参数里**。如果网络或翻译中断，修复原因后原命令重跑，同一视频会从 `~/Desktop/音频/.podcast-jobs/$VIDEO_ID/` 的已完成批次继续。
+Key 会进入各自的 macOS 钥匙串，后续翻译或 TTS 脚本按需自动读取。**不要让用户把任何翻译 API Key 或 TTS API Key 粘贴到对话、稿件、文件或命令参数里**。如果网络或翻译中断，修复原因后原命令重跑，同一视频会从 `~/Desktop/音频/.podcast-jobs/$VIDEO_ID/` 的已完成批次继续。
 
 ### U2. 接入 speaker 与 TTS
 
-把 U1 输出的 `中文字幕:` 路径作为“原始逐字稿路径”，继续执行下面路径 A 的第 1-6 步。读稿仍然每次最多 250 行。内部 `<!-- seg-000001 -->` 注释用于缺段核对，复制时保留即可，TTS 会自动剥除，不能把它当作正文或 speaker 段。
+把 U1 输出的 `中文字幕:` 路径作为“原始逐字稿路径”，继续执行下面路径 A 的第 1-6 步。读稿仍然每次最多 250 行。内部 `<!-- seg-000001 -->` 注释用于缺段核对，复制时保留即可，TTS 会自动剥除，不能把它当作正文或 speaker 段。用户若明确选择了千问语音，在第 5 步使用对应的 `--tts qwen3-api` 命令；否则继续默认 Edge。
 
 ---
 
@@ -157,11 +166,34 @@ wc -l "$HOME/Desktop/音频/<中文标题>.speakers.txt"
 
 ### 第 5 步:跑 TTS
 
+默认免费稳定模式（Edge）:
+
 ```bash
-bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标题>.md" --speakers "$HOME/Desktop/音频/<中文标题>.speakers.txt"
+bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标题>.md" \
+  --speakers "$HOME/Desktop/音频/<中文标题>.speakers.txt" --tts edge
 ```
 
-用 `run_in_background: true` 跑,然后用 Monitor 看进度,不要阻塞。脚本自动:清理文本 → 按序列贴标签 → EdgeTTS 合成 → pydub 拼接 → ffmpeg 修 mp3 header → 输出 `<中文标题>.mp3`。
+只有用户明确说“千问语音”“Qwen3-TTS”“高质量音质”或“用千问合成声音”时，使用高质量模式:
+
+```bash
+bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标题>.md" \
+  --speakers "$HOME/Desktop/音频/<中文标题>.speakers.txt" \
+  --tts qwen3-api --style conversation
+```
+
+文章、论文或单人知识讲解的千问语音使用 `--style documentary`。用 `run_in_background: true` 跑,然后用 Monitor 看进度,不要阻塞。脚本自动:清理文本 → 按序列贴标签 → 语音合成 → pydub 拼接 → ffmpeg 修 mp3 header → 输出 `<中文标题>.mp3`。
+
+成功片段会缓存到输出目录的 `.tts-cache/` 并在重跑时复用。删除缓存是安全的，但千问语音会重新合成并再次消耗额度。只要有片段缺失、为空或无法解码，脚本就不会发布或覆盖最终 MP3。
+
+### 内部 A/B 试听（仅验证音质时）
+
+`--preview-paragraphs N` 只用于短试听和 Edge/Qwen A/B，不加入正常全量流程。两边必须使用同一份稿件、speaker 文件、段数和 style，例如:
+
+```bash
+bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标题>.md" \
+  --speakers "$HOME/Desktop/音频/<中文标题>.speakers.txt" \
+  --tts qwen3-api --style conversation --preview-paragraphs 10
+```
 
 ### 第 6 步:报告
 
@@ -250,6 +282,8 @@ bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标
 | `VOICE_FEMALE_2` | `zh-CN-XiaoyiNeural` | 女声 B(温暖) |
 | `VOICE_DEFAULT` | `= VOICE_FEMALE_1` | 无 speaker 标记时用 |
 
+千问语音可用 `QWEN_TTS_MODEL`、`QWEN_TTS_BASE_URL`、`QWEN_TTS_CONCURRENCY` 和 `QWEN_TTS_VOICE_MALE_1` 等变量覆盖默认配置；只在用户明确要求调整时使用。
+
 `TTS_CONCURRENCY`(默认 8)、`TTS_RETRIES`(默认 3)、`PAUSE_SAME_MS`(200)、`PAUSE_SWITCH_MS`(500)。
 
 如果用户事后发现"性别反了"想临时翻转,不用改 `.speakers.txt`,直接换环境变量跑第 5 步:
@@ -271,8 +305,10 @@ VOICE_MALE_1=zh-CN-XiaoxiaoNeural VOICE_FEMALE_1=zh-CN-YunyangNeural \
 - `__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-qwen.sh` — 通义千问初始化快捷入口
 - `__PODCAST_TRANSLATE_ROOT__/scripts/podcast_cn.py` — 字幕抓取、VTT 解析、多模型分批翻译和断点续跑
 - `__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh` — bash 入口(参数透传给 python)
-- `__PODCAST_TRANSLATE_ROOT__/scripts/tts-cn.py` — 核心脚本(`--dump-segments` / `--speakers` 两个模式)
-- `__PODCAST_TRANSLATE_ROOT__/.venv/` — 项目 Python 隔离环境(edge-tts + pydub + audioop-lts + yt-dlp)
+- `__PODCAST_TRANSLATE_ROOT__/scripts/tts-cn.py` — 核心脚本(`--dump-segments` / `--speakers` / `--tts`)
+- `__PODCAST_TRANSLATE_ROOT__/scripts/tts_backends.py` — Edge 与 Qwen3-TTS 后端
+- `__PODCAST_TRANSLATE_ROOT__/scripts/tts_cache.py` — 可解码音频片段缓存
+- `__PODCAST_TRANSLATE_ROOT__/.venv/` — 项目 Python 隔离环境(edge-tts + DashScope + pydub + audioop-lts + yt-dlp)
 - `~/Desktop/音频/` — 所有输出统一在这里
 
 ---
@@ -338,7 +374,7 @@ VOICE_MALE_1=zh-CN-XiaoxiaoNeural VOICE_FEMALE_1=zh-CN-YunyangNeural \
 - ❌ 序列文件行数 ≠ dump 出的段数 N —— Write 后必须 `wc -l` 自检,脚本也会报错
 - ❌ 本地英文文件不要让 Agent 硬翻；YouTube URL 必须走自动路径 U
 - ❌ 不要用浏览器自动操作沉浸式翻译，也不要调用它的非公开 API
-- ❌ 不要把任何翻译 API Key（包括 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`）写进稿件、任务状态、日志或命令参数
+- ❌ 不要把任何翻译或 TTS API Key（包括 `DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`）写进稿件、任务状态、日志或命令参数
 - ❌ 不要修改用户其他项目的规则或资料文件(工具归工具,资料归资料)
 - ❌ 不要把 md / mp3 输出到 `raw/` 或 `wiki/`
 - ❌ 不要问用户"放哪个目录" —— 默认就 `~/Desktop/音频/`

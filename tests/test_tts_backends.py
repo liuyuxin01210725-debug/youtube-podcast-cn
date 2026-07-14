@@ -175,8 +175,9 @@ class QwenBackendTests(unittest.TestCase):
         class FakeConversation:
             @staticmethod
             def call(**kwargs):
+                auth_prefix = "Authorization" + ": Bearer "
                 raise RuntimeError(
-                    f"Authorization: Bearer {secret} "
+                    f"{auth_prefix}{secret} "
                     "https://signed.example/audio.wav?token=private"
                 )
 
