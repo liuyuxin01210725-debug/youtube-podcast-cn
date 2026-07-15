@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "backend": "sherpa-onnx",
+  "sherpa_onnx_version": "1.13.2",
+  "model_bundle": "pyannote-3.0_3dspeaker-eres2net-base_v1",
+  "assets": [
+    {
+      "name": "segmentation",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
+      "archive_member": null,
+      "target": "segmentation.onnx",
+      "target_sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+      "license": "MIT",
+      "license_url": "https://huggingface.co/pyannote/segmentation-3.0"
+    },
+    {
+      "name": "embedding",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
+      "archive_member": null,
+      "target": "embedding.onnx",
+      "target_sha256": "1a331345f04805badbb495c775a6ddffcdd1a732567d5ec8b3d5749e3c7a5e4b",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/modelscope/3D-Speaker/blob/main/LICENSE"
+    }
+  ]
+}

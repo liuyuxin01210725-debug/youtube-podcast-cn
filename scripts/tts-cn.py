@@ -61,23 +61,16 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-import edge_tts
 from pydub import AudioSegment
 
-# 兼容旧变量: VOICE_MALE/VOICE_FEMALE 优先作为 _1 的默认
-_LEGACY_MALE = os.getenv("VOICE_MALE")
-_LEGACY_FEMALE = os.getenv("VOICE_FEMALE")
+from tts_backends import (
+    SynthesisRequest,
+    TTSBackend,
+    TTSBackendError,
+    build_backend,
+)
+from tts_cache import FragmentCache
 
-VOICE_MALE_1 = os.getenv("VOICE_MALE_1", _LEGACY_MALE or "zh-CN-YunyangNeural")
-VOICE_MALE_2 = os.getenv("VOICE_MALE_2", "zh-CN-YunjianNeural")
-VOICE_FEMALE_1 = os.getenv("VOICE_FEMALE_1", _LEGACY_FEMALE or "zh-CN-XiaoxiaoNeural")
-VOICE_FEMALE_2 = os.getenv("VOICE_FEMALE_2", "zh-CN-XiaoyiNeural")
-VOICE_DEFAULT = os.getenv("VOICE_DEFAULT", VOICE_FEMALE_1)
-
-MALE_POOL = [VOICE_MALE_1, VOICE_MALE_2]
-FEMALE_POOL = [VOICE_FEMALE_1, VOICE_FEMALE_2]
-
-CONCURRENCY = int(os.getenv("TTS_CONCURRENCY", "8"))
 RETRIES = int(os.getenv("TTS_RETRIES", "3"))
 PAUSE_SAME_MS = int(os.getenv("PAUSE_SAME_MS", "200"))
 PAUSE_SWITCH_MS = int(os.getenv("PAUSE_SWITCH_MS", "500"))
@@ -214,56 +207,96 @@ def drop_noise_paragraphs(paras: list[str]) -> list[str]:
     return out
 
 
+def apply_speaker_sequence(
+    cleaned: str,
+    sequence: list[str],
+    preview_paragraphs: int | None = None,
+) -> str:
+    """Validate speakers against the full text, then apply an optional preview."""
+    paras = drop_noise_paragraphs(split_into_paragraphs(cleaned))
+    if len(sequence) != len(paras):
+        raise ValueError(
+            f"speaker 序列行数 ({len(sequence)}) ≠ 段落数 ({len(paras)}),对不齐。\n"
+            "先跑  --dump-segments  确认段落数,序列文件必须每段正好一行。"
+        )
+
+    if preview_paragraphs is not None:
+        paras = paras[:preview_paragraphs]
+        sequence = sequence[:preview_paragraphs]
+    return "\n\n".join(
+        f"[{label}] {paragraph}"
+        for label, paragraph in zip(sequence, paras)
+    )
+
+
+def apply_preview_limit(cleaned: str, preview_paragraphs: int | None) -> str:
+    """Slice plain cleaned text by paragraph only when preview mode is active."""
+    if preview_paragraphs is None:
+        return cleaned
+    paras = drop_noise_paragraphs(split_into_paragraphs(cleaned))
+    return "\n\n".join(paras[:preview_paragraphs])
+
+
 # --------------------------------------------------------------------------
 # Speaker → voice 映射
 # --------------------------------------------------------------------------
 
 
-def voice_for_label(label: str, assigned: dict[str, str]) -> str:
+_EXPLICIT_VOICE_SLOT = re.compile(
+    r"(?:^|[-_])(?P<gender>男|女)声(?P<number>[12])$"
+)
+
+
+def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
     """
     根据标签决定声音。同一个标签字符串始终映射到同一个声音
     (即使同性别有多嘉宾, 也能保持一致)。
 
     判断顺序:
       1. 已经分配过这个标签 → 复用
-      2. 标签含 "男" → 男声池里轮换取一个
-      3. 标签含 "女" → 女声池里轮换取一个
-      4. 标签含 "主持" → 女声 (默认)
-      5. 兜底 → 男声
+      2. 标签以 "男声1/2" 或 "女声1/2" 结尾 → 指定音色
+      3. 标签含 "男" → 男声池里轮换取一个
+      4. 标签含 "女" → 女声池里轮换取一个
+      5. 标签含 "主持" → 女声 (默认)
+      6. 兜底 → 男声
     """
     if label in assigned:
         return assigned[label]
 
-    if "男" in label:
-        used = sum(1 for v in assigned.values() if v in MALE_POOL)
-        voice = MALE_POOL[used % len(MALE_POOL)]
+    explicit = _EXPLICIT_VOICE_SLOT.search(label)
+    if explicit:
+        prefix = "male" if explicit.group("gender") == "男" else "female"
+        voice_slot = f"{prefix}_{explicit.group('number')}"
+    elif "男" in label:
+        used = sum(1 for value in assigned.values() if value.startswith("male_"))
+        voice_slot = ("male_1", "male_2")[used % 2]
     elif "女" in label:
-        used = sum(1 for v in assigned.values() if v in FEMALE_POOL)
-        voice = FEMALE_POOL[used % len(FEMALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("female_"))
+        voice_slot = ("female_1", "female_2")[used % 2]
     elif "主持" in label:
-        used = sum(1 for v in assigned.values() if v in FEMALE_POOL)
-        voice = FEMALE_POOL[used % len(FEMALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("female_"))
+        voice_slot = ("female_1", "female_2")[used % 2]
     else:
-        used = sum(1 for v in assigned.values() if v in MALE_POOL)
-        voice = MALE_POOL[used % len(MALE_POOL)]
+        used = sum(1 for value in assigned.values() if value.startswith("male_"))
+        voice_slot = ("male_1", "male_2")[used % 2]
 
-    assigned[label] = voice
-    return voice
+    assigned[label] = voice_slot
+    return voice_slot
 
 
 def parse_segments(text: str) -> list[tuple[str, str]]:
     """返回 [(voice, text), ...] 按出现顺序。"""
     pattern = re.compile(r"^\[([^\]]+)\]\s*(.*)$")
     segments: list[tuple[str, str]] = []
-    current_voice: str | None = None
+    current_voice_slot: str | None = None
     current_buf: list[str] = []
     assigned: dict[str, str] = {}
 
     def flush() -> None:
-        if current_voice and current_buf:
+        if current_voice_slot and current_buf:
             joined = " ".join(s.strip() for s in current_buf if s.strip())
             if joined:
-                segments.append((current_voice, joined))
+                segments.append((current_voice_slot, joined))
 
     for line in text.split("\n"):
         line = line.strip()
@@ -273,7 +306,7 @@ def parse_segments(text: str) -> list[tuple[str, str]]:
         if m:
             flush()
             label, rest = m.group(1), m.group(2).strip()
-            current_voice = voice_for_label(label, assigned)
+            current_voice_slot = voice_slot_for_label(label, assigned)
             current_buf = [rest] if rest else []
         else:
             current_buf.append(line)
@@ -282,26 +315,31 @@ def parse_segments(text: str) -> list[tuple[str, str]]:
     if not segments:
         cleaned = " ".join(s.strip() for s in text.split("\n") if s.strip())
         if cleaned:
-            segments = [(VOICE_DEFAULT, cleaned)]
+            segments = [("default", cleaned)]
     return segments
 
 
 def chunk_long(text: str, max_chars: int = 2500) -> list[str]:
     """超长段按句号/问号/感叹号切片。"""
+    if max_chars <= 0:
+        raise ValueError("max_chars 必须大于 0")
+    if not text:
+        return []
     if len(text) <= max_chars:
         return [text]
     pieces = re.split(r"(?<=[。!?\!\?])", text)
     out: list[str] = []
     cur = ""
     for p in pieces:
-        if not p.strip():
+        if not p:
             continue
-        if len(cur) + len(p) <= max_chars:
-            cur += p
-        else:
-            if cur:
-                out.append(cur)
-            cur = p
+        if cur and len(cur) + len(p) > max_chars:
+            out.append(cur)
+            cur = ""
+        while len(p) > max_chars:
+            out.append(p[:max_chars])
+            p = p[max_chars:]
+        cur += p
     if cur:
         out.append(cur)
     return out
@@ -312,56 +350,109 @@ def chunk_long(text: str, max_chars: int = 2500) -> list[str]:
 # --------------------------------------------------------------------------
 
 
-async def synth_one(text: str, voice: str, out: Path) -> None:
-    communicate = edge_tts.Communicate(text, voice)
-    await communicate.save(str(out))
-
-
 async def synth_all(
-    segments: list[tuple[str, str]], tmp: Path
+    segments: list[tuple[str, str]],
+    tmp: Path,
+    backend: TTSBackend,
+    style: str,
+    cache: FragmentCache,
 ) -> tuple[list[tuple[Path, str]], dict]:
     """
     并行合成所有片段, 失败自动重试。
     返回 ([(file_path, voice), ...] 按原序, stats)
     """
+    tmp.mkdir(parents=True, exist_ok=True)
+
     # 把每段拆成多个 part, 展平成 task list
     tasks: list[tuple[int, int, str, str, Path]] = []
-    for i, (voice, text) in enumerate(segments):
-        for j, part in enumerate(chunk_long(text)):
-            tasks.append((i, j, voice, part, tmp / f"seg-{i:04d}-{j:03d}.mp3"))
+    for i, (voice_slot, text) in enumerate(segments):
+        for j, part in enumerate(chunk_long(text, max_chars=backend.max_chars)):
+            tasks.append(
+                (
+                    i,
+                    j,
+                    voice_slot,
+                    part,
+                    tmp / f"seg-{i:04d}-{j:03d}{backend.file_suffix}",
+                )
+            )
 
     total = len(tasks)
-    log(f"合成 {total} 个片段(来自 {len(segments)} 段),并发 {CONCURRENCY}, 重试 {RETRIES}...")
+    log(
+        f"合成 {total} 个片段(来自 {len(segments)} 段) | "
+        f"后端 {backend.name} | 模型 {backend.model} | 风格 {style} | "
+        f"并发 {backend.concurrency} | 重试 {RETRIES}"
+    )
 
-    sem = asyncio.Semaphore(CONCURRENCY)
-    stats = {"total": total, "ok": 0, "failed": 0, "retried": 0}
+    sem = asyncio.Semaphore(backend.concurrency)
+    stats = {
+        "total": total,
+        "ok": 0,
+        "failed": 0,
+        "retried": 0,
+        "cached": 0,
+        "provider_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "audio_tokens": 0,
+    }
     progress_lock = asyncio.Lock()
+    key_locks: dict[str, asyncio.Lock] = {}
 
-    async def worker(seg_i: int, part_j: int, voice: str, text: str, out: Path):
-        async with sem:
-            last_err: Exception | None = None
-            for attempt in range(RETRIES):
-                try:
-                    await synth_one(text, voice, out)
-                    async with progress_lock:
-                        stats["ok"] += 1
-                        if attempt > 0:
-                            stats["retried"] += 1
-                        if stats["ok"] % 20 == 0 or stats["ok"] == total:
-                            log(f"  进度 {stats['ok']}/{total}")
-                    return (out, voice)
-                except Exception as e:
-                    last_err = e
-                    if attempt < RETRIES - 1:
-                        # 退避: 0.5s, 1.0s, 1.5s, ...
-                        await asyncio.sleep(0.5 * (attempt + 1))
-            async with progress_lock:
-                stats["failed"] += 1
-            log(f"  ✗ 片段 {seg_i}-{part_j} 失败 ({RETRIES} 次): {last_err}")
-            return None
+    async def worker(
+        seg_i: int, part_j: int, voice_slot: str, text: str, out: Path
+    ):
+        request = SynthesisRequest(
+            text=text, voice_slot=voice_slot, style=style
+        )
+        cache_key = cache.key_for(request)
+        key_lock = key_locks.setdefault(cache_key, asyncio.Lock())
+
+        async with key_lock:
+            cached_path = cache.get(request, audio_is_decodable)
+            if cached_path is not None:
+                async with progress_lock:
+                    stats["ok"] += 1
+                    stats["cached"] += 1
+                return (cached_path, voice_slot)
+
+            async with sem:
+                last_err: Exception | None = None
+                for attempt in range(RETRIES):
+                    try:
+                        async with progress_lock:
+                            stats["provider_calls"] += 1
+                        usage = await backend.synthesize(request, out)
+                        if not audio_is_decodable(out):
+                            raise RuntimeError("生成的音频片段无法解码")
+                        cached_path = cache.store(request, out)
+                        async with progress_lock:
+                            stats["ok"] += 1
+                            stats["input_tokens"] += usage.input_tokens
+                            stats["output_tokens"] += usage.output_tokens
+                            stats["audio_tokens"] += usage.audio_tokens
+                            if attempt > 0:
+                                stats["retried"] += 1
+                            if stats["ok"] % 20 == 0 or stats["ok"] == total:
+                                log(f"  进度 {stats['ok']}/{total}")
+                        return (cached_path, voice_slot)
+                    except Exception as e:
+                        last_err = e
+                        if isinstance(e, TTSBackendError) and not e.retryable:
+                            break
+                        if attempt < RETRIES - 1:
+                            # 退避: 0.5s, 1.0s, 1.5s, ...
+                            await asyncio.sleep(0.5 * (attempt + 1))
+                async with progress_lock:
+                    stats["failed"] += 1
+                log(
+                    f"  ✗ 片段 {seg_i}-{part_j} 失败 "
+                    f"({attempt + 1} 次): {last_err}"
+                )
+                return None
 
     results = await asyncio.gather(
-        *[worker(i, j, v, t, p) for i, j, v, t, p in tasks]
+        *[worker(i, j, slot, text, path) for i, j, slot, text, path in tasks]
     )
     successful = [r for r in results if r is not None]
     return successful, stats
@@ -379,6 +470,16 @@ def ensure_all_synthesized(stats: dict[str, int]) -> None:
         raise RuntimeError(f"音频片段不完整:成功 {ok}/{total},未生成最终 MP3")
 
 
+def audio_is_decodable(path: Path) -> bool:
+    """Return whether a fragment is non-empty and can be decoded by pydub."""
+    try:
+        return path.is_file() and path.stat().st_size > 0 and len(
+            AudioSegment.from_file(path)
+        ) > 0
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------
 # 拼接: 按 speaker 切换决定停顿长短
 # --------------------------------------------------------------------------
@@ -393,7 +494,7 @@ def merge(files_with_voices: list[tuple[Path, str]], out: Path) -> None:
     prev_voice: str | None = None
     for f, voice in files_with_voices:
         try:
-            seg = AudioSegment.from_mp3(f)
+            seg = AudioSegment.from_file(f)
         except Exception as e:
             raise RuntimeError(f"音频片段无法解码:{f.name}: {e}") from e
         if prev_voice is None:
@@ -443,27 +544,37 @@ def fix_mp3_header(mp3: Path) -> None:
 
 
 async def run(
-    input_path: Path, output_path: Path, speakers_file: Path | None = None
+    input_path: Path,
+    output_path: Path,
+    speakers_file: Path | None = None,
+    backend: TTSBackend | None = None,
+    style: str = "conversation",
+    preview_paragraphs: int | None = None,
 ) -> None:
     start = time.time()
+    backend = backend or build_backend("edge")
     raw = input_path.read_text(encoding="utf-8")
     cleaned = strip_markdown(raw)
 
     if speakers_file is not None:
-        paras = drop_noise_paragraphs(split_into_paragraphs(cleaned))
         seq: list[str] = []
         for ln in speakers_file.read_text(encoding="utf-8").splitlines():
             ln = ln.strip()
             if not ln or ln.startswith("#"):
                 continue
             seq.append(ln.strip("[]").strip())
-        if len(seq) != len(paras):
-            sys.exit(
-                f"speaker 序列行数 ({len(seq)}) ≠ 段落数 ({len(paras)}),对不齐。\n"
-                f"先跑  --dump-segments  确认段落数,序列文件必须每段正好一行。"
+        try:
+            cleaned = apply_speaker_sequence(
+                cleaned,
+                seq,
+                preview_paragraphs=preview_paragraphs,
             )
-        cleaned = "\n\n".join(f"[{lab}] {p}" for lab, p in zip(seq, paras))
-        log(f"speaker 序列模式: {len(paras)} 段已贴标签")
+        except ValueError as exc:
+            sys.exit(str(exc))
+        selected_count = len(split_into_paragraphs(cleaned))
+        log(f"speaker 序列模式: {selected_count} 段已贴标签")
+    else:
+        cleaned = apply_preview_limit(cleaned, preview_paragraphs)
 
     segments = parse_segments(cleaned)
     if not segments:
@@ -473,7 +584,18 @@ async def run(
 
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
-        files_with_voices, stats = await synth_all(segments, tmp)
+        cache = FragmentCache(
+            output_path.parent / ".tts-cache",
+            backend.fingerprint(),
+            backend.file_suffix,
+        )
+        files_with_voices, stats = await synth_all(
+            segments,
+            tmp,
+            backend=backend,
+            style=style,
+            cache=cache,
+        )
         ensure_all_synthesized(stats)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -513,6 +635,17 @@ async def run(
         f"失败 {stats['failed']}",
         f"重试成功 {stats['retried']}",
     ]
+    optional_totals = (
+        ("provider_calls", "服务调用"),
+        ("cached", "缓存命中"),
+        ("input_tokens", "输入 tokens"),
+        ("output_tokens", "输出 tokens"),
+        ("audio_tokens", "音频 tokens"),
+    )
+    for key, label in optional_totals:
+        value = stats.get(key, 0)
+        if value:
+            summary_parts.append(f"{label} {value}")
     if duration_s is not None:
         mm, ss = divmod(int(duration_s), 60)
         summary_parts.insert(0, f"音频时长 {mm}m{ss:02d}s")
@@ -521,8 +654,8 @@ async def run(
     log("  " + " | ".join(summary_parts))
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="中文 transcript → mp3 (免费 EdgeTTS)")
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="中文 transcript → mp3")
     parser.add_argument("input", help="中文 markdown 或 txt 文件路径")
     parser.add_argument("output", nargs="?", help=f"输出 mp3 路径 (默认 {DEFAULT_OUTPUT_DIR}/<同名>.mp3)")
     parser.add_argument(
@@ -533,7 +666,32 @@ def main() -> None:
         "--speakers", metavar="FILE",
         help="speaker 序列文件:每行一个标签([主持人-女]/[嘉宾-男]),与段落一一对应",
     )
+    parser.add_argument(
+        "--tts",
+        choices=("edge", "qwen3-api"),
+        default="edge",
+        help="语音后端: edge 免费稳定; qwen3-api 高质量且消耗百炼额度",
+    )
+    parser.add_argument(
+        "--style",
+        choices=("conversation", "documentary"),
+        default="conversation",
+        help="表达预设: conversation 访谈; documentary 知识讲解",
+    )
+    parser.add_argument(
+        "--preview-paragraphs",
+        type=int,
+        help="只合成清理后的前 N 段,用于短试听；不指定则合成全文",
+    )
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
+
+    if args.preview_paragraphs is not None and args.preview_paragraphs <= 0:
+        parser.error("--preview-paragraphs 必须大于 0")
 
     in_path = Path(args.input).expanduser().resolve()
     if not in_path.exists():
@@ -564,7 +722,22 @@ def main() -> None:
         DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         out_path = DEFAULT_OUTPUT_DIR / (in_path.stem + ".mp3")
 
-    asyncio.run(run(in_path, out_path, speakers_file))
+    api_key = os.getenv("DASHSCOPE_API_KEY") if args.tts == "qwen3-api" else None
+    try:
+        backend = build_backend(args.tts, api_key=api_key)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    asyncio.run(
+        run(
+            in_path,
+            out_path,
+            speakers_file,
+            backend=backend,
+            style=args.style,
+            preview_paragraphs=args.preview_paragraphs,
+        )
+    )
 
 
 if __name__ == "__main__":

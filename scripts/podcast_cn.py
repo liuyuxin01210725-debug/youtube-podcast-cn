@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import hashlib
 import json
 import os
@@ -16,18 +15,45 @@ import urllib.request
 from urllib.parse import urlsplit
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
+
+from diarization_cache import (
+    DiarizationCache,
+    load_or_create_speaker_map,
+    render_speaker_sequence,
+)
+from diarization_core import (
+    DiarizationBackend,
+    DiarizationTurn,
+    SpeakerBounds,
+    align_caption_pieces,
+    validate_diarization,
+)
+from diarization_runtime import (
+    DiarizationRuntime,
+    DiarizationSetupError,
+    backend_fingerprint,
+    ensure_diarization_runtime,
+    load_model_manifest,
+    run_sherpa_backend,
+)
+
+from podcast_captions import (
+    CaptionPiece,
+    CaptionUnavailableError,
+    PodcastPipelineError,
+    SubtitleSegment,
+    group_caption_pieces,
+    parse_vtt,
+    parse_vtt_pieces,
+)
+from temporary_audio import (
+    TemporaryAudioCleanupError,
+    with_temporary_audio,
+)
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
-
-
-class PodcastPipelineError(RuntimeError):
-    """Base error for failures that can be shown directly to the user."""
-
-
-class CaptionUnavailableError(PodcastPipelineError):
-    """Raised when a video has no usable English caption track."""
 
 
 class TranslationValidationError(PodcastPipelineError):
@@ -40,6 +66,10 @@ class TranslationConfigurationError(PodcastPipelineError):
 
 class DeepSeekConfigurationError(TranslationConfigurationError):
     """Backward-compatible DeepSeek configuration error."""
+
+
+class DiarizationBackendError(PodcastPipelineError):
+    """Raised when required local diarization cannot complete safely."""
 
 
 @dataclass(frozen=True)
@@ -99,11 +129,14 @@ class VideoMetadata:
 
 
 @dataclass(frozen=True)
-class SubtitleSegment:
-    id: str
-    start_ms: int
-    end_ms: int
-    text: str
+class DiarizationReport:
+    status: Literal["success", "cache_hit", "fallback", "off"]
+    backend: str | None
+    detected_speakers: int
+    aligned_segments: int
+    ambiguous_segments: int
+    temporary_audio: Literal["deleted", "not_created"]
+    warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,136 +145,41 @@ class PreparedEpisode:
     source_title: str
     transcript_path: Path
     state_path: Path
+    speakers_path: Path | None = None
+    speaker_map_path: Path | None = None
+    diarization_report: DiarizationReport | None = None
 
 
-_TIMING_LINE = re.compile(
-    r"^(?P<start>(?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+"
-    r"(?P<end>(?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})(?:\s+.*)?$"
-)
-_VTT_TAG = re.compile(r"<[^>]+>")
-_TOKEN_EDGE = re.compile(r"^[\W_]+|[\W_]+$")
-_SENTENCE_END = re.compile(r"[.!?…][\"'”’)]*$")
+class SherpaDiarizationBackend:
+    """Lazy production adapter whose fingerprint needs no model installation."""
 
+    name = "sherpa-onnx"
 
-def _timestamp_ms(value: str) -> int:
-    parts = value.replace(",", ".").split(":")
-    if len(parts) == 2:
-        hours = 0
-        minutes_text, seconds_text = parts
-    elif len(parts) == 3:
-        hours = int(parts[0])
-        minutes_text, seconds_text = parts[1:]
-    else:
-        raise ValueError(f"无法解析字幕时间:{value}")
-    seconds, milliseconds = seconds_text.split(".")
-    return (
-        hours * 3_600_000
-        + int(minutes_text) * 60_000
-        + int(seconds) * 1_000
-        + int(milliseconds)
-    )
+    def __init__(self, runner: Runner = subprocess.run) -> None:
+        manifest = load_model_manifest()
+        self.model_fingerprint = backend_fingerprint(manifest)
+        self._runner = runner
+        self._runtime: DiarizationRuntime | None = None
 
+    def prepare(self) -> None:
+        if self._runtime is None:
+            self._runtime = ensure_diarization_runtime(runner=self._runner)
 
-def _clean_cue_text(lines: list[str]) -> str:
-    cleaned_lines: list[str] = []
-    for line in lines:
-        without_tags = _VTT_TAG.sub("", line)
-        cleaned = html.unescape(without_tags).strip()
-        if cleaned:
-            cleaned_lines.append(cleaned)
-    return " ".join(cleaned_lines)
-
-
-def _comparable_token(token: str) -> str:
-    return _TOKEN_EDGE.sub("", token.casefold())
-
-
-def _new_rolling_text(previous_cue: str, current_cue: str) -> str:
-    """Remove only the repeated prefix introduced by rolling captions."""
-    if not previous_cue:
-        return current_cue
-
-    previous_tokens = previous_cue.split()
-    current_tokens = current_cue.split()
-    previous_cmp = [_comparable_token(token) for token in previous_tokens]
-    current_cmp = [_comparable_token(token) for token in current_tokens]
-    overlap = 0
-    for size in range(min(len(previous_cmp), len(current_cmp)), 0, -1):
-        if previous_cmp[-size:] == current_cmp[:size]:
-            overlap = size
-            break
-    return " ".join(current_tokens[overlap:]).strip()
-
-
-def parse_vtt(text: str) -> list[SubtitleSegment]:
-    """Parse VTT cues and suppress repeated rolling-caption prefixes."""
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    pieces: list[tuple[int, int, str]] = []
-    previous_cue = ""
-
-    for block in re.split(r"\n\s*\n", normalized):
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        timing_index = next(
-            (index for index, line in enumerate(lines) if _TIMING_LINE.match(line)),
-            None,
+    def diarize(
+        self, audio_path: Path, speaker_bounds: SpeakerBounds
+    ) -> list[DiarizationTurn]:
+        self.prepare()
+        if self._runtime is None:
+            raise DiarizationSetupError("声纹运行时未就绪")
+        return run_sherpa_backend(
+            audio_path,
+            speaker_bounds,
+            runtime=self._runtime,
+            runner=self._runner,
+            progress_callback=lambda percent: print(
+                f"声纹进度:{percent}%", file=sys.stderr
+            ),
         )
-        if timing_index is None:
-            continue
-
-        timing = _TIMING_LINE.match(lines[timing_index])
-        if timing is None:
-            continue
-        cue_text = _clean_cue_text(lines[timing_index + 1 :])
-        if not cue_text:
-            continue
-
-        new_text = _new_rolling_text(previous_cue, cue_text)
-        previous_cue = cue_text
-        if not new_text:
-            continue
-
-        pieces.append(
-            (
-                _timestamp_ms(timing.group("start")),
-                _timestamp_ms(timing.group("end")),
-                new_text,
-            )
-        )
-
-    segments: list[SubtitleSegment] = []
-    paragraph_parts: list[str] = []
-    paragraph_start = 0
-    paragraph_end = 0
-
-    def flush_paragraph() -> None:
-        nonlocal paragraph_parts, paragraph_start, paragraph_end
-        if not paragraph_parts:
-            return
-        segments.append(
-            SubtitleSegment(
-                id=f"seg-{len(segments) + 1:06d}",
-                start_ms=paragraph_start,
-                end_ms=paragraph_end,
-                text=" ".join(paragraph_parts),
-            )
-        )
-        paragraph_parts = []
-
-    for start_ms, end_ms, piece in pieces:
-        if paragraph_parts and start_ms - paragraph_end > 2000:
-            flush_paragraph()
-        if not paragraph_parts:
-            paragraph_start = start_ms
-        paragraph_parts.append(piece)
-        paragraph_end = end_ms
-        paragraph_text = " ".join(paragraph_parts)
-        if _SENTENCE_END.search(paragraph_text) or len(paragraph_text) >= 360:
-            flush_paragraph()
-    flush_paragraph()
-
-    if not segments:
-        raise CaptionUnavailableError("英文字幕为空或无法解析")
-    return segments
 
 
 def _english_track_key(tracks: object) -> str | None:
@@ -759,6 +697,45 @@ def _translation_metadata_payload(
     }
 
 
+def resolve_speaker_bounds(
+    speaker_count: int | None,
+    minimum: int | None,
+    maximum: int | None,
+) -> SpeakerBounds:
+    """Resolve CLI speaker options while rejecting ambiguous combinations."""
+    if speaker_count is not None and (minimum is not None or maximum is not None):
+        raise ValueError(
+            "--speaker-count 不能同时与 --min-speakers/--max-speakers 使用"
+        )
+    if speaker_count is not None:
+        return SpeakerBounds(exact=speaker_count)
+    return SpeakerBounds(
+        minimum=1 if minimum is None else minimum,
+        maximum=6 if maximum is None else maximum,
+    )
+
+
+def _safe_diarization_warning(error: BaseException) -> str:
+    text = re.sub(r"https?://\S+", "[远程地址已隐藏]", str(error))
+    return text.strip()[-300:] or "本地声纹识别失败"
+
+
+def _speaker_lines(path: Path) -> list[str]:
+    try:
+        return [
+            line.strip()
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except OSError as error:
+        raise DiarizationBackendError("无法读取说话人序列") from error
+
+
+def _verify_speaker_sequence(path: Path, segments: list[SubtitleSegment]) -> None:
+    if len(_speaker_lines(path)) != len(segments):
+        raise DiarizationBackendError("speaker 序列与最终段落数不一致")
+
+
 def prepare_episode(
     url: str,
     output_root: Path,
@@ -766,8 +743,14 @@ def prepare_episode(
     translator: Callable[[list[SubtitleSegment]], dict[str, str]] | None = None,
     provider: str = "deepseek",
     translation_identity: str | None = None,
+    diarize: Literal["auto", "off", "required"] = "auto",
+    speaker_bounds: SpeakerBounds | None = None,
+    diarization_backend: DiarizationBackend | None = None,
 ) -> PreparedEpisode:
     """Prepare a resumable Chinese transcript job for one YouTube URL."""
+    if diarize not in {"auto", "off", "required"}:
+        raise ValueError("diarize 必须是 auto、off 或 required")
+    resolved_bounds = speaker_bounds or SpeakerBounds()
     info = fetch_video_info(url, runner=runner)
     metadata = video_metadata_from_info(info)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", metadata.video_id):
@@ -778,29 +761,192 @@ def prepare_episode(
     job_dir.mkdir(parents=True, exist_ok=True)
     state_path = job_dir / "state.json"
     transcript_path = job_dir / "transcript.zh.md"
-    prepared = PreparedEpisode(
-        video_id=metadata.video_id,
-        source_title=metadata.source_title,
-        transcript_path=transcript_path,
-        state_path=state_path,
-    )
+    sequence_path = job_dir / "transcript.zh.speakers.txt"
+    speaker_map_path = job_dir / "speaker-map.json"
 
     _write_json_atomic(job_dir / "metadata.json", asdict(metadata))
     _write_job_state(state_path, "metadata_ready", url, metadata)
 
     vtt_path = job_dir / "subtitles.en.vtt"
-    segments: list[SubtitleSegment] | None = None
+    pieces: list[CaptionPiece] | None = None
     if vtt_path.is_file():
         try:
-            segments = parse_vtt(vtt_path.read_text(encoding="utf-8"))
+            pieces = parse_vtt_pieces(vtt_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, CaptionUnavailableError):
             vtt_path.unlink(missing_ok=True)
-    if segments is None:
+    if pieces is None:
         vtt_path = download_english_subtitles(url, job_dir, info, runner=runner)
-        segments = parse_vtt(vtt_path.read_text(encoding="utf-8"))
+        pieces = parse_vtt_pieces(vtt_path.read_text(encoding="utf-8"))
+    _write_job_state(state_path, "captions_ready", url, metadata)
+
+    speakers_path: Path | None = None
+    final_speaker_map_path: Path | None = None
+    if diarize == "off":
+        sequence_path.unlink(missing_ok=True)
+        segments = group_caption_pieces(pieces)
+        diarization_report = DiarizationReport(
+            status="off",
+            backend=None,
+            detected_speakers=0,
+            aligned_segments=0,
+            ambiguous_segments=0,
+            temporary_audio="not_created",
+        )
+    else:
+        cache = DiarizationCache(job_dir)
+        selected_backend = diarization_backend or SherpaDiarizationBackend(runner)
+        backend_name = str(getattr(selected_backend, "name", "unknown"))
+        fingerprint = getattr(selected_backend, "model_fingerprint", None)
+        temporary_audio_status: Literal["deleted", "not_created"] = "not_created"
+        try:
+            if not isinstance(fingerprint, dict):
+                raise DiarizationBackendError("声纹后端缺少有效模型指纹")
+            if metadata.duration_seconds is None:
+                raise DiarizationBackendError("YouTube 信息缺少音频时长")
+            duration_ms = round(metadata.duration_seconds * 1000)
+            if duration_ms <= 0:
+                raise DiarizationBackendError("YouTube 音频时长无效")
+            source_identity = {
+                "video_id": metadata.video_id,
+                "duration_ms": duration_ms,
+            }
+            turns = cache.load_turns(
+                source_identity, resolved_bounds, fingerprint
+            )
+            cache_hit = turns is not None
+            if turns is None:
+                prepare_backend = getattr(selected_backend, "prepare", None)
+                if callable(prepare_backend):
+                    print("准备本地声纹模型", file=sys.stderr)
+                    prepare_backend()
+                print("下载临时原音频", file=sys.stderr)
+                print("转换 16 kHz WAV", file=sys.stderr)
+
+                def analyze_audio(wav_path: Path) -> list[DiarizationTurn]:
+                    print("本地识别说话人", file=sys.stderr)
+                    detected = selected_backend.diarize(wav_path, resolved_bounds)
+                    validate_diarization(
+                        detected,
+                        duration_ms=duration_ms,
+                        bounds=resolved_bounds,
+                    )
+                    return detected
+
+                try:
+                    temporary_result = with_temporary_audio(
+                        url, job_dir, analyze_audio, runner=runner
+                    )
+                except TemporaryAudioCleanupError:
+                    raise
+                except Exception:
+                    temporary_audio_status = "deleted"
+                    print("删除临时原音频", file=sys.stderr)
+                    raise
+                else:
+                    temporary_audio_status = "deleted"
+                    print("删除临时原音频", file=sys.stderr)
+                turns = temporary_result.value
+                cache.store_turns(
+                    source_identity,
+                    resolved_bounds,
+                    fingerprint,
+                    turns,
+                    temporary_result.source_audio_sha256,
+                )
+            validate_diarization(
+                turns,
+                duration_ms=duration_ms,
+                bounds=resolved_bounds,
+            )
+            _write_job_state(state_path, "diarization_ready", url, metadata)
+
+            print("对齐字幕", file=sys.stderr)
+            assignments = cache.load_assignments(pieces)
+            if assignments is None:
+                assignments = align_caption_pieces(pieces, turns)
+                validate_diarization(
+                    turns,
+                    duration_ms=duration_ms,
+                    bounds=resolved_bounds,
+                    assignments=assignments,
+                )
+                cache.store_assignments(pieces, assignments)
+            else:
+                validate_diarization(
+                    turns,
+                    duration_ms=duration_ms,
+                    bounds=resolved_bounds,
+                    assignments=assignments,
+                )
+            if any(item.speaker_id is None for item in assignments):
+                raise DiarizationBackendError("仍有字幕无法分配到说话人")
+            _write_job_state(state_path, "speaker_alignment_ready", url, metadata)
+
+            speakers = {
+                item.source_index: item.speaker_id
+                for item in assignments
+                if item.speaker_id is not None
+            }
+            ambiguous_indexes = {
+                item.source_index for item in assignments if item.ambiguous
+            }
+            segments = group_caption_pieces(
+                pieces,
+                speakers,
+                ambiguous_indexes,
+            )
+            speaker_ids = list(dict.fromkeys(turn.speaker_id for turn in turns))
+            speaker_map = load_or_create_speaker_map(
+                speaker_map_path, speaker_ids
+            )
+            labels = render_speaker_sequence(segments, speaker_map)
+            _write_text_atomic(sequence_path, "\n".join(labels) + "\n")
+            _verify_speaker_sequence(sequence_path, segments)
+            _write_job_state(state_path, "speaker_sequence_ready", url, metadata)
+            speakers_path = sequence_path
+            final_speaker_map_path = speaker_map_path
+            diarization_report = DiarizationReport(
+                status="cache_hit" if cache_hit else "success",
+                backend=backend_name,
+                detected_speakers=len(set(speaker_ids)),
+                aligned_segments=len(segments),
+                ambiguous_segments=sum(segment.ambiguous for segment in segments),
+                temporary_audio=temporary_audio_status,
+            )
+        except TemporaryAudioCleanupError as error:
+            raise DiarizationBackendError(str(error)) from error
+        except Exception as error:
+            if diarize == "required":
+                if isinstance(error, DiarizationBackendError):
+                    raise
+                raise DiarizationBackendError(
+                    _safe_diarization_warning(error)
+                ) from error
+            sequence_path.unlink(missing_ok=True)
+            segments = group_caption_pieces(pieces)
+            speakers_path = None
+            final_speaker_map_path = None
+            diarization_report = DiarizationReport(
+                status="fallback",
+                backend=backend_name,
+                detected_speakers=0,
+                aligned_segments=0,
+                ambiguous_segments=0,
+                temporary_audio=temporary_audio_status,
+                warning=_safe_diarization_warning(error),
+            )
+
+    prepared = PreparedEpisode(
+        video_id=metadata.video_id,
+        source_title=metadata.source_title,
+        transcript_path=transcript_path,
+        state_path=state_path,
+        speakers_path=speakers_path,
+        speaker_map_path=final_speaker_map_path,
+        diarization_report=diarization_report,
+    )
 
     _write_subtitle_jsonl(job_dir / "subtitles.en.jsonl", segments)
-    _write_job_state(state_path, "captions_ready", url, metadata)
 
     client: OpenAICompatibleTranslationClient | None = None
     if translator is None:
@@ -821,6 +967,8 @@ def prepare_episode(
             effective_identity,
         )
     ):
+        if speakers_path is not None:
+            _verify_speaker_sequence(speakers_path, segments)
         _write_job_state(state_path, "transcript_ready", url, metadata)
         return prepared
 
@@ -833,6 +981,15 @@ def prepare_episode(
     _write_job_state(state_path, "translation_ready", url, metadata)
     transcript = _render_chinese_transcript(metadata, url, segments, translations)
     _write_text_atomic(transcript_path, transcript)
+    if speakers_path is not None:
+        _verify_speaker_sequence(speakers_path, segments)
+        translated_paragraphs = len(
+            re.findall(r"(?m)^<!-- seg-\d+ -->$", transcript)
+        )
+        if translated_paragraphs != len(_speaker_lines(speakers_path)):
+            raise DiarizationBackendError(
+                "speaker 序列与中文逐字稿段落数不一致"
+            )
     _write_json_atomic(
         translation_metadata_path,
         _translation_metadata_payload(source_hash, effective_identity),
@@ -874,7 +1031,29 @@ def main(argv: list[str] | None = None) -> int:
         default="deepseek",
         help="翻译模型供应商（默认: deepseek）",
     )
+    parser.add_argument(
+        "--diarize",
+        choices=("auto", "off", "required"),
+        default="auto",
+        help="说话人识别模式（默认: auto）",
+    )
+    parser.add_argument(
+        "--speaker-count",
+        type=int,
+        help="已知的精确说话人数（1-6）",
+    )
+    parser.add_argument("--min-speakers", type=int, help="最少说话人数（1-6）")
+    parser.add_argument("--max-speakers", type=int, help="最多说话人数（1-6）")
     args = parser.parse_args(argv)
+
+    try:
+        speaker_bounds = resolve_speaker_bounds(
+            args.speaker_count,
+            args.min_speakers,
+            args.max_speakers,
+        )
+    except ValueError as error:
+        parser.error(str(error))
 
     if not _is_exact_youtube_url(args.url):
         print("错误:请输入准确的 YouTube URL,不能输入搜索词", file=sys.stderr)
@@ -897,6 +1076,8 @@ def main(argv: list[str] | None = None) -> int:
             args.url,
             args.output_root,
             provider=args.provider,
+            diarize=args.diarize,
+            speaker_bounds=speaker_bounds,
         )
     except (PodcastPipelineError, OSError) as error:
         print(f"错误:{error}", file=sys.stderr)
@@ -904,6 +1085,33 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"英文标题:{prepared.source_title}")
     print(f"中文字幕:{prepared.transcript_path}")
+    report = prepared.diarization_report
+    if prepared.speakers_path is not None:
+        print(f"说话人序列:{prepared.speakers_path}")
+    if report is not None:
+        if report.status in {"success", "cache_hit"}:
+            print(
+                "说话人识别:成功（"
+                f"{report.detected_speakers} 人，"
+                f"{report.aligned_segments} 段，"
+                f"{report.ambiguous_segments} 段需留意）"
+            )
+            if report.status == "cache_hit":
+                print("临时原音频:已删除（本次命中缓存，未重新下载）")
+            else:
+                print("临时原音频:已删除")
+        elif report.status == "off":
+            print("说话人识别:已关闭")
+            print("临时原音频:未下载")
+        else:
+            print(
+                "说话人识别:已回退到内容判断（"
+                f"{report.warning or '未知错误'}）"
+            )
+            if report.temporary_audio == "deleted":
+                print("临时原音频:已删除")
+            else:
+                print("临时原音频:未下载")
     return 0
 
 

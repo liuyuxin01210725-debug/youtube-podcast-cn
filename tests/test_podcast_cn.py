@@ -19,6 +19,9 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 FIXTURE = ROOT / "tests/fixtures/podcast-sample.en.vtt"
 
 
@@ -715,6 +718,7 @@ class EpisodePreparationTests(unittest.TestCase):
                 output_root,
                 runner=fake_runner,
                 translator=translator,
+                diarize="off",
             )
             job_dir = output_root / ".podcast-jobs/abc123"
 
@@ -759,6 +763,7 @@ class EpisodePreparationTests(unittest.TestCase):
                 translator=lambda segments: (_ for _ in ()).throw(
                     AssertionError("已完成任务不应重新翻译")
                 ),
+                diarize="off",
             )
 
             subtitle_downloads_after = sum(
@@ -800,6 +805,7 @@ class EpisodePreparationTests(unittest.TestCase):
                 output_root,
                 runner=fake_runner,
                 translator=translator,
+                diarize="off",
             )
             persisted = "\n".join(
                 path.read_text(encoding="utf-8")
@@ -850,6 +856,7 @@ class EpisodePreparationTests(unittest.TestCase):
                 runner=fake_runner,
                 translator=translator("deepseek"),
                 translation_identity=deepseek_identity,
+                diarize="off",
             )
             podcast_cn.prepare_episode(
                 url,
@@ -859,6 +866,7 @@ class EpisodePreparationTests(unittest.TestCase):
                     AssertionError("相同身份应复用完整逐字稿")
                 ),
                 translation_identity=deepseek_identity,
+                diarize="off",
             )
             podcast_cn.prepare_episode(
                 url,
@@ -866,6 +874,7 @@ class EpisodePreparationTests(unittest.TestCase):
                 runner=fake_runner,
                 translator=translator("qwen"),
                 translation_identity=qwen_identity,
+                diarize="off",
             )
 
             self.assertEqual(calls, ["deepseek", "qwen"])
@@ -885,6 +894,249 @@ class EpisodePreparationTests(unittest.TestCase):
                 translation_metadata["base_url"],
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
             )
+
+
+class DiarizationPipelineTests(unittest.TestCase):
+    def test_sherpa_backend_prints_chunk_progress_in_chinese(self) -> None:
+        backend = podcast_cn.SherpaDiarizationBackend()
+        backend._runtime = mock.Mock()
+
+        def fake_run(*args: object, **kwargs: object) -> list[object]:
+            callback = kwargs.get("progress_callback")
+            self.assertTrue(callable(callback))
+            callback(67)
+            return []
+
+        stderr = io.StringIO()
+        with mock.patch.object(podcast_cn, "run_sherpa_backend", side_effect=fake_run):
+            with contextlib.redirect_stderr(stderr):
+                backend.diarize(Path("analysis.wav"), podcast_cn.SpeakerBounds())
+
+        self.assertIn("声纹进度:67%", stderr.getvalue())
+
+    URL = "https://www.youtube.com/watch?v=abc123"
+
+    class FakeBackend:
+        name = "fake-diarization"
+        model_fingerprint = {
+            "backend": "fake-diarization",
+            "runtime": "1",
+            "models": {"test": "a" * 64},
+        }
+
+        def __init__(self, error: BaseException | None = None) -> None:
+            self.error = error
+            self.calls = 0
+
+        def diarize(self, audio_path, speaker_bounds):
+            self.calls += 1
+            if self.error is not None:
+                raise self.error
+            return [
+                podcast_cn.DiarizationTurn(0, 4000, "SPEAKER_00"),
+                podcast_cn.DiarizationTurn(4000, 7000, "SPEAKER_01"),
+                podcast_cn.DiarizationTurn(7000, 9000, "SPEAKER_00"),
+            ]
+
+    def make_runner(self, calls):
+        fixture_text = FIXTURE.read_text(encoding="utf-8")
+        info = {
+            "id": "abc123",
+            "title": "Test episode",
+            "webpage_url": self.URL,
+            "channel": "Test channel",
+            "duration": 9.0,
+            "subtitles": {"en": [{"ext": "vtt"}]},
+        }
+
+        def fake_runner(args, **kwargs):
+            calls.append(args)
+            if "--dump-single-json" in args:
+                return subprocess.CompletedProcess(args, 0, json.dumps(info), "")
+            if "--write-subs" in args or "--write-auto-subs" in args:
+                output_template = Path(args[args.index("--output") + 1])
+                (output_template.parent / "subtitles.en.vtt").write_text(
+                    fixture_text, encoding="utf-8"
+                )
+            elif args[0] == "yt-dlp" and "bestaudio/best" in args:
+                output_template = Path(args[args.index("--output") + 1])
+                (output_template.parent / "source.webm").write_bytes(b"source")
+            elif args[0] == "ffmpeg":
+                Path(args[-1]).write_bytes(b"wav")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        return fake_runner
+
+    @staticmethod
+    def translator(segments):
+        return {segment.id: f"中文-{segment.text}" for segment in segments}
+
+    def test_success_writes_one_to_one_speakers(self) -> None:
+        calls = []
+        backend = self.FakeBackend()
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared = podcast_cn.prepare_episode(
+                self.URL,
+                Path(tmp),
+                runner=self.make_runner(calls),
+                translator=self.translator,
+                diarize="required",
+                speaker_bounds=podcast_cn.SpeakerBounds(exact=2),
+                diarization_backend=backend,
+            )
+
+            labels = prepared.speakers_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+            transcript_ids = re.findall(
+                r"<!-- (seg-\d+) -->",
+                prepared.transcript_path.read_text(encoding="utf-8"),
+            )
+            self.assertEqual(len(labels), len(transcript_ids))
+            self.assertEqual(len(labels), 3)
+            self.assertEqual(prepared.diarization_report.status, "success")
+            self.assertEqual(prepared.diarization_report.detected_speakers, 2)
+            self.assertEqual(prepared.diarization_report.temporary_audio, "deleted")
+            self.assertTrue(prepared.speaker_map_path.is_file())
+            self.assertFalse(
+                list((Path(tmp) / ".podcast-jobs/abc123").glob(".diarization-media-*"))
+            )
+
+    def test_second_run_uses_cache_without_media_backend_or_translation(self) -> None:
+        calls = []
+        backend = self.FakeBackend()
+        with tempfile.TemporaryDirectory() as tmp:
+            output_root = Path(tmp)
+            runner = self.make_runner(calls)
+            podcast_cn.prepare_episode(
+                self.URL,
+                output_root,
+                runner=runner,
+                translator=self.translator,
+                diarize="required",
+                speaker_bounds=podcast_cn.SpeakerBounds(exact=2),
+                diarization_backend=backend,
+            )
+            media_downloads_before = sum("bestaudio/best" in call for call in calls)
+            no_backend = self.FakeBackend(AssertionError("不应调用 backend"))
+
+            again = podcast_cn.prepare_episode(
+                self.URL,
+                output_root,
+                runner=runner,
+                translator=lambda segments: (_ for _ in ()).throw(
+                    AssertionError("不应重新翻译")
+                ),
+                diarize="required",
+                speaker_bounds=podcast_cn.SpeakerBounds(exact=2),
+                diarization_backend=no_backend,
+            )
+
+            self.assertEqual(again.diarization_report.status, "cache_hit")
+            self.assertEqual(no_backend.calls, 0)
+            self.assertEqual(
+                sum("bestaudio/best" in call for call in calls),
+                media_downloads_before,
+            )
+
+    def test_auto_falls_back_as_one_whole_episode(self) -> None:
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared = podcast_cn.prepare_episode(
+                self.URL,
+                Path(tmp),
+                runner=self.make_runner(calls),
+                translator=self.translator,
+                diarize="auto",
+                diarization_backend=self.FakeBackend(RuntimeError("model failed")),
+            )
+
+            self.assertIsNone(prepared.speakers_path)
+            self.assertEqual(prepared.diarization_report.status, "fallback")
+            self.assertIn("model failed", prepared.diarization_report.warning)
+            subtitle_records = [
+                json.loads(line)
+                for line in (
+                    Path(tmp) / ".podcast-jobs/abc123/subtitles.en.jsonl"
+                ).read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(all(record["speaker_id"] is None for record in subtitle_records))
+
+    def test_required_stops_before_translation(self) -> None:
+        calls = []
+        translation_mock = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(podcast_cn.DiarizationBackendError):
+                podcast_cn.prepare_episode(
+                    self.URL,
+                    Path(tmp),
+                    runner=self.make_runner(calls),
+                    translator=translation_mock,
+                    diarize="required",
+                    diarization_backend=self.FakeBackend(RuntimeError("failed")),
+                )
+
+        translation_mock.assert_not_called()
+
+    def test_auto_does_not_fallback_when_cleanup_cannot_be_verified(self) -> None:
+        calls = []
+        translation_mock = mock.Mock()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(
+                podcast_cn,
+                "with_temporary_audio",
+                side_effect=podcast_cn.TemporaryAudioCleanupError(
+                    "临时原音频删除失败"
+                ),
+            ),
+            self.assertRaises(podcast_cn.DiarizationBackendError),
+        ):
+            podcast_cn.prepare_episode(
+                self.URL,
+                Path(tmp),
+                runner=self.make_runner(calls),
+                translator=translation_mock,
+                diarize="auto",
+                diarization_backend=self.FakeBackend(),
+            )
+
+        translation_mock.assert_not_called()
+
+    def test_off_never_downloads_media_or_calls_backend(self) -> None:
+        calls = []
+        backend = self.FakeBackend(AssertionError("不应调用 backend"))
+        with tempfile.TemporaryDirectory() as tmp:
+            prepared = podcast_cn.prepare_episode(
+                self.URL,
+                Path(tmp),
+                runner=self.make_runner(calls),
+                translator=self.translator,
+                diarize="off",
+                diarization_backend=backend,
+            )
+
+        self.assertEqual(prepared.diarization_report.status, "off")
+        self.assertFalse(any("bestaudio/best" in call for call in calls))
+        self.assertEqual(backend.calls, 0)
+
+
+class SpeakerBoundsResolutionTests(unittest.TestCase):
+    def test_resolves_defaults_and_exact_count(self) -> None:
+        self.assertEqual(
+            podcast_cn.resolve_speaker_bounds(None, None, None),
+            podcast_cn.SpeakerBounds(),
+        )
+        self.assertEqual(
+            podcast_cn.resolve_speaker_bounds(2, None, None),
+            podcast_cn.SpeakerBounds(exact=2),
+        )
+
+    def test_rejects_exact_count_conflict_and_invalid_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "不能同时"):
+            podcast_cn.resolve_speaker_bounds(2, 1, None)
+        with self.assertRaisesRegex(ValueError, "speaker 范围"):
+            podcast_cn.resolve_speaker_bounds(None, 4, 2)
 
 
 class CommandLineTests(unittest.TestCase):
@@ -923,6 +1175,135 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
         self.assertEqual(prepare_mock.call_args.args[1], Path("/tmp/audio"))
         self.assertEqual(prepare_mock.call_args.kwargs["provider"], "deepseek")
+        self.assertEqual(prepare_mock.call_args.kwargs["diarize"], "auto")
+        self.assertEqual(
+            prepare_mock.call_args.kwargs["speaker_bounds"],
+            podcast_cn.SpeakerBounds(),
+        )
+
+    def test_cli_passes_required_exact_speaker_count(self) -> None:
+        prepared = podcast_cn.PreparedEpisode(
+            video_id="abc123",
+            source_title="Test episode",
+            transcript_path=Path("/tmp/transcript.zh.md"),
+            state_path=Path("/tmp/state.json"),
+        )
+        with (
+            mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            mock.patch("shutil.which", return_value="/usr/local/bin/yt-dlp"),
+            mock.patch.object(
+                podcast_cn, "prepare_episode", return_value=prepared
+            ) as prepare_mock,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            exit_code = podcast_cn.main(
+                [
+                    "https://www.youtube.com/watch?v=abc123",
+                    "--diarize",
+                    "required",
+                    "--speaker-count",
+                    "2",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prepare_mock.call_args.kwargs["diarize"], "required")
+        self.assertEqual(
+            prepare_mock.call_args.kwargs["speaker_bounds"],
+            podcast_cn.SpeakerBounds(exact=2),
+        )
+
+    def test_cli_passes_custom_speaker_range(self) -> None:
+        prepared = podcast_cn.PreparedEpisode(
+            video_id="abc123",
+            source_title="Test episode",
+            transcript_path=Path("/tmp/transcript.zh.md"),
+            state_path=Path("/tmp/state.json"),
+        )
+        with (
+            mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            mock.patch("shutil.which", return_value="/usr/local/bin/yt-dlp"),
+            mock.patch.object(
+                podcast_cn, "prepare_episode", return_value=prepared
+            ) as prepare_mock,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            podcast_cn.main(
+                [
+                    "https://www.youtube.com/watch?v=abc123",
+                    "--diarize",
+                    "off",
+                    "--min-speakers",
+                    "2",
+                    "--max-speakers",
+                    "4",
+                ]
+            )
+
+        self.assertEqual(prepare_mock.call_args.kwargs["diarize"], "off")
+        self.assertEqual(
+            prepare_mock.call_args.kwargs["speaker_bounds"],
+            podcast_cn.SpeakerBounds(minimum=2, maximum=4),
+        )
+
+    def test_cli_rejects_conflicting_or_invalid_speaker_options(self) -> None:
+        cases = [
+            ["--speaker-count", "2", "--min-speakers", "1"],
+            ["--min-speakers", "4", "--max-speakers", "2"],
+            ["--speaker-count", "7"],
+        ]
+        for options in cases:
+            with self.subTest(options=options):
+                with (
+                    mock.patch.object(
+                        podcast_cn, "prepare_episode"
+                    ) as prepare_mock,
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    podcast_cn.main(
+                        ["https://www.youtube.com/watch?v=abc123", *options]
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                prepare_mock.assert_not_called()
+
+    def test_prints_diarization_success_status_in_chinese(self) -> None:
+        prepared = podcast_cn.PreparedEpisode(
+            video_id="abc123",
+            source_title="Test episode",
+            transcript_path=Path("/tmp/transcript.zh.md"),
+            state_path=Path("/tmp/state.json"),
+            speakers_path=Path("/tmp/transcript.zh.speakers.txt"),
+            speaker_map_path=Path("/tmp/speaker-map.json"),
+            diarization_report=podcast_cn.DiarizationReport(
+                status="success",
+                backend="fake",
+                detected_speakers=2,
+                aligned_segments=42,
+                ambiguous_segments=3,
+                temporary_audio="deleted",
+            ),
+        )
+        stdout = io.StringIO()
+        with (
+            mock.patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}),
+            mock.patch("shutil.which", return_value="/usr/local/bin/yt-dlp"),
+            mock.patch.object(
+                podcast_cn, "prepare_episode", return_value=prepared
+            ),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            exit_code = podcast_cn.main(
+                ["https://www.youtube.com/watch?v=abc123"]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("说话人序列:/tmp/transcript.zh.speakers.txt", stdout.getvalue())
+        self.assertIn("说话人识别:成功（2 人，42 段，3 段需留意）", stdout.getvalue())
+        self.assertIn("临时原音频:已删除", stdout.getvalue())
 
     def test_qwen_provider_uses_only_dashscope_key(self) -> None:
         prepared = podcast_cn.PreparedEpisode(
@@ -1095,6 +1476,7 @@ class CommandLineTests(unittest.TestCase):
                 "pydub==0.25.1",
                 'audioop-lts==0.2.2; python_version >= "3.13"',
                 "yt-dlp==2026.3.17",
+                "dashscope==1.24.5",
             ],
         )
 

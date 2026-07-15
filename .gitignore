@@ -1,5 +1,8 @@
 .DS_Store
 .venv/
+.diarization-venv/
+.diarization-venv.partial-*/
+.worktrees/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -10,6 +13,9 @@ __pycache__/
 *.pem
 
 .podcast-jobs/
+.tts-cache/
 *.mp3
+*.wav
+!tests/fixtures/diarization-silence.wav
 *.segments.txt
 *.speakers.txt
