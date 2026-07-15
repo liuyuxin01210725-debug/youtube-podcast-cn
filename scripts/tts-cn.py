@@ -242,6 +242,11 @@ def apply_preview_limit(cleaned: str, preview_paragraphs: int | None) -> str:
 # --------------------------------------------------------------------------
 
 
+_EXPLICIT_VOICE_SLOT = re.compile(
+    r"(?:^|[-_])(?P<gender>男|女)声(?P<number>[12])$"
+)
+
+
 def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
     """
     根据标签决定声音。同一个标签字符串始终映射到同一个声音
@@ -249,15 +254,20 @@ def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
 
     判断顺序:
       1. 已经分配过这个标签 → 复用
-      2. 标签含 "男" → 男声池里轮换取一个
-      3. 标签含 "女" → 女声池里轮换取一个
-      4. 标签含 "主持" → 女声 (默认)
-      5. 兜底 → 男声
+      2. 标签以 "男声1/2" 或 "女声1/2" 结尾 → 指定音色
+      3. 标签含 "男" → 男声池里轮换取一个
+      4. 标签含 "女" → 女声池里轮换取一个
+      5. 标签含 "主持" → 女声 (默认)
+      6. 兜底 → 男声
     """
     if label in assigned:
         return assigned[label]
 
-    if "男" in label:
+    explicit = _EXPLICIT_VOICE_SLOT.search(label)
+    if explicit:
+        prefix = "male" if explicit.group("gender") == "男" else "female"
+        voice_slot = f"{prefix}_{explicit.group('number')}"
+    elif "男" in label:
         used = sum(1 for value in assigned.values() if value.startswith("male_"))
         voice_slot = ("male_1", "male_2")[used % 2]
     elif "女" in label:

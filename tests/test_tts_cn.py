@@ -85,6 +85,17 @@ class CliTests(unittest.TestCase):
 
 
 class VoiceSlotTests(unittest.TestCase):
+    def test_honors_explicit_numbered_voice_slots(self) -> None:
+        assigned: dict[str, str] = {}
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("说话人甲-女声2", assigned),
+            "female_2",
+        )
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("说话人乙-男声1", assigned),
+            "male_1",
+        )
+
     def test_assigns_stable_semantic_slots_by_gender(self) -> None:
         assigned: dict[str, str] = {}
         self.assertEqual(
