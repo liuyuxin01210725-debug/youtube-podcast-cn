@@ -64,7 +64,7 @@ class AtomicCaptionTests(unittest.TestCase):
         pieces = podcast_captions.parse_vtt_pieces(
             FIXTURE.read_text(encoding="utf-8")
         )
-        self.assertEqual([piece.source_index for piece in pieces], [0, 1, 2, 3, 4])
+        self.assertEqual([piece.source_index for piece in pieces], [0, 1, 2, 3])
         self.assertEqual(pieces[0].text, "Hello & welcome")
         self.assertEqual(pieces[1].text, "to the show.")
 
