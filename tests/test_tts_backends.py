@@ -39,6 +39,17 @@ class EdgeBackendTests(unittest.TestCase):
         )
         self.assertEqual(backend.resolve_voice("female_2"), "edge-f2")
 
+    def test_edge_default_slot_honors_legacy_voice_default(self) -> None:
+        with mock.patch.dict(
+            tts_backends.os.environ,
+            {"VOICE_DEFAULT": "zh-CN-XiaohanNeural"},
+            clear=False,
+        ):
+            backend = tts_backends.EdgeTTSBackend()
+        self.assertEqual(
+            backend.resolve_voice("default"), "zh-CN-XiaohanNeural"
+        )
+
     def test_edge_synthesizes_through_edge_tts(self) -> None:
         calls: list[tuple[str, str, str]] = []
 
@@ -78,12 +89,62 @@ class QwenBackendTests(unittest.TestCase):
         self.assertEqual(
             {slot: backend.resolve_voice(slot) for slot in tts_backends.VOICE_SLOTS},
             {
+                "default": "Cherry",
                 "male_1": "Ethan",
                 "male_2": "Dylan",
                 "female_1": "Cherry",
                 "female_2": "Serena",
             },
         )
+
+    def test_qwen_default_slot_is_cherry_and_explicit_female_stays_separate(self) -> None:
+        backend = tts_backends.Qwen3APIBackend(
+            api_key="test-key",
+            voice_map={
+                "default": "Cherry",
+                "male_1": "Ethan",
+                "male_2": "Dylan",
+                "female_1": "Serena",
+                "female_2": "Chelsie",
+            },
+        )
+        self.assertEqual(backend.resolve_voice("default"), "Cherry")
+        self.assertEqual(backend.resolve_voice("female_1"), "Serena")
+
+    def test_rejects_non_https_or_non_official_base_urls_without_secrets(self) -> None:
+        secret = "secret-test-key"
+        rejected = (
+            "http://dashscope.aliyuncs.com/api/v1",
+            "https://dashscope.aliyuncs.com.evil.example/api/v1",
+            f"https://evil.example/api/v1?api_key={secret}",
+            f"https://dashscope.aliyuncs.com:{secret}/api/v1",
+        )
+        for base_url in rejected:
+            with self.subTest(base_url=base_url):
+                with mock.patch.dict(
+                    tts_backends.os.environ,
+                    {"QWEN_TTS_BASE_URL": base_url},
+                    clear=False,
+                ):
+                    with self.assertRaises(ValueError) as caught:
+                        tts_backends.Qwen3APIBackend(api_key=secret)
+                self.assertNotIn(secret, str(caught.exception))
+                self.assertNotIn(base_url, str(caught.exception))
+
+    def test_accepts_official_china_and_international_base_urls(self) -> None:
+        for host in (
+            "dashscope.aliyuncs.com",
+            "dashscope-intl.aliyuncs.com",
+        ):
+            base_url = f"https://{host}/api/v1"
+            with self.subTest(host=host):
+                with mock.patch.dict(
+                    tts_backends.os.environ,
+                    {"QWEN_TTS_BASE_URL": base_url},
+                    clear=False,
+                ):
+                    backend = tts_backends.Qwen3APIBackend(api_key="test-key")
+                self.assertEqual(backend.base_url, base_url)
 
     def test_sends_instruct_request_and_downloads_audio(self) -> None:
         captured: dict[str, object] = {}
@@ -168,6 +229,30 @@ class QwenBackendTests(unittest.TestCase):
                 asyncio.run(backend.synthesize(request, Path("unused.wav")))
         self.assertNotIn(secret, str(caught.exception))
         self.assertIn("request-failed", str(caught.exception))
+
+    def test_arrearage_response_is_non_retryable(self) -> None:
+        class FakeConversation:
+            @staticmethod
+            def call(**kwargs):
+                return {
+                    "status_code": 400,
+                    "request_id": "request-arrearage",
+                    "code": "Arrearage",
+                    "message": "account balance is insufficient",
+                }
+
+        fake_dashscope = types.SimpleNamespace(MultiModalConversation=FakeConversation)
+        backend = tts_backends.Qwen3APIBackend(api_key="test-key")
+        request = tts_backends.SynthesisRequest(
+            text="测试。", voice_slot="male_1", style="documentary"
+        )
+        with mock.patch.object(
+            tts_backends, "_load_dashscope", return_value=fake_dashscope
+        ):
+            with self.assertRaises(tts_backends.TTSBackendError) as caught:
+                asyncio.run(backend.synthesize(request, Path("unused.wav")))
+        self.assertFalse(caught.exception.retryable)
+        self.assertIn("Arrearage", str(caught.exception))
 
     def test_sdk_exception_is_wrapped_without_sensitive_text(self) -> None:
         secret = "secret-test-key"

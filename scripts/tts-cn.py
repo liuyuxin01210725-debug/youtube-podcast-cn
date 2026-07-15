@@ -63,7 +63,12 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
-from tts_backends import SynthesisRequest, TTSBackend, build_backend
+from tts_backends import (
+    SynthesisRequest,
+    TTSBackend,
+    TTSBackendError,
+    build_backend,
+)
 from tts_cache import FragmentCache
 
 RETRIES = int(os.getenv("TTS_RETRIES", "3"))
@@ -300,26 +305,31 @@ def parse_segments(text: str) -> list[tuple[str, str]]:
     if not segments:
         cleaned = " ".join(s.strip() for s in text.split("\n") if s.strip())
         if cleaned:
-            segments = [("female_1", cleaned)]
+            segments = [("default", cleaned)]
     return segments
 
 
 def chunk_long(text: str, max_chars: int = 2500) -> list[str]:
     """超长段按句号/问号/感叹号切片。"""
+    if max_chars <= 0:
+        raise ValueError("max_chars 必须大于 0")
+    if not text:
+        return []
     if len(text) <= max_chars:
         return [text]
     pieces = re.split(r"(?<=[。!?\!\?])", text)
     out: list[str] = []
     cur = ""
     for p in pieces:
-        if not p.strip():
+        if not p:
             continue
-        if len(cur) + len(p) <= max_chars:
-            cur += p
-        else:
-            if cur:
-                out.append(cur)
-            cur = p
+        if cur and len(cur) + len(p) > max_chars:
+            out.append(cur)
+            cur = ""
+        while len(p) > max_chars:
+            out.append(p[:max_chars])
+            p = p[max_chars:]
+        cur += p
     if cur:
         out.append(cur)
     return out
@@ -418,6 +428,8 @@ async def synth_all(
                         return (cached_path, voice_slot)
                     except Exception as e:
                         last_err = e
+                        if isinstance(e, TTSBackendError) and not e.retryable:
+                            break
                         if attempt < RETRIES - 1:
                             # 退避: 0.5s, 1.0s, 1.5s, ...
                             await asyncio.sleep(0.5 * (attempt + 1))
@@ -425,7 +437,7 @@ async def synth_all(
                     stats["failed"] += 1
                 log(
                     f"  ✗ 片段 {seg_i}-{part_j} 失败 "
-                    f"({RETRIES} 次): {last_err}"
+                    f"({attempt + 1} 次): {last_err}"
                 )
                 return None
 

@@ -13,7 +13,7 @@ from typing import Protocol
 import edge_tts
 
 
-VOICE_SLOTS = ("male_1", "male_2", "female_1", "female_2")
+VOICE_SLOTS = ("default", "male_1", "male_2", "female_1", "female_2")
 STYLE_NAMES = ("conversation", "documentary")
 
 STYLE_INSTRUCTIONS = {
@@ -30,6 +30,10 @@ STYLE_INSTRUCTIONS = {
 
 class TTSBackendError(RuntimeError):
     """Safe-to-log provider error with sensitive details removed."""
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -69,14 +73,17 @@ class TTSBackend(Protocol):
 def _edge_voice_map() -> dict[str, str]:
     legacy_male = os.getenv("VOICE_MALE")
     legacy_female = os.getenv("VOICE_FEMALE")
+    male_1 = os.getenv(
+        "VOICE_MALE_1", legacy_male or "zh-CN-YunyangNeural"
+    )
+    female_1 = os.getenv(
+        "VOICE_FEMALE_1", legacy_female or "zh-CN-XiaoxiaoNeural"
+    )
     return {
-        "male_1": os.getenv(
-            "VOICE_MALE_1", legacy_male or "zh-CN-YunyangNeural"
-        ),
+        "default": os.getenv("VOICE_DEFAULT", female_1),
+        "male_1": male_1,
         "male_2": os.getenv("VOICE_MALE_2", "zh-CN-YunjianNeural"),
-        "female_1": os.getenv(
-            "VOICE_FEMALE_1", legacy_female or "zh-CN-XiaoxiaoNeural"
-        ),
+        "female_1": female_1,
         "female_2": os.getenv("VOICE_FEMALE_2", "zh-CN-XiaoyiNeural"),
     }
 
@@ -116,6 +123,7 @@ class EdgeTTSBackend:
 
 def _qwen_voice_map() -> dict[str, str]:
     return {
+        "default": os.getenv("QWEN_TTS_VOICE_DEFAULT", "Cherry"),
         "male_1": os.getenv("QWEN_TTS_VOICE_MALE_1", "Ethan"),
         "male_2": os.getenv("QWEN_TTS_VOICE_MALE_2", "Dylan"),
         "female_1": os.getenv("QWEN_TTS_VOICE_FEMALE_1", "Cherry"),
@@ -155,6 +163,38 @@ def _download_audio(url: str, output: Path) -> None:
     output.write_bytes(audio)
 
 
+_QWEN_API_HOSTS = {
+    "dashscope.aliyuncs.com",
+    "dashscope-intl.aliyuncs.com",
+}
+
+
+def _validate_qwen_base_url(base_url: str) -> str:
+    """Accept only official DashScope HTTPS API endpoints."""
+    try:
+        parsed = urllib.parse.urlparse(base_url)
+        port = parsed.port
+    except ValueError:
+        raise ValueError(
+            "QWEN_TTS_BASE_URL 必须使用官方 DashScope HTTPS 地址"
+        ) from None
+
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in _QWEN_API_HOSTS
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or bool(parsed.params)
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+    ):
+        raise ValueError(
+            "QWEN_TTS_BASE_URL 必须使用官方 DashScope HTTPS 地址"
+        )
+    return base_url
+
+
 class Qwen3APIBackend:
     name = "qwen3-api"
     file_suffix = ".wav"
@@ -172,8 +212,10 @@ class Qwen3APIBackend:
         self.model = model or os.getenv(
             "QWEN_TTS_MODEL", "qwen3-tts-instruct-flash"
         )
-        self.base_url = os.getenv(
-            "QWEN_TTS_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
+        self.base_url = _validate_qwen_base_url(
+            os.getenv(
+                "QWEN_TTS_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
+            )
         )
         self.voice_map = voice_map or _qwen_voice_map()
         self.concurrency = int(os.getenv("QWEN_TTS_CONCURRENCY", "2"))
@@ -219,10 +261,14 @@ class Qwen3APIBackend:
         request_id = _field(response, "request_id")
         provider_code = _field(response, "code")
         if status_code != 200:
+            retryable = status_code in {408, 429} or (
+                isinstance(status_code, int) and status_code >= 500
+            )
             raise TTSBackendError(
                 "Qwen TTS 请求失败"
                 f"(status={status_code}, code={provider_code or '-'}, "
-                f"request_id={request_id or '-'})"
+                f"request_id={request_id or '-'})",
+                retryable=retryable,
             )
 
         output_data = _field(response, "output", {}) or {}

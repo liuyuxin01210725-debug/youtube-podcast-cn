@@ -17,7 +17,7 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from tts_backends import SynthesisUsage
+from tts_backends import SynthesisUsage, TTSBackendError
 from tts_cache import FragmentCache
 
 
@@ -100,10 +100,28 @@ class VoiceSlotTests(unittest.TestCase):
             tts_cn.voice_slot_for_label("主持人-女", assigned), "female_1"
         )
 
-    def test_plain_text_uses_female_one_slot(self) -> None:
+    def test_plain_text_uses_default_slot_without_relabeling_explicit_female(self) -> None:
         self.assertEqual(
-            tts_cn.parse_segments("这是纯文本。"), [("female_1", "这是纯文本。")]
+            tts_cn.parse_segments("这是纯文本。"), [("default", "这是纯文本。")]
         )
+        self.assertEqual(
+            tts_cn.parse_segments("[主持人-女] 这是显式女声。"),
+            [("female_1", "这是显式女声。")],
+        )
+
+
+class ChunkLongTests(unittest.TestCase):
+    def assert_valid_chunks(self, text: str, max_chars: int) -> None:
+        chunks = tts_cn.chunk_long(text, max_chars=max_chars)
+        self.assertEqual("".join(chunks), text)
+        self.assertTrue(chunks)
+        self.assertTrue(all(0 < len(chunk) <= max_chars for chunk in chunks))
+
+    def test_hard_splits_451_character_text_without_punctuation(self) -> None:
+        self.assert_valid_chunks("甲" * 451, max_chars=450)
+
+    def test_hard_splits_long_sentence_with_only_trailing_punctuation(self) -> None:
+        self.assert_valid_chunks("乙" * 451 + "。", max_chars=450)
 
 
 class FragmentCacheOrchestrationTests(unittest.TestCase):
@@ -229,6 +247,32 @@ class FragmentCacheOrchestrationTests(unittest.TestCase):
             self.assertEqual(backend.calls, 1)
             self.assertEqual(stats["provider_calls"], 1)
             self.assertEqual(stats["cached"], 1)
+
+    def test_non_retryable_provider_error_stops_after_one_call(self) -> None:
+        class NonRetryableBackend(self.FakeBackend):
+            async def synthesize(self, request, output):
+                self.calls += 1
+                raise TTSBackendError("账户余额不足", retryable=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backend = NonRetryableBackend()
+            cache = FragmentCache(
+                root / "cache", backend.fingerprint(), backend.file_suffix
+            )
+            _, stats = asyncio.run(
+                tts_cn.synth_all(
+                    [("female_1", "测试正文。")],
+                    root / "generated",
+                    backend=backend,
+                    style="conversation",
+                    cache=cache,
+                )
+            )
+
+        self.assertEqual(backend.calls, 1)
+        self.assertEqual(stats["provider_calls"], 1)
+        self.assertEqual(stats["failed"], 1)
 
     def test_corrupt_cached_fragment_is_regenerated(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
