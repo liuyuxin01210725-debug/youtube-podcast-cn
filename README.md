@@ -67,6 +67,8 @@ bash bin/setup-podcast-model.sh deepseek
 bash bin/setup-podcast-model.sh qwen
 ```
 
+若接口提示余额或额度不足，请先在对应供应商控制台充值或开通额度，再原命令重试；不要为排错把 Key 粘贴到聊天、Issue 或日志中。
+
 ## 直接使用命令行
 
 默认 DeepSeek：

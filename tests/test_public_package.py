@@ -71,6 +71,15 @@ class PublicPackageTests(unittest.TestCase):
         )
         self.assertIn("yt-dlp==2026.3.17", requirements)
 
+    def test_gitignore_excludes_tts_cache_and_wave_fragments(self) -> None:
+        ignored_patterns = {
+            line.strip()
+            for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertIn(".tts-cache/", ignored_patterns)
+        self.assertIn("*.wav", ignored_patterns)
+
     def test_makefile_runs_every_tts_test_module(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("tests.test_tts_cn", makefile)
@@ -85,12 +94,22 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("--dump-segments", wrapper)
         self.assertNotIn("sk-", wrapper)
 
+    def test_tts_wrapper_install_hint_uses_complete_requirements(self) -> None:
+        wrapper = (ROOT / "bin/tts-cn.sh").read_text(encoding="utf-8")
+        self.assertIn("pip install -r requirements-podcast.txt", wrapper)
+        self.assertNotIn("pip install edge-tts pydub audioop-lts", wrapper)
+
     def test_readme_documents_qwen_tts_without_changing_default(self) -> None:
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("--tts qwen3-api", readme)
         self.assertIn("--tts edge", readme)
         self.assertIn("EdgeTTS 仍是默认", readme)
         self.assertIn(".tts-cache", readme)
+
+    def test_readme_explains_billing_errors_and_key_safety(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("余额或额度不足", readme)
+        self.assertIn("不要把 Key 粘贴到聊天", readme)
 
     def test_skill_distinguishes_translation_provider_from_tts_backend(self) -> None:
         skill = (ROOT / "skills/podcast-translate/SKILL.md").read_text(

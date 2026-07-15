@@ -11,6 +11,8 @@ __pycache__/
 *.pem
 
 .podcast-jobs/
+.tts-cache/
 *.mp3
+*.wav
 *.segments.txt
 *.speakers.txt

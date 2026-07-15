@@ -19,7 +19,7 @@ VENV_PY="$PROJECT_ROOT/.venv/bin/python"
 
 if [ ! -x "$VENV_PY" ]; then
   echo "❌ venv 不存在: $VENV_PY"
-  echo "运行: python3 -m venv .venv && .venv/bin/pip install edge-tts pydub audioop-lts"
+  echo "运行: cd \"$PROJECT_ROOT\" && python3 -m venv .venv && .venv/bin/pip install -r requirements-podcast.txt"
   exit 1
 fi
 
