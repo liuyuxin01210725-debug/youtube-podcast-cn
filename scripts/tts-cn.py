@@ -136,7 +136,7 @@ def strip_markdown(text: str) -> str:
             continue
         if s.startswith("#"):
             continue
-        if s.startswith(">"):
+        if s.startswith(">") and not s.startswith(">>"):
             continue
         if re.fullmatch(r"<!--.*-->", s):
             continue
@@ -155,6 +155,9 @@ def strip_markdown(text: str) -> str:
         line = _LEADING_TIMESTAMP.sub("", line, count=1)
         # 5. 删行内的音频/动作标注
         line = _ANNOTATION.sub("", line)
+        # YouTube transcripts use >> as a speaker-turn marker. It is dialogue,
+        # not a Markdown quote, so keep the words while removing the marker.
+        line = re.sub(r"(?<!\S)>>\s*", "", line)
         # 清完之后整行变空就丢
         if not line.strip():
             continue
@@ -243,7 +246,10 @@ def apply_preview_limit(cleaned: str, preview_paragraphs: int | None) -> str:
 
 
 _EXPLICIT_VOICE_SLOT = re.compile(
-    r"(?:^|[-_])(?P<gender>男|女)声(?P<number>[12])$"
+    r"(?:^|[-_])(?:"
+    r"(?P<male>男)声(?P<male_number>[123])|"
+    r"(?P<female>女)声(?P<female_number>[12])"
+    r")$"
 )
 
 
@@ -254,7 +260,7 @@ def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
 
     判断顺序:
       1. 已经分配过这个标签 → 复用
-      2. 标签以 "男声1/2" 或 "女声1/2" 结尾 → 指定音色
+      2. 标签以 "男声1/2/3" 或 "女声1/2" 结尾 → 指定音色
       3. 标签含 "男" → 男声池里轮换取一个
       4. 标签含 "女" → 女声池里轮换取一个
       5. 标签含 "主持" → 女声 (默认)
@@ -265,11 +271,13 @@ def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
 
     explicit = _EXPLICIT_VOICE_SLOT.search(label)
     if explicit:
-        prefix = "male" if explicit.group("gender") == "男" else "female"
-        voice_slot = f"{prefix}_{explicit.group('number')}"
+        if explicit.group("male"):
+            voice_slot = f"male_{explicit.group('male_number')}"
+        else:
+            voice_slot = f"female_{explicit.group('female_number')}"
     elif "男" in label:
         used = sum(1 for value in assigned.values() if value.startswith("male_"))
-        voice_slot = ("male_1", "male_2")[used % 2]
+        voice_slot = ("male_1", "male_2", "male_3")[used % 3]
     elif "女" in label:
         used = sum(1 for value in assigned.values() if value.startswith("female_"))
         voice_slot = ("female_1", "female_2")[used % 2]
@@ -278,7 +286,7 @@ def voice_slot_for_label(label: str, assigned: dict[str, str]) -> str:
         voice_slot = ("female_1", "female_2")[used % 2]
     else:
         used = sum(1 for value in assigned.values() if value.startswith("male_"))
-        voice_slot = ("male_1", "male_2")[used % 2]
+        voice_slot = ("male_1", "male_2", "male_3")[used % 3]
 
     assigned[label] = voice_slot
     return voice_slot

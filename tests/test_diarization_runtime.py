@@ -233,6 +233,39 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(stitched[-1].speaker_id, "SPEAKER_00")
 
+    def test_exact_count_uses_best_complete_prototype_mapping_when_confidence_is_low(
+        self,
+    ) -> None:
+        mapping = runtime_module._speaker_mapping(
+            [
+                DiarizationTurn(0, 300, "SPEAKER_00"),
+                DiarizationTurn(300, 600, "SPEAKER_01"),
+            ],
+            [
+                DiarizationTurn(800, 900, "SPEAKER_00"),
+                DiarizationTurn(900, 1000, "SPEAKER_01"),
+            ],
+            overlap_start_ms=600,
+            overlap_end_ms=800,
+            bounds=SpeakerBounds(exact=2),
+            existing_embeddings={
+                "SPEAKER_00": [1.0, 0.0],
+                "SPEAKER_01": [0.0, 1.0],
+            },
+            incoming_embeddings={
+                "SPEAKER_00": [-0.1, -0.9],
+                "SPEAKER_01": [-0.9, -0.1],
+            },
+        )
+
+        self.assertEqual(
+            mapping,
+            {
+                "SPEAKER_00": "SPEAKER_00",
+                "SPEAKER_01": "SPEAKER_01",
+            },
+        )
+
     def test_exact_one_never_invents_a_second_global_speaker(self) -> None:
         stitched = runtime_module._stitch_diarization_chunks(
             [DiarizationTurn(0, 400, "SPEAKER_00")],
@@ -385,7 +418,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(calls[0][calls[0].index("--num-speakers") + 1], "2")
             self.assertEqual(turns[0].speaker_id, "SPEAKER_00")
 
-    def test_parent_runs_long_audio_in_independent_overlapping_workers(self) -> None:
+    def test_parent_passes_exact_count_to_every_long_audio_worker(self) -> None:
         parameters = inspect.signature(run_sherpa_backend).parameters
         self.assertIn("chunk_duration_ms", parameters)
         self.assertIn("chunk_overlap_ms", parameters)
@@ -448,11 +481,11 @@ class RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(turns[-1], DiarizationTurn(650, 1_000, "SPEAKER_00"))
             self.assertEqual(progress, [50, 100])
-            self.assertNotIn("--num-speakers", calls[0])
-            self.assertEqual(
-                calls[0][calls[0].index("--max-speakers") + 1],
-                "2",
-            )
+            for call in calls:
+                self.assertEqual(
+                    call[call.index("--num-speakers") + 1],
+                    "2",
+                )
 
     def test_production_progress_is_emitted_before_worker_waits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

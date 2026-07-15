@@ -244,6 +244,28 @@ class SpeakerMapTests(unittest.TestCase):
         self.assertEqual(labels, ["说话人甲-女声1", "说话人乙-男声1"])
         self.assertEqual(len(labels), len(segments))
 
+    def test_accepts_a_third_male_voice_for_three_man_podcasts(self) -> None:
+        segments = [
+            SubtitleSegment(
+                "seg-000001", 0, 1000, "three", speaker_id="SPEAKER_02"
+            )
+        ]
+        mapping = {
+            "SPEAKER_02": {
+                "role": "说话人丙",
+                "display_name": "",
+                "voice_slot": "male_3",
+                "mapping_confidence": "confirmed",
+            }
+        }
+
+        write_speaker_map(self.path, mapping)
+
+        self.assertEqual(
+            render_speaker_sequence(segments, mapping),
+            ["说话人丙-男声3"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

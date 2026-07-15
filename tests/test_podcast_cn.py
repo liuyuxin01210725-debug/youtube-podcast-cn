@@ -1510,7 +1510,7 @@ class CommandLineTests(unittest.TestCase):
                 "edge-tts==7.2.8",
                 "pydub==0.25.1",
                 'audioop-lts==0.2.2; python_version >= "3.13"',
-                "yt-dlp==2026.3.17",
+                "yt-dlp==2026.7.4",
                 "dashscope==1.24.5",
             ],
         )

@@ -13,7 +13,14 @@ from typing import Protocol
 import edge_tts
 
 
-VOICE_SLOTS = ("default", "male_1", "male_2", "female_1", "female_2")
+VOICE_SLOTS = (
+    "default",
+    "male_1",
+    "male_2",
+    "male_3",
+    "female_1",
+    "female_2",
+)
 STYLE_NAMES = ("conversation", "documentary")
 
 STYLE_INSTRUCTIONS = {
@@ -83,6 +90,7 @@ def _edge_voice_map() -> dict[str, str]:
         "default": os.getenv("VOICE_DEFAULT", female_1),
         "male_1": male_1,
         "male_2": os.getenv("VOICE_MALE_2", "zh-CN-YunjianNeural"),
+        "male_3": os.getenv("VOICE_MALE_3", "zh-CN-YunxiNeural"),
         "female_1": female_1,
         "female_2": os.getenv("VOICE_FEMALE_2", "zh-CN-XiaoyiNeural"),
     }
@@ -126,6 +134,7 @@ def _qwen_voice_map() -> dict[str, str]:
         "default": os.getenv("QWEN_TTS_VOICE_DEFAULT", "Cherry"),
         "male_1": os.getenv("QWEN_TTS_VOICE_MALE_1", "Ethan"),
         "male_2": os.getenv("QWEN_TTS_VOICE_MALE_2", "Dylan"),
+        "male_3": os.getenv("QWEN_TTS_VOICE_MALE_3", "Kai"),
         "female_1": os.getenv("QWEN_TTS_VOICE_FEMALE_1", "Cherry"),
         "female_2": os.getenv("QWEN_TTS_VOICE_FEMALE_2", "Serena"),
     }
