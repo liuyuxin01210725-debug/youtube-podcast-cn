@@ -89,6 +89,14 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn(".tts-cache/", ignored_patterns)
         self.assertIn("*.wav", ignored_patterns)
 
+    def test_gitignore_excludes_persistent_setup_locks(self) -> None:
+        ignored_patterns = {
+            line.strip()
+            for line in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        self.assertIn(".*.setup.lock", ignored_patterns)
+
     def test_makefile_runs_every_tts_test_module(self) -> None:
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("tests.test_tts_cn", makefile)

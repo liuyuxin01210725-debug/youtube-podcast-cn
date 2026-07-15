@@ -2,6 +2,7 @@
 .venv/
 .diarization-venv/
 .diarization-venv.partial-*/
+.*.setup.lock
 .worktrees/
 __pycache__/
 *.py[cod]
