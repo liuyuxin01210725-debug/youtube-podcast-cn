@@ -11,6 +11,7 @@ test-public:
 
 test-podcast:
 	@$(PYTHON) tests/test_podcast_captions.py
+	@$(PYTHON) tests/test_diarization_core.py
 	@$(PYTHON) tests/test_podcast_cn.py
 
 test-tts:
