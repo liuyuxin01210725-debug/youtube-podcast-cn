@@ -13,6 +13,7 @@ import tempfile
 import urllib.request
 import wave
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -116,23 +117,59 @@ def _best_overlap_mapping(
                 if global_turn.speaker_id == global_id
             )
 
-    mapping: dict[str, str] = {}
-    used_global_ids: set[str] = set()
-    candidates = sorted(
-        (
-            (-score, local_id, global_id)
-            for (local_id, global_id), score in scores.items()
-            if score > 0
-        )
+    return _maximum_weight_mapping(
+        local_ids,
+        global_ids,
+        scores,
+        minimum_score=0.0,
     )
-    for negative_score, local_id, global_id in candidates:
-        if negative_score >= 0:
-            continue
-        if local_id in mapping or global_id in used_global_ids:
-            continue
-        mapping[local_id] = global_id
-        used_global_ids.add(global_id)
-    return mapping
+
+
+def _maximum_weight_mapping(
+    local_ids: list[str],
+    global_ids: list[str],
+    scores: dict[tuple[str, str], float | int],
+    *,
+    minimum_score: float,
+) -> dict[str, str]:
+    """Return an exact maximum-weight partial matching for at most six IDs."""
+    ordered_local = sorted(local_ids)
+    ordered_global = sorted(global_ids)
+    if len(ordered_local) > 6 or len(ordered_global) > 6:
+        raise DiarizationRuntimeError("声纹匹配人数超出安全上限")
+
+    @lru_cache(maxsize=None)
+    def solve(
+        local_index: int, used_mask: int
+    ) -> tuple[float, tuple[str, ...]]:
+        if local_index == len(ordered_local):
+            return 0.0, ()
+        local_id = ordered_local[local_index]
+        remaining_score, remaining_signature = solve(local_index + 1, used_mask)
+        best = (remaining_score, ("~",) + remaining_signature)
+        for global_index, global_id in enumerate(ordered_global):
+            if used_mask & (1 << global_index):
+                continue
+            score = float(scores.get((local_id, global_id), float("-inf")))
+            if score <= minimum_score:
+                continue
+            tail_score, tail_signature = solve(
+                local_index + 1,
+                used_mask | (1 << global_index),
+            )
+            candidate = (score + tail_score, (global_id,) + tail_signature)
+            if candidate[0] > best[0] or (
+                candidate[0] == best[0] and candidate[1] < best[1]
+            ):
+                best = candidate
+        return best
+
+    _, signature = solve(0, 0)
+    return {
+        local_id: global_id
+        for local_id, global_id in zip(ordered_local, signature, strict=True)
+        if global_id != "~"
+    }
 
 
 def _cosine_similarity(left: list[float], right: list[float]) -> float:
@@ -178,28 +215,24 @@ def _speaker_mapping(
     used_global_ids = set(mapping.values())
     existing_vectors = existing_embeddings or {}
     incoming_vectors = incoming_embeddings or {}
-    embedding_candidates = sorted(
-        (
-            (
-                -_cosine_similarity(
-                    incoming_vectors[local_id], existing_vectors[global_id]
-                ),
-                local_id,
-                global_id,
-            )
-            for local_id in local_ids
-            if local_id not in mapping and local_id in incoming_vectors
-            for global_id in global_ids
-            if global_id not in used_global_ids and global_id in existing_vectors
+    unmatched_local = [item for item in local_ids if item not in mapping]
+    available_global = [item for item in global_ids if item not in used_global_ids]
+    prototype_scores = {
+        (local_id, global_id): _cosine_similarity(
+            incoming_vectors.get(local_id, []),
+            existing_vectors.get(global_id, []),
         )
+        for local_id in unmatched_local
+        for global_id in available_global
+    }
+    prototype_mapping = _maximum_weight_mapping(
+        unmatched_local,
+        available_global,
+        prototype_scores,
+        minimum_score=0.35,
     )
-    for negative_score, local_id, global_id in embedding_candidates:
-        if local_id in mapping or global_id in used_global_ids:
-            continue
-        if -negative_score < 0.35:
-            continue
-        mapping[local_id] = global_id
-        used_global_ids.add(global_id)
+    mapping.update(prototype_mapping)
+    used_global_ids.update(prototype_mapping.values())
 
     maximum = bounds.exact if bounds.exact is not None else bounds.maximum
     all_used_ids = set(global_ids)
@@ -212,23 +245,9 @@ def _speaker_mapping(
             all_used_ids.add(new_id)
             used_global_ids.add(new_id)
             continue
-        available = [item for item in global_ids if item not in used_global_ids]
-        if not available:
-            raise DiarizationRuntimeError("声纹分块说话人无法映射到全局范围")
-        scored = sorted(
-            (
-                (
-                    -_cosine_similarity(
-                        incoming_vectors.get(local_id, []),
-                        existing_vectors.get(global_id, []),
-                    ),
-                    global_id,
-                )
-                for global_id in available
-            )
+        raise DiarizationRuntimeError(
+            "声纹分块缺少可靠的重叠或声纹证据，无法安全映射说话人"
         )
-        mapping[local_id] = scored[0][1]
-        used_global_ids.add(scored[0][1])
     return mapping
 
 

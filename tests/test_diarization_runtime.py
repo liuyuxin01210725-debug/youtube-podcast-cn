@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import contextlib
 import inspect
 import io
 import json
@@ -175,6 +176,43 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual({turn.speaker_id for turn in stitched}, {"SPEAKER_00", "SPEAKER_01"})
         self.assertTrue(all(turn.end_ms <= 750 for turn in stitched[:2]))
         self.assertEqual(stitched[-1], DiarizationTurn(1_000, 1_500, "SPEAKER_01"))
+
+    def test_maximum_weight_mapping_beats_adversarial_greedy_choice(self) -> None:
+        scores = {
+            ("L0", "G0"): 10.0,
+            ("L0", "G1"): 9.0,
+            ("L1", "G0"): 9.0,
+            ("L1", "G1"): 0.0,
+        }
+
+        mapping = runtime_module._maximum_weight_mapping(
+            ["L0", "L1"],
+            ["G0", "G1"],
+            scores,
+            minimum_score=0.0,
+        )
+
+        self.assertEqual(mapping, {"L0": "G1", "L1": "G0"})
+
+    def test_mapping_fails_when_capacity_is_full_without_identity_evidence(
+        self,
+    ) -> None:
+        with self.assertRaisesRegex(
+            runtime_module.DiarizationRuntimeError, "可靠.*证据"
+        ):
+            runtime_module._speaker_mapping(
+                [
+                    DiarizationTurn(0, 300, "SPEAKER_00"),
+                    DiarizationTurn(300, 600, "SPEAKER_01"),
+                ],
+                [
+                    DiarizationTurn(800, 900, "SPEAKER_00"),
+                    DiarizationTurn(900, 1000, "SPEAKER_01"),
+                ],
+                overlap_start_ms=600,
+                overlap_end_ms=800,
+                bounds=SpeakerBounds(exact=2),
+            )
 
     def test_stitching_uses_voice_prototypes_when_overlap_is_silent(self) -> None:
         stitched = runtime_module._stitch_diarization_chunks(
@@ -560,6 +598,48 @@ class RuntimeTests(unittest.TestCase):
                 "old",
             )
 
+    def test_pair_publication_rolls_back_models_when_runtime_publish_fails(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            model_staging = base / "models.partial"
+            runtime_staging = base / "runtime.partial"
+            model_destination = base / "models"
+            runtime_destination = base / "runtime"
+            for path, value in (
+                (model_staging, "new-models"),
+                (runtime_staging, "new-runtime"),
+                (model_destination, "old-models"),
+                (runtime_destination, "old-runtime"),
+            ):
+                path.mkdir()
+                (path / "version").write_text(value, encoding="utf-8")
+            original_replace = Path.replace
+
+            def interrupt_runtime(source: Path, target: Path) -> Path:
+                if source == runtime_staging and target == runtime_destination:
+                    raise KeyboardInterrupt
+                return original_replace(source, target)
+
+            with mock.patch.object(Path, "replace", interrupt_runtime):
+                with self.assertRaises(KeyboardInterrupt):
+                    setup_module._publish_directories(
+                        [
+                            (model_staging, model_destination),
+                            (runtime_staging, runtime_destination),
+                        ]
+                    )
+
+            self.assertEqual(
+                (model_destination / "version").read_text(encoding="utf-8"),
+                "old-models",
+            )
+            self.assertEqual(
+                (runtime_destination / "version").read_text(encoding="utf-8"),
+                "old-runtime",
+            )
+
     def test_setup_lock_serializes_concurrent_installers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             context = multiprocessing.get_context("fork")
@@ -610,6 +690,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(
             worker._format_error(RuntimeError()), "RuntimeError: 未提供错误详情"
         )
+
+    def test_worker_reserves_final_progress_for_prototype_publication(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            worker._progress_callback(10, 10)
+
+        self.assertEqual(stderr.getvalue().strip(), "PROGRESS 95")
 
     def test_worker_frame_bounds_tolerate_only_final_millisecond_rounding(
         self,

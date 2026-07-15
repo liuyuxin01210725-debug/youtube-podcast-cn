@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urlsplit
@@ -164,25 +164,43 @@ def _setup_lock(path: Path) -> object:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _publish_directory(staging: Path, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    _recover_publication(destination)
-    backup = _publication_backup(destination)
-    had_destination = destination.exists() or destination.is_symlink()
-    if had_destination:
-        destination.replace(backup)
+@contextmanager
+def _setup_locks(paths: list[Path]) -> object:
+    with ExitStack() as stack:
+        for path in sorted(set(paths), key=lambda item: str(item.resolve())):
+            stack.enter_context(_setup_lock(path))
+        yield
+
+
+def _publish_directories(pairs: list[tuple[Path, Path]]) -> None:
+    prepared: list[Path] = []
+    published: list[Path] = []
     try:
-        staging.replace(destination)
+        for _, destination in pairs:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            _recover_publication(destination)
+            backup = _publication_backup(destination)
+            if destination.exists() or destination.is_symlink():
+                destination.replace(backup)
+                prepared.append(destination)
+        for staging, destination in pairs:
+            staging.replace(destination)
+            published.append(destination)
     except BaseException:
-        if (
-            not destination.exists()
-            and not destination.is_symlink()
-            and backup.exists()
-        ):
-            backup.replace(destination)
+        for destination in reversed(published):
+            _remove_path(destination)
+        for destination in reversed(prepared):
+            backup = _publication_backup(destination)
+            if backup.exists() or backup.is_symlink():
+                backup.replace(destination)
         raise
     else:
-        _remove_path(backup)
+        for destination in prepared:
+            _remove_path(_publication_backup(destination))
+
+
+def _publish_directory(staging: Path, destination: Path) -> None:
+    _publish_directories([(staging, destination)])
 
 
 def _setup_diarization_locked(
@@ -294,9 +312,10 @@ def _setup_diarization_locked(
             json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
+        publication_pairs = [(runtime_staging, runtime_root)]
         if publish_models:
-            _publish_directory(model_staging, model_root)
-        _publish_directory(runtime_staging, runtime_root)
+            publication_pairs.insert(0, (model_staging, model_root))
+        _publish_directories(publication_pairs)
     except BaseException:
         shutil.rmtree(runtime_staging, ignore_errors=True)
         shutil.rmtree(model_staging, ignore_errors=True)
@@ -313,8 +332,11 @@ def setup_diarization(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
     """Serialize installers and preserve the last verified published runtime."""
-    lock_path = model_root.parent / ".youtube-podcast-cn-diarization.setup.lock"
-    with _setup_lock(lock_path):
+    lock_paths = [
+        runtime_root.parent / f".{runtime_root.name}.setup.lock",
+        model_root.parent / f".{model_root.name}.setup.lock",
+    ]
+    with _setup_locks(lock_paths):
         _setup_diarization_locked(
             runtime_root=runtime_root,
             model_root=model_root,

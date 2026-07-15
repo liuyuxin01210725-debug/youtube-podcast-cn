@@ -63,7 +63,8 @@ def _build_config(
 
 def _progress_callback(processed: int, total: int) -> int:
     percentage = 100 if total <= 0 else round(processed * 100 / total)
-    print(f"PROGRESS {max(0, min(100, percentage))}", file=sys.stderr, flush=True)
+    diarization_percentage = round(max(0, min(100, percentage)) * 0.95)
+    print(f"PROGRESS {diarization_percentage}", file=sys.stderr, flush=True)
     return 0
 
 
