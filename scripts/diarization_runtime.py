@@ -470,18 +470,18 @@ def _run_worker_chunk(
     try:
         completed = runner(command, capture_output=True, text=True, check=False)
         stderr = completed.stderr or ""
-        if progress_callback is not None:
-            for match in re.finditer(r"(?m)^PROGRESS (\d{1,3})$", stderr):
-                local_progress = min(100, int(match.group(1)))
-                overall_progress = round(
-                    (chunk_index + local_progress / 100) * 100 / chunk_count
-                )
-                progress_callback(min(100, overall_progress))
         if completed.returncode != 0:
             detail = stderr[-500:].strip() or "未知错误"
             if completed.returncode < 0:
                 detail = f"进程被信号 {-completed.returncode} 终止; {detail}"
             raise DiarizationRuntimeError(f"声纹分离失败: {detail}")
+        progress_matches = re.findall(r"(?m)^PROGRESS (\d{1,3})$", stderr)
+        if progress_callback is not None and progress_matches:
+            local_progress = min(100, max(int(value) for value in progress_matches))
+            overall_progress = round(
+                (chunk_index + local_progress / 100) * 100 / chunk_count
+            )
+            progress_callback(min(100, overall_progress))
         return _read_worker_turns(output_path)
     finally:
         try:

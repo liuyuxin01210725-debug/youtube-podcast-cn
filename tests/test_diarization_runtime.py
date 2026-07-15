@@ -283,6 +283,7 @@ class RuntimeTests(unittest.TestCase):
                 fingerprint={"backend": "fake"},
             )
             calls: list[list[str]] = []
+            progress: list[int] = []
 
             def fake_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
                 calls.append(command)
@@ -301,7 +302,12 @@ class RuntimeTests(unittest.TestCase):
                         {"start_ms": 650, "end_ms": 1_000, "speaker_id": "SPEAKER_01"},
                     ]
                 output.write_text(json.dumps({"turns": turns}), encoding="utf-8")
-                return subprocess.CompletedProcess(command, 0, "", "PROGRESS 100\n")
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    "",
+                    "PROGRESS 0\nPROGRESS 50\nPROGRESS 100\n",
+                )
 
             turns = run_sherpa_backend(
                 FIXTURE,
@@ -310,6 +316,7 @@ class RuntimeTests(unittest.TestCase):
                 runner=fake_runner,
                 chunk_duration_ms=600,
                 chunk_overlap_ms=200,
+                progress_callback=progress.append,
             )
 
             self.assertEqual(len(calls), 2)
@@ -324,6 +331,7 @@ class RuntimeTests(unittest.TestCase):
                 [("0", "600"), ("400", "1000")],
             )
             self.assertEqual(turns[-1], DiarizationTurn(650, 1_000, "SPEAKER_00"))
+            self.assertEqual(progress, [50, 100])
 
     def test_worker_adapter_rounds_seconds_and_sorts(self) -> None:
         self.assertIn("offset_ms", inspect.signature(result_to_turns).parameters)

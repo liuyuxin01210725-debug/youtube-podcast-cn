@@ -176,6 +176,9 @@ class SherpaDiarizationBackend:
             speaker_bounds,
             runtime=self._runtime,
             runner=self._runner,
+            progress_callback=lambda percent: print(
+                f"声纹进度:{percent}%", file=sys.stderr
+            ),
         )
 
 

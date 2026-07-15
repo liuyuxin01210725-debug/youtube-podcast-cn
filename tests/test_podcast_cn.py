@@ -897,6 +897,23 @@ class EpisodePreparationTests(unittest.TestCase):
 
 
 class DiarizationPipelineTests(unittest.TestCase):
+    def test_sherpa_backend_prints_chunk_progress_in_chinese(self) -> None:
+        backend = podcast_cn.SherpaDiarizationBackend()
+        backend._runtime = mock.Mock()
+
+        def fake_run(*args: object, **kwargs: object) -> list[object]:
+            callback = kwargs.get("progress_callback")
+            self.assertTrue(callable(callback))
+            callback(67)
+            return []
+
+        stderr = io.StringIO()
+        with mock.patch.object(podcast_cn, "run_sherpa_backend", side_effect=fake_run):
+            with contextlib.redirect_stderr(stderr):
+                backend.diarize(Path("analysis.wav"), podcast_cn.SpeakerBounds())
+
+        self.assertIn("声纹进度:67%", stderr.getvalue())
+
     URL = "https://www.youtube.com/watch?v=abc123"
 
     class FakeBackend:
