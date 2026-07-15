@@ -666,7 +666,7 @@ class TranslationResumeTests(unittest.TestCase):
 
     def test_rejects_incomplete_translator_result_without_caching_it(self) -> None:
         def incomplete_translator(segments):
-            return {segments[0].id: "只有第一段"}
+            return {}
 
         with tempfile.TemporaryDirectory() as tmp:
             chunk_dir = Path(tmp)
@@ -679,6 +679,41 @@ class TranslationResumeTests(unittest.TestCase):
                 )
 
             self.assertFalse(list(chunk_dir.glob("*.json")))
+
+    def test_recovers_incomplete_chunk_by_translating_smaller_batches(self) -> None:
+        calls = []
+
+        def size_sensitive_translator(segments):
+            calls.append([segment.id for segment in segments])
+            if len(segments) > 1:
+                return {segments[0].id: "只返回了第一段"}
+            return self.translate_chunk(segments)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            chunk_dir = Path(tmp)
+            result = podcast_cn.translate_with_resume(
+                self.segments[:2],
+                chunk_dir,
+                size_sensitive_translator,
+                max_chars=8,
+            )
+
+            self.assertEqual(
+                calls,
+                [
+                    ["seg-000001", "seg-000002"],
+                    ["seg-000001"],
+                    ["seg-000002"],
+                ],
+            )
+            self.assertEqual(
+                result,
+                {
+                    "seg-000001": "中文-seg-000001",
+                    "seg-000002": "中文-seg-000002",
+                },
+            )
+            self.assertTrue((chunk_dir / "chunk-0001.json").is_file())
 
 
 class EpisodePreparationTests(unittest.TestCase):
