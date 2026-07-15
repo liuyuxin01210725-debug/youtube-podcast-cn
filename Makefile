@@ -14,6 +14,7 @@ test-podcast:
 	@$(PYTHON) tests/test_diarization_core.py
 	@$(PYTHON) tests/test_diarization_cache.py
 	@$(PYTHON) tests/test_diarization_runtime.py
+	@$(PYTHON) tests/test_temporary_audio.py
 	@$(PYTHON) tests/test_podcast_cn.py
 
 test-tts:
