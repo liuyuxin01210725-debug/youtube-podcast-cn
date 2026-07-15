@@ -19,6 +19,9 @@ class PublicPackageTests(unittest.TestCase):
             ".gitignore",
             "install.sh",
             "Makefile",
+            "requirements-diarization.txt",
+            "scripts/diarization_models.json",
+            "bin/setup-podcast-diarization.sh",
             "skills/podcast-translate/SKILL.md",
         ]:
             with self.subTest(relative_path=relative_path):
@@ -64,6 +67,12 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn('(\".codex\", \".claude\")', installer)
         self.assertIn('"skills/podcast-translate"', installer)
         self.assertIn("PODCAST_TRANSLATE_ROOT", installer)
+
+    def test_installer_keeps_diarization_lazy_and_prints_recovery_command(self) -> None:
+        installer = (ROOT / "install.sh").read_text(encoding="utf-8")
+        self.assertNotIn("pip install -r \"$ROOT/requirements-diarization.txt\"", installer)
+        self.assertIn("setup-podcast-diarization.sh", installer)
+        self.assertIn("首次", installer)
 
     def test_runtime_requirements_include_verified_yt_dlp(self) -> None:
         requirements = (ROOT / "requirements-podcast.txt").read_text(
@@ -126,6 +135,37 @@ class PublicPackageTests(unittest.TestCase):
         self.assertIn("通义千问", readme)
         self.assertIn("--provider qwen", readme)
         self.assertIn("macOS", readme)
+
+    def test_readme_documents_local_diarization_and_cleanup(self) -> None:
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("--diarize auto", readme)
+        self.assertIn("--diarize off", readme)
+        self.assertIn("--diarize required", readme)
+        self.assertIn("--speaker-count 2", readme)
+        self.assertIn("临时原音频", readme)
+        self.assertIn("不会保留", readme)
+        self.assertIn("setup-podcast-diarization.sh", readme)
+        self.assertIn("sherpa-onnx", readme)
+        self.assertIn("Apache-2.0", readme)
+        self.assertIn("MIT", readme)
+
+    def test_skill_uses_generated_speakers_or_explicit_fallback(self) -> None:
+        skill = (ROOT / "skills/podcast-translate/SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("说话人序列:", skill)
+        self.assertIn("已回退到内容判断", skill)
+        self.assertIn("--speaker-count 2", skill)
+        self.assertIn("--diarize off", skill)
+        self.assertIn("--diarize required", skill)
+        self.assertIn("合成音色", skill)
+
+    def test_public_manifest_excludes_noncommercial_models(self) -> None:
+        manifest = (
+            ROOT / "scripts/diarization_models.json"
+        ).read_text(encoding="utf-8").casefold()
+        self.assertNotIn("reverb", manifest)
+        self.assertNotIn("non-commercial", manifest)
 
 
 if __name__ == "__main__":

@@ -3,7 +3,7 @@
 给一个带英文字幕的 YouTube 播客链接，自动完成：
 
 ```text
-英文字幕 → DeepSeek / 通义千问翻译 → 说话人判断 → 中文 MP3
+英文字幕 → 本地说话人识别 → DeepSeek / 通义千问翻译 → 中文 MP3
 ```
 
 它同时是一套可安装到 Codex 或 Claude Code 的 Agent Skill。安装后可以直接说：
@@ -21,6 +21,7 @@
 ## 功能
 
 - 自动获取 YouTube 英文人工字幕；没有时回退到英文自动字幕。
+- 默认用本地 `sherpa-onnx` 按原音频时间轴区分匿名说话人，失败时整集回退到内容判断。
 - 支持 DeepSeek 和通义千问，默认使用 DeepSeek。
 - 按字幕 ID 严格校验，不允许静默缺段、重复或乱序。
 - 翻译分块落盘，中断后重跑只补未完成部分。
@@ -30,9 +31,9 @@
 
 ## 系统要求
 
-当前公开版只支持 macOS，需要：
+当前公开版只支持 macOS arm64（Apple Silicon），需要：
 
-- Python 3.10 或更高版本
+- Python 3.10–3.14
 - `ffmpeg`（没有时可运行 `brew install ffmpeg`）
 - Codex 或 Claude Code（二选一即可；只用命令行也可以）
 
@@ -50,6 +51,12 @@ bash install.sh
 - `~/.claude/skills/podcast-translate/`
 
 安装后重新打开 Codex 或 Claude Code，让它重新发现 Skill。
+
+普通安装只准备翻译和 TTS 主环境，不会立即下载声纹依赖。首次处理 YouTube 链接时，工具会懒创建独立的 `.diarization-venv` 并下载约 47 MB 的可复用模型。需要提前安装或修复时运行：
+
+```bash
+bash bin/setup-podcast-diarization.sh
+```
 
 ## 配置模型 Key
 
@@ -83,7 +90,25 @@ bash bin/podcast-cn.sh "https://www.youtube.com/watch?v=..."
 bash bin/podcast-cn.sh "https://www.youtube.com/watch?v=..." --provider qwen
 ```
 
-命令先生成中文逐字稿。完整的 Agent Skill 会继续判断主持人与嘉宾，并调用 EdgeTTS 生成 MP3。输出默认位于：
+说话人识别默认为 `--diarize auto`：本地分析可用就生成说话人序列，不可用则整集安全回退。也可显式选择：
+
+```bash
+# 默认：自动识别，失败则回退
+bash bin/podcast-cn.sh "$URL" --diarize auto
+
+# 不下载、不分析原音频
+bash bin/podcast-cn.sh "$URL" --diarize off
+
+# 必须成功识别，否则在翻译/TTS 前停止
+bash bin/podcast-cn.sh "$URL" --diarize required
+
+# 已知是两人对谈
+bash bin/podcast-cn.sh "$URL" --speaker-count 2
+```
+
+声纹分析完全在本机运行，不消耗翻译 token、DeepSeek 额度或阿里云百炼额度。工具会临时下载用户指定视频的原音频，转为 16 kHz WAV 后分析；无论成功、失败还是中断，临时原音频都会删除，不会保留。长期只保留匿名说话人时间段、字幕对齐和可编辑音色映射等小型元数据。
+
+命令会生成中文逐字稿；声纹对齐成功时还会生成与段落一一对应的说话人序列。Agent Skill 直接把该序列交给 EdgeTTS 或 Qwen3-TTS，无需人工逐段标注。输出默认位于：
 
 ```text
 ~/Desktop/音频/
@@ -131,9 +156,10 @@ make test
 
 ## 使用边界
 
-- 视频必须带可用的英文字幕；当前版本不下载原视频，也不做 Whisper 语音识别。
+- 视频必须带可用的英文字幕；当前版本不保留原视频，也不做 Whisper 语音识别。
 - 翻译 API 以及可选的千问语音费用由用户自己的 DeepSeek 或阿里云账户承担。
-- 说话人由 Agent 根据上下文判断，偶尔可能判断错误；可以修改 `.speakers.txt` 后重新合成。
+- 本地模型只能区分匿名声音簇，不能凭声音确认姓名、身份或生理性别。交叉说话、背景音乐和很短的插话可能误判。
+- `男声` / `女声` 标签只表示合成音色，不是对原说话人性别的识别。可编辑 `speaker-map.json` 后重跑生成序列。
 - 请只处理你有权访问和转换的内容，并遵守 YouTube 条款及相应版权要求。
 
 ## 安全
@@ -144,4 +170,4 @@ make test
 
 ## 许可证
 
-MIT License。
+项目代码使用 MIT License。本地声纹运行时 `sherpa-onnx` 使用 Apache-2.0；`pyannote/segmentation-3.0` 模型使用 MIT；3D-Speaker ERes2Net 嵌入模型使用 Apache-2.0。请同时遵守上游许可证。

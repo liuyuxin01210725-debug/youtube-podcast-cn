@@ -5,7 +5,7 @@ description: "Use when the user wants to turn a YouTube English podcast or video
 
 # podcast-translate: YouTube URL / 中文稿 → 中文 mp3
 
-YouTube URL 是默认主线:自动抓英文字幕 → DeepSeek / 通义千问翻译 → speaker 判断 → EdgeTTS / 千问语音合成。翻译默认 DeepSeek，语音默认 Edge。**千问翻译**和**千问语音**是两个独立选择，不能因为用户只提到其中一个就同时切换两段流程。
+YouTube URL 是默认主线:自动抓英文字幕 → 本地声纹区分 speaker → DeepSeek / 通义千问翻译 → EdgeTTS / 千问语音合成。翻译默认 DeepSeek，语音默认 Edge。**千问翻译**和**千问语音**是两个独立选择，不能因为用户只提到其中一个就同时切换两段流程。
 
 | 用户表达 | 翻译选择 | 语音选择 |
 |---|---|---|
@@ -16,7 +16,7 @@ YouTube URL 是默认主线:自动抓英文字幕 → DeepSeek / 通义千问翻
 
 URL 翻译需要所选翻译模型的 API Key；已有中文稿只做 Edge TTS 时不需要 API，使用千问语音时需要百炼 Key 并消耗用户额度。
 
-**核心设计(2026-07)**:Agent **不重写、不长篇翻译、不清理** transcript 正文。翻译模型按稳定字幕 ID 分批翻译并落盘，Agent 只判断每段是谁说的；文本清理交给 Python。任何翻译缺段或 TTS 片段失败都会中止，不发布残缺 MP3。翻译缓存同时绑定供应商、模型和接口地址，切换模型不会误用旧稿。
+**核心设计(2026-07)**:Agent **不重写、不长篇翻译、不清理** transcript 正文。翻译模型按稳定字幕 ID 分批翻译并落盘；YouTube URL 优先直接使用本地声纹生成的 speaker 序列，只有明确回退时 Agent 才逐段判断。文本清理交给 Python。任何翻译缺段或 TTS 片段失败都会中止，不发布残缺 MP3。
 
 ---
 
@@ -71,6 +71,16 @@ URL 翻译需要所选翻译模型的 API Key；已有中文稿只做 Edge TTS �
 bash "__PODCAST_TRANSLATE_ROOT__/bin/podcast-cn.sh" "$YOUTUBE_URL"
 ```
 
+上述默认命令隐式使用 `--diarize auto`，用户无需增加任何说法。只在用户明确表达时追加：
+
+| 用户表达 | 追加参数 |
+|---|---|
+| “不要分析原音频” | `--diarize off` |
+| “必须准确区分说话人” | `--diarize required` |
+| “这是两个人的播客” | `--speaker-count 2` |
+
+参数可与 `--provider qwen` 合并，但不要自行猜测人数。
+
 用户明确要求“千问翻译”或“用千问把播客翻成中文”时，选择千问翻译:
 
 ```bash
@@ -79,7 +89,7 @@ bash "__PODCAST_TRANSLATE_ROOT__/bin/podcast-cn.sh" "$YOUTUBE_URL" --provider qw
 
 这里的 `--provider` 只控制翻译，不控制语音。当前只支持 DeepSeek 和通义千问这两种翻译供应商。用户要求 Kimi、豆包、MiniMax、智谱或其他平台时，说明尚未加入该预设；不要偷偷映射到 DeepSeek 或千问，也不要把任意接口地址当成已验证平台。
 
-脚本只抓字幕、不下载视频或原音频。它优先人工英文字幕，没有时才用英文自动字幕。成功时 stdout 只有两行:`英文标题:` 和 `中文字幕:`。记住第二行的中文稿路径。
+脚本优先抓人工英文字幕，没有时才用英文自动字幕。默认会临时下载原音频做本地声纹分析；成功、失败或中断后都删除，不会保留。记住 stdout 中的 `中文字幕:` 路径，并检查是否同时有 `说话人序列:`。
 
 如果提示还没有配置 API Key，让用户在自己的终端运行对应命令，并在隐藏输入提示中粘贴 Key。
 
@@ -99,7 +109,23 @@ Key 会进入各自的 macOS 钥匙串，后续翻译或 TTS 脚本按需自动�
 
 ### U2. 接入 speaker 与 TTS
 
-把 U1 输出的 `中文字幕:` 路径作为“原始逐字稿路径”，继续执行下面路径 A 的第 1-6 步。读稿仍然每次最多 250 行。内部 `<!-- seg-000001 -->` 注释用于缺段核对，复制时保留即可，TTS 会自动剥除，不能把它当作正文或 speaker 段。用户若明确选择了千问语音，在第 5 步使用对应的 `--tts qwen3-api` 命令；否则继续默认 Edge。
+先把 U1 输出的 `中文字幕:` 路径按路径 A 的第 1-2 步定标题并复制到音频目录。内部 `<!-- seg-000001 -->` 注释复制时保留，TTS 会自动剥除。然后严格按 stdout 分流：
+
+1. 有 `说话人序列:`：记住该文件路径，**跳过路径 A 的第 3-4 步**，不再读全稿、不再 dump，也不人工逐段判断。直接执行第 5 步，将该路径传给 `bin/tts-cn.sh --speakers` 。
+2. 有 `已回退到内容判断` 或 `说话人识别:已关闭`：按路径 A 的第 3-5 步执行现有 Agent speaker 判断流程，不得伪称已由声纹识别。
+3. `--diarize required` 报错：停止翻译/TTS 后续，告知用户错误摘要和恢复命令 `bash "__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-diarization.sh"`。
+
+自动序列的 Edge 命令形状必须是：
+
+```bash
+bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" \
+  "$HOME/Desktop/音频/<中文标题>.md" \
+  --speakers "$GENERATED_SPEAKERS" --tts edge
+```
+
+用户明确要千问语音时，只把末尾换成 `--tts qwen3-api --style conversation`。
+
+生成的 `说话人甲-女声1` / `说话人乙-男声1` 中，“男声/女声”只是合成音色，不代表工具识别了原说话人的性别。如果有可靠的公开姓名或角色，可编辑说话人序列同目录下的 `speaker-map.json`；重跑 U1 会保留用户编辑并重生序列。
 
 ---
 
@@ -230,6 +256,8 @@ bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标
 
 **标签必须带性别后缀**,TTS 靠标签里的"男/女"字分声音池。
 
+本地声纹自动生成的编号标签可用 `女声1/女声2/男声1/男声2`。这些是合成音色编号，不是身份或性别推断。以下姓名与性别规则只用于 Agent 内容判断回退路径。
+
 格式:`[主持人-女]` / `[嘉宾-男]`。也可以真名 + 性别:`[Rhonda-女]` / `[Brady-男]`。
 
 **多嘉宾(2 人以上)** 用甲乙丙丁区分,每个带自己的性别:`[嘉宾甲-男]` `[嘉宾乙-女]`。TTS 自动给同性别的多个 speaker 轮换声音(男声池/女声池各 2 个),同性别 ≤ 2 人时听感是不同人。
@@ -303,6 +331,7 @@ VOICE_MALE_1=zh-CN-XiaoxiaoNeural VOICE_FEMALE_1=zh-CN-YunyangNeural \
 - `__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-model.sh` — 把 DeepSeek / 千问 Key 安全保存到各自的 macOS 钥匙串
 - `__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-deepseek.sh` — DeepSeek 初始化兼容入口
 - `__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-qwen.sh` — 通义千问初始化快捷入口
+- `__PODCAST_TRANSLATE_ROOT__/bin/setup-podcast-diarization.sh` — 提前安装或修复本地声纹运行时
 - `__PODCAST_TRANSLATE_ROOT__/scripts/podcast_cn.py` — 字幕抓取、VTT 解析、多模型分批翻译和断点续跑
 - `__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh` — bash 入口(参数透传给 python)
 - `__PODCAST_TRANSLATE_ROOT__/scripts/tts-cn.py` — 核心脚本(`--dump-segments` / `--speakers` / `--tts`)
