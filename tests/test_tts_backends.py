@@ -92,6 +92,7 @@ class QwenBackendTests(unittest.TestCase):
                 "default": "Cherry",
                 "male_1": "Ethan",
                 "male_2": "Dylan",
+                "male_3": "Kai",
                 "female_1": "Cherry",
                 "female_2": "Serena",
             },

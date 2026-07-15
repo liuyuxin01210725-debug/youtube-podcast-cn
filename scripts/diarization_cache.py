@@ -17,7 +17,7 @@ from podcast_captions import CaptionPiece, SubtitleSegment
 
 SCHEMA_VERSION = 1
 ALIGNMENT_VERSION = 1
-VOICE_ORDER = ("female_1", "male_1", "female_2", "male_2")
+VOICE_ORDER = ("female_1", "male_1", "female_2", "male_2", "male_3")
 CHINESE_ORDINALS = ("甲", "乙", "丙", "丁", "戊", "己")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _VOICE_SUFFIX = {
@@ -25,6 +25,7 @@ _VOICE_SUFFIX = {
     "female_2": "女声2",
     "male_1": "男声1",
     "male_2": "男声2",
+    "male_3": "男声3",
 }
 
 

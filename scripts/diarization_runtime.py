@@ -234,6 +234,30 @@ def _speaker_mapping(
     mapping.update(prototype_mapping)
     used_global_ids.update(prototype_mapping.values())
 
+    unmatched_local = [item for item in local_ids if item not in mapping]
+    available_global = [item for item in global_ids if item not in used_global_ids]
+    if (
+        bounds.exact is not None
+        and unmatched_local
+        and len(unmatched_local) == len(available_global)
+        and all(item in incoming_vectors for item in unmatched_local)
+        and all(item in existing_vectors for item in available_global)
+    ):
+        # An exact user-confirmed count gives us a closed one-to-one set. If
+        # overlap and the conservative 0.35 threshold both fail, keep speaker
+        # identities stable by choosing the best complete prototype matching.
+        fallback_mapping = _maximum_weight_mapping(
+            unmatched_local,
+            available_global,
+            {
+                pair: score + 2.0
+                for pair, score in prototype_scores.items()
+            },
+            minimum_score=0.0,
+        )
+        mapping.update(fallback_mapping)
+        used_global_ids.update(fallback_mapping.values())
+
     maximum = bounds.exact if bounds.exact is not None else bounds.maximum
     all_used_ids = set(global_ids)
     for local_id in local_ids:
@@ -661,7 +685,7 @@ def _run_worker_chunk(
         "--end-ms",
         str(end_ms),
     ]
-    if bounds.exact == 1 or (bounds.exact is not None and chunk_count == 1):
+    if bounds.exact is not None:
         command.extend(["--num-speakers", str(bounds.exact)])
     else:
         command.extend(

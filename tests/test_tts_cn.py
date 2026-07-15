@@ -95,6 +95,10 @@ class VoiceSlotTests(unittest.TestCase):
             tts_cn.voice_slot_for_label("说话人乙-男声1", assigned),
             "male_1",
         )
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("说话人丙-男声3", assigned),
+            "male_3",
+        )
 
     def test_assigns_stable_semantic_slots_by_gender(self) -> None:
         assigned: dict[str, str] = {}
@@ -106,6 +110,9 @@ class VoiceSlotTests(unittest.TestCase):
         )
         self.assertEqual(
             tts_cn.voice_slot_for_label("嘉宾乙-男", assigned), "male_2"
+        )
+        self.assertEqual(
+            tts_cn.voice_slot_for_label("嘉宾丙-男", assigned), "male_3"
         )
         self.assertEqual(
             tts_cn.voice_slot_for_label("主持人-女", assigned), "female_1"
@@ -325,6 +332,19 @@ class NoiseParagraphTests(unittest.TestCase):
             "<!-- seg-000001 -->\n这是中文译文。\n<!-- seg-000002 -->\n下一段。"
         )
         self.assertEqual(cleaned, "这是中文译文。\n下一段。")
+
+    def test_preserves_youtube_double_chevron_dialogue(self) -> None:
+        cleaned = tts_cn.strip_markdown(
+            "> 来源:https://example.com\n\n"
+            "<!-- seg-000001 -->\n\n"
+            ">> 第一位主持人的话。\n\n"
+            "<!-- seg-000002 -->\n\n"
+            "第二位主持人的话。 >> 嘉宾的回答。"
+        )
+        self.assertEqual(
+            tts_cn.drop_noise_paragraphs(tts_cn.split_into_paragraphs(cleaned)),
+            ["第一位主持人的话。", "第二位主持人的话。 嘉宾的回答。"],
+        )
 
     def test_preserves_short_real_dialogue(self) -> None:
         self.assertEqual(tts_cn.drop_noise_paragraphs(["没错"]), ["没错"])
