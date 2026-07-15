@@ -28,6 +28,7 @@ from diarization_runtime import (
 
 ROOT = Path(__file__).resolve().parents[1]
 _ALLOWED_DOWNLOAD_HOSTS = {"github.com", "githubusercontent.com", "huggingface.co"}
+_ALLOWED_EXACT_DOWNLOAD_HOSTS = {"cas-bridge.xethub.hf.co"}
 
 
 def _check_platform() -> None:
@@ -44,9 +45,12 @@ def _check_platform() -> None:
 def _allowed_download_url(url: str) -> bool:
     parsed = urlsplit(url)
     host = (parsed.hostname or "").casefold()
-    return parsed.scheme == "https" and any(
-        host == allowed or host.endswith(f".{allowed}")
-        for allowed in _ALLOWED_DOWNLOAD_HOSTS
+    return parsed.scheme == "https" and (
+        host in _ALLOWED_EXACT_DOWNLOAD_HOSTS
+        or any(
+            host == allowed or host.endswith(f".{allowed}")
+            for allowed in _ALLOWED_DOWNLOAD_HOSTS
+        )
     )
 
 

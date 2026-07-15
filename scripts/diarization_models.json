@@ -6,10 +6,10 @@
   "assets": [
     {
       "name": "segmentation",
-      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx",
+      "url": "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/model.onnx",
       "archive_member": null,
       "target": "segmentation.onnx",
-      "target_sha256": "10a438c2e0d90ed5f5da545cec2244d887315f6dbbbf1d3d564d00745b01952e",
+      "target_sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
       "license": "MIT",
       "license_url": "https://huggingface.co/pyannote/segmentation-3.0"
     },

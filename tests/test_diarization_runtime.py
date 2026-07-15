@@ -28,6 +28,7 @@ from diarization_runtime import (  # noqa: E402
     load_model_manifest,
     run_sherpa_backend,
 )
+from setup_diarization import _allowed_download_url  # noqa: E402
 from sherpa_diarization_worker import result_to_turns  # noqa: E402
 
 
@@ -55,10 +56,45 @@ class RuntimeTests(unittest.TestCase):
             self.assertRegex(asset["target_sha256"], r"^[0-9a-f]{64}$")
             self.assertIn(asset["license"], {"MIT", "Apache-2.0"})
 
+    def test_segmentation_asset_is_pinned_to_verified_hugging_face_revision(
+        self,
+    ) -> None:
+        manifest = load_model_manifest(MANIFEST)
+        segmentation = next(
+            asset for asset in manifest["assets"] if asset["name"] == "segmentation"
+        )
+        self.assertIn(
+            "/resolve/9403a6902bb58e3d5ae8c7e77c3422de279db2e0/",
+            segmentation["url"],
+        )
+        self.assertEqual(
+            segmentation["target_sha256"],
+            "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+        )
+
     def test_dependency_versions_are_pinned(self) -> None:
         self.assertEqual(
             REQUIREMENTS.read_text(encoding="utf-8").splitlines(),
             ["sherpa-onnx==1.13.2", "soundfile==0.14.0"],
+        )
+
+    def test_download_whitelist_accepts_official_hugging_face_xet_bridge_only(
+        self,
+    ) -> None:
+        self.assertTrue(
+            _allowed_download_url(
+                "https://cas-bridge.xethub.hf.co/xet-bridge-us/model.onnx"
+            )
+        )
+        self.assertFalse(
+            _allowed_download_url(
+                "https://cas-bridge.xethub.hf.co.attacker.example/model.onnx"
+            )
+        )
+        self.assertFalse(
+            _allowed_download_url(
+                "https://unexpected.cas-bridge.xethub.hf.co/model.onnx"
+            )
         )
 
     def test_fingerprint_contains_hashes_but_no_download_urls(self) -> None:
