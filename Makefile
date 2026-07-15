@@ -10,6 +10,7 @@ test-public:
 	@python3 tests/test_public_package.py
 
 test-podcast:
+	@$(PYTHON) tests/test_podcast_captions.py
 	@$(PYTHON) tests/test_podcast_cn.py
 
 test-tts:

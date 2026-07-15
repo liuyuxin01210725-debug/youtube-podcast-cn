@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import html
 import hashlib
 import json
 import os
@@ -18,16 +17,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from podcast_captions import (
+    CaptionPiece,
+    CaptionUnavailableError,
+    PodcastPipelineError,
+    SubtitleSegment,
+    group_caption_pieces,
+    parse_vtt,
+    parse_vtt_pieces,
+)
+
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
-
-
-class PodcastPipelineError(RuntimeError):
-    """Base error for failures that can be shown directly to the user."""
-
-
-class CaptionUnavailableError(PodcastPipelineError):
-    """Raised when a video has no usable English caption track."""
 
 
 class TranslationValidationError(PodcastPipelineError):
@@ -99,149 +100,11 @@ class VideoMetadata:
 
 
 @dataclass(frozen=True)
-class SubtitleSegment:
-    id: str
-    start_ms: int
-    end_ms: int
-    text: str
-
-
-@dataclass(frozen=True)
 class PreparedEpisode:
     video_id: str
     source_title: str
     transcript_path: Path
     state_path: Path
-
-
-_TIMING_LINE = re.compile(
-    r"^(?P<start>(?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})\s+-->\s+"
-    r"(?P<end>(?:\d{1,2}:)?\d{2}:\d{2}[.,]\d{3})(?:\s+.*)?$"
-)
-_VTT_TAG = re.compile(r"<[^>]+>")
-_TOKEN_EDGE = re.compile(r"^[\W_]+|[\W_]+$")
-_SENTENCE_END = re.compile(r"[.!?…][\"'”’)]*$")
-
-
-def _timestamp_ms(value: str) -> int:
-    parts = value.replace(",", ".").split(":")
-    if len(parts) == 2:
-        hours = 0
-        minutes_text, seconds_text = parts
-    elif len(parts) == 3:
-        hours = int(parts[0])
-        minutes_text, seconds_text = parts[1:]
-    else:
-        raise ValueError(f"无法解析字幕时间:{value}")
-    seconds, milliseconds = seconds_text.split(".")
-    return (
-        hours * 3_600_000
-        + int(minutes_text) * 60_000
-        + int(seconds) * 1_000
-        + int(milliseconds)
-    )
-
-
-def _clean_cue_text(lines: list[str]) -> str:
-    cleaned_lines: list[str] = []
-    for line in lines:
-        without_tags = _VTT_TAG.sub("", line)
-        cleaned = html.unescape(without_tags).strip()
-        if cleaned:
-            cleaned_lines.append(cleaned)
-    return " ".join(cleaned_lines)
-
-
-def _comparable_token(token: str) -> str:
-    return _TOKEN_EDGE.sub("", token.casefold())
-
-
-def _new_rolling_text(previous_cue: str, current_cue: str) -> str:
-    """Remove only the repeated prefix introduced by rolling captions."""
-    if not previous_cue:
-        return current_cue
-
-    previous_tokens = previous_cue.split()
-    current_tokens = current_cue.split()
-    previous_cmp = [_comparable_token(token) for token in previous_tokens]
-    current_cmp = [_comparable_token(token) for token in current_tokens]
-    overlap = 0
-    for size in range(min(len(previous_cmp), len(current_cmp)), 0, -1):
-        if previous_cmp[-size:] == current_cmp[:size]:
-            overlap = size
-            break
-    return " ".join(current_tokens[overlap:]).strip()
-
-
-def parse_vtt(text: str) -> list[SubtitleSegment]:
-    """Parse VTT cues and suppress repeated rolling-caption prefixes."""
-    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-    pieces: list[tuple[int, int, str]] = []
-    previous_cue = ""
-
-    for block in re.split(r"\n\s*\n", normalized):
-        lines = [line.strip() for line in block.splitlines() if line.strip()]
-        timing_index = next(
-            (index for index, line in enumerate(lines) if _TIMING_LINE.match(line)),
-            None,
-        )
-        if timing_index is None:
-            continue
-
-        timing = _TIMING_LINE.match(lines[timing_index])
-        if timing is None:
-            continue
-        cue_text = _clean_cue_text(lines[timing_index + 1 :])
-        if not cue_text:
-            continue
-
-        new_text = _new_rolling_text(previous_cue, cue_text)
-        previous_cue = cue_text
-        if not new_text:
-            continue
-
-        pieces.append(
-            (
-                _timestamp_ms(timing.group("start")),
-                _timestamp_ms(timing.group("end")),
-                new_text,
-            )
-        )
-
-    segments: list[SubtitleSegment] = []
-    paragraph_parts: list[str] = []
-    paragraph_start = 0
-    paragraph_end = 0
-
-    def flush_paragraph() -> None:
-        nonlocal paragraph_parts, paragraph_start, paragraph_end
-        if not paragraph_parts:
-            return
-        segments.append(
-            SubtitleSegment(
-                id=f"seg-{len(segments) + 1:06d}",
-                start_ms=paragraph_start,
-                end_ms=paragraph_end,
-                text=" ".join(paragraph_parts),
-            )
-        )
-        paragraph_parts = []
-
-    for start_ms, end_ms, piece in pieces:
-        if paragraph_parts and start_ms - paragraph_end > 2000:
-            flush_paragraph()
-        if not paragraph_parts:
-            paragraph_start = start_ms
-        paragraph_parts.append(piece)
-        paragraph_end = end_ms
-        paragraph_text = " ".join(paragraph_parts)
-        if _SENTENCE_END.search(paragraph_text) or len(paragraph_text) >= 360:
-            flush_paragraph()
-    flush_paragraph()
-
-    if not segments:
-        raise CaptionUnavailableError("英文字幕为空或无法解析")
-    return segments
 
 
 def _english_track_key(tracks: object) -> str | None:
