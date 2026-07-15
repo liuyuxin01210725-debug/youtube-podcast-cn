@@ -10,12 +10,15 @@ from pathlib import Path
 from typing import Iterable
 
 
-def result_to_turns(result: Iterable[object]) -> list[dict[str, object]]:
+def result_to_turns(
+    result: Iterable[object], *, offset_ms: int = 0
+) -> list[dict[str, object]]:
     """Convert sherpa's second-based segments to stable millisecond JSON."""
     turns = [
         {
-            "start_ms": round(float(getattr(segment, "start")) * 1000),
-            "end_ms": round(float(getattr(segment, "end")) * 1000),
+            "start_ms": offset_ms
+            + round(float(getattr(segment, "start")) * 1000),
+            "end_ms": offset_ms + round(float(getattr(segment, "end")) * 1000),
             "speaker_id": f"SPEAKER_{int(getattr(segment, 'speaker')):02d}",
         }
         for segment in result
@@ -72,6 +75,36 @@ def _atomic_write(path: Path, payload: object) -> None:
     temporary.replace(path)
 
 
+def _format_error(error: Exception) -> str:
+    detail = str(error).strip() or "未提供错误详情"
+    return f"{type(error).__name__}: {detail}"
+
+
+def _frame_bounds(
+    *,
+    total_frames: int,
+    sample_rate: int,
+    start_ms: int,
+    end_ms: int | None,
+) -> tuple[int, int]:
+    start_frame = round(start_ms * sample_rate / 1000)
+    requested_end_frame = (
+        total_frames
+        if end_ms is None
+        else round(end_ms * sample_rate / 1000)
+    )
+    rounding_tolerance_frames = max(1, round(sample_rate / 1000))
+    if requested_end_frame > total_frames:
+        if requested_end_frame - total_frames > rounding_tolerance_frames:
+            raise RuntimeError("声纹分块时间范围无效")
+        end_frame = total_frames
+    else:
+        end_frame = requested_end_frame
+    if not 0 <= start_frame < end_frame <= total_frames:
+        raise RuntimeError("声纹分块时间范围无效")
+    return start_frame, end_frame
+
+
 def run_worker(args: argparse.Namespace) -> None:
     import sherpa_onnx
     import soundfile
@@ -88,18 +121,33 @@ def run_worker(args: argparse.Namespace) -> None:
         raise RuntimeError("正常运行必须提供 --audio 和 --output")
 
     diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
-    audio, sample_rate = soundfile.read(
-        args.audio, dtype="float32", always_2d=True
-    )
-    if sample_rate != 16_000 or audio.shape[1] != 1:
-        raise RuntimeError("声纹输入必须是 16 kHz 单声道 WAV")
+    start_ms = args.start_ms or 0
+    with soundfile.SoundFile(args.audio) as source:
+        sample_rate = source.samplerate
+        if sample_rate != 16_000 or source.channels != 1:
+            raise RuntimeError("声纹输入必须是 16 kHz 单声道 WAV")
+        start_frame, end_frame = _frame_bounds(
+            total_frames=len(source),
+            sample_rate=sample_rate,
+            start_ms=start_ms,
+            end_ms=args.end_ms,
+        )
+        source.seek(start_frame)
+        audio = source.read(
+            frames=end_frame - start_frame,
+            dtype="float32",
+            always_2d=True,
+        )
     print("PROGRESS 0", file=sys.stderr, flush=True)
     result = diarizer.process(audio[:, 0], callback=_progress_callback)
     if hasattr(result, "sort_by_start_time"):
         sorted_result = result.sort_by_start_time()
         if sorted_result is not None:
             result = sorted_result
-    _atomic_write(args.output, {"turns": result_to_turns(result)})
+    _atomic_write(
+        args.output,
+        {"turns": result_to_turns(result, offset_ms=start_ms)},
+    )
     print("PROGRESS 100", file=sys.stderr, flush=True)
 
 
@@ -109,6 +157,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--segmentation-model", type=Path, required=True)
     parser.add_argument("--embedding-model", type=Path, required=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--start-ms", type=int)
+    parser.add_argument("--end-ms", type=int)
     parser.add_argument("--num-speakers", type=int)
     parser.add_argument("--min-speakers", type=int)
     parser.add_argument("--max-speakers", type=int)
@@ -121,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         run_worker(args)
     except Exception as error:
-        print(str(error), file=sys.stderr)
+        print(_format_error(error), file=sys.stderr)
         return 1
     return 0
 

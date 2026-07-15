@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -21,7 +22,8 @@ SCRIPTS = ROOT / "scripts"
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from diarization_core import SpeakerBounds  # noqa: E402
+from diarization_core import DiarizationTurn, SpeakerBounds  # noqa: E402
+import diarization_runtime as runtime_module  # noqa: E402
 from diarization_runtime import (  # noqa: E402
     backend_fingerprint,
     ensure_diarization_runtime,
@@ -29,6 +31,7 @@ from diarization_runtime import (  # noqa: E402
     run_sherpa_backend,
 )
 from setup_diarization import _allowed_download_url  # noqa: E402
+import sherpa_diarization_worker as worker  # noqa: E402
 from sherpa_diarization_worker import result_to_turns  # noqa: E402
 
 
@@ -111,6 +114,52 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(wav.getframerate(), 16_000)
             self.assertEqual(wav.getsampwidth(), 2)
             self.assertEqual(wav.getnframes(), 16_000)
+
+    def test_long_audio_ranges_limit_each_worker_and_keep_wide_overlap(self) -> None:
+        self.assertTrue(hasattr(runtime_module, "_chunk_ranges"))
+        self.assertEqual(
+            runtime_module._chunk_ranges(
+                1_700_000,
+                chunk_duration_ms=900_000,
+                overlap_ms=300_000,
+            ),
+            [(0, 900_000), (600_000, 1_500_000), (1_200_000, 1_700_000)],
+        )
+        self.assertEqual(
+            runtime_module._chunk_ranges(
+                120_000,
+                chunk_duration_ms=900_000,
+                overlap_ms=300_000,
+            ),
+            [(0, 120_000)],
+        )
+
+    def test_overlap_stitching_maps_reversed_local_speakers_to_global_ids(
+        self,
+    ) -> None:
+        self.assertTrue(hasattr(runtime_module, "_stitch_diarization_chunks"))
+        first = [
+            DiarizationTurn(0, 650, "SPEAKER_00"),
+            DiarizationTurn(650, 750, "SPEAKER_01"),
+            DiarizationTurn(750, 900, "SPEAKER_00"),
+        ]
+        second = [
+            DiarizationTurn(600, 700, "SPEAKER_01"),
+            DiarizationTurn(700, 760, "SPEAKER_00"),
+            DiarizationTurn(760, 1_000, "SPEAKER_01"),
+            DiarizationTurn(1_000, 1_500, "SPEAKER_00"),
+        ]
+
+        stitched = runtime_module._stitch_diarization_chunks(
+            first,
+            second,
+            overlap_start_ms=600,
+            overlap_end_ms=900,
+        )
+
+        self.assertEqual({turn.speaker_id for turn in stitched}, {"SPEAKER_00", "SPEAKER_01"})
+        self.assertTrue(all(turn.end_ms <= 750 for turn in stitched[:2]))
+        self.assertEqual(stitched[-1], DiarizationTurn(1_000, 1_500, "SPEAKER_01"))
 
     def test_valid_runtime_and_models_use_no_network_or_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -220,21 +269,107 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(calls[0][calls[0].index("--num-speakers") + 1], "2")
             self.assertEqual(turns[0].speaker_id, "SPEAKER_00")
 
+    def test_parent_runs_long_audio_in_independent_overlapping_workers(self) -> None:
+        parameters = inspect.signature(run_sherpa_backend).parameters
+        self.assertIn("chunk_duration_ms", parameters)
+        self.assertIn("chunk_overlap_ms", parameters)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runtime = SimpleNamespace(
+                python=base / "python",
+                model_dir=base,
+                segmentation_model=base / "segmentation.onnx",
+                embedding_model=base / "embedding.onnx",
+                fingerprint={"backend": "fake"},
+            )
+            calls: list[list[str]] = []
+
+            def fake_runner(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append(command)
+                start = int(command[command.index("--start-ms") + 1])
+                end = int(command[command.index("--end-ms") + 1])
+                output = Path(command[command.index("--output") + 1])
+                if (start, end) == (0, 600):
+                    turns = [
+                        {"start_ms": 0, "end_ms": 500, "speaker_id": "SPEAKER_00"},
+                        {"start_ms": 500, "end_ms": 600, "speaker_id": "SPEAKER_01"},
+                    ]
+                else:
+                    turns = [
+                        {"start_ms": 400, "end_ms": 500, "speaker_id": "SPEAKER_01"},
+                        {"start_ms": 500, "end_ms": 650, "speaker_id": "SPEAKER_00"},
+                        {"start_ms": 650, "end_ms": 1_000, "speaker_id": "SPEAKER_01"},
+                    ]
+                output.write_text(json.dumps({"turns": turns}), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "PROGRESS 100\n")
+
+            turns = run_sherpa_backend(
+                FIXTURE,
+                SpeakerBounds(exact=2),
+                runtime=runtime,
+                runner=fake_runner,
+                chunk_duration_ms=600,
+                chunk_overlap_ms=200,
+            )
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(
+                [
+                    (
+                        call[call.index("--start-ms") + 1],
+                        call[call.index("--end-ms") + 1],
+                    )
+                    for call in calls
+                ],
+                [("0", "600"), ("400", "1000")],
+            )
+            self.assertEqual(turns[-1], DiarizationTurn(650, 1_000, "SPEAKER_00"))
+
     def test_worker_adapter_rounds_seconds_and_sorts(self) -> None:
+        self.assertIn("offset_ms", inspect.signature(result_to_turns).parameters)
         fake_result = [
             SimpleNamespace(start=1.2346, end=2.0004, speaker=1),
             SimpleNamespace(start=0.0004, end=0.9996, speaker=0),
         ]
 
-        turns = result_to_turns(fake_result)
+        turns = result_to_turns(fake_result, offset_ms=600_000)
 
         self.assertEqual(
             turns,
             [
-                {"start_ms": 0, "end_ms": 1000, "speaker_id": "SPEAKER_00"},
-                {"start_ms": 1235, "end_ms": 2000, "speaker_id": "SPEAKER_01"},
+                {"start_ms": 600_000, "end_ms": 601_000, "speaker_id": "SPEAKER_00"},
+                {"start_ms": 601_235, "end_ms": 602_000, "speaker_id": "SPEAKER_01"},
             ],
         )
+
+    def test_worker_error_formatter_keeps_exception_type_when_message_is_empty(
+        self,
+    ) -> None:
+        self.assertTrue(hasattr(worker, "_format_error"))
+        self.assertEqual(
+            worker._format_error(RuntimeError()), "RuntimeError: 未提供错误详情"
+        )
+
+    def test_worker_frame_bounds_tolerate_only_final_millisecond_rounding(
+        self,
+    ) -> None:
+        self.assertTrue(hasattr(worker, "_frame_bounds"))
+        self.assertEqual(
+            worker._frame_bounds(
+                total_frames=27_347_534,
+                sample_rate=16_000,
+                start_ms=1_200_000,
+                end_ms=1_709_221,
+            ),
+            (19_200_000, 27_347_534),
+        )
+        with self.assertRaises(RuntimeError):
+            worker._frame_bounds(
+                total_frames=27_347_534,
+                sample_rate=16_000,
+                start_ms=1_200_000,
+                end_ms=1_710_000,
+            )
 
 
 if __name__ == "__main__":
