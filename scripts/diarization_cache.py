@@ -117,6 +117,7 @@ class DiarizationCache:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "warnings": warning_list,
         }
+        _safe_unlink(self.assignments_path)
         _atomic_json_write(self.turns_path, payload)
 
     def load_turns(

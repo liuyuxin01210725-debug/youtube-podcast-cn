@@ -144,6 +144,24 @@ class DiarizationCacheTests(unittest.TestCase):
         self.assertFalse(self.cache.assignments_path.exists())
         self.assertTrue(self.cache.turns_path.exists())
 
+    def test_publishing_new_turns_deletes_orphaned_assignments(self) -> None:
+        pieces = [CaptionPiece(0, 1000, "hello", 0)]
+        assignments = [
+            SpeakerAssignment(0, "SPEAKER_00", 1000, 1.0, False, "overlap")
+        ]
+        self.cache.store_assignments(pieces, assignments)
+        self.assertTrue(self.cache.assignments_path.exists())
+
+        self.cache.store_turns(
+            self.identity,
+            self.bounds,
+            self.fingerprint,
+            self.turns,
+            "c" * 64,
+        )
+
+        self.assertFalse(self.cache.assignments_path.exists())
+
 
 class SpeakerMapTests(unittest.TestCase):
     def setUp(self) -> None:

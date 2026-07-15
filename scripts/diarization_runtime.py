@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -46,6 +47,13 @@ class DiarizationRuntime:
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
+PopenFactory = Callable[..., object]
+
+
+@dataclass(frozen=True)
+class WorkerChunk:
+    turns: list[DiarizationTurn]
+    embeddings: dict[str, list[float]]
 
 
 def _chunk_ranges(
@@ -108,41 +116,120 @@ def _best_overlap_mapping(
                 if global_turn.speaker_id == global_id
             )
 
-    best_score = -1
-    best_signature: tuple[str, ...] | None = None
-    best_mapping: dict[str, str] = {}
+    mapping: dict[str, str] = {}
+    used_global_ids: set[str] = set()
+    candidates = sorted(
+        (
+            (-score, local_id, global_id)
+            for (local_id, global_id), score in scores.items()
+            if score > 0
+        )
+    )
+    for negative_score, local_id, global_id in candidates:
+        if negative_score >= 0:
+            continue
+        if local_id in mapping or global_id in used_global_ids:
+            continue
+        mapping[local_id] = global_id
+        used_global_ids.add(global_id)
+    return mapping
 
-    def visit(
-        index: int,
-        used_global_ids: set[str],
-        mapping: dict[str, str],
-        score: int,
-    ) -> None:
-        nonlocal best_mapping, best_score, best_signature
-        if index == len(local_ids):
-            signature = tuple(mapping.get(local_id, "~") for local_id in local_ids)
-            if score > best_score or (
-                score == best_score
-                and (best_signature is None or signature < best_signature)
-            ):
-                best_score = score
-                best_signature = signature
-                best_mapping = dict(mapping)
-            return
-        local_id = local_ids[index]
-        visit(index + 1, used_global_ids, mapping, score)
-        for global_id in global_ids:
-            overlap = scores[(local_id, global_id)]
-            if overlap <= 0 or global_id in used_global_ids:
-                continue
-            mapping[local_id] = global_id
-            used_global_ids.add(global_id)
-            visit(index + 1, used_global_ids, mapping, score + overlap)
-            used_global_ids.remove(global_id)
-            mapping.pop(local_id)
 
-    visit(0, set(), {}, 0)
-    return best_mapping
+def _cosine_similarity(left: list[float], right: list[float]) -> float:
+    if not left or len(left) != len(right):
+        return -1.0
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return -1.0
+    return sum(a * b for a, b in zip(left, right, strict=True)) / (
+        left_norm * right_norm
+    )
+
+
+def _validate_chunk_turns(
+    turns: list[DiarizationTurn], bounds: SpeakerBounds
+) -> None:
+    maximum = bounds.exact if bounds.exact is not None else bounds.maximum
+    if len({turn.speaker_id for turn in turns}) > maximum:
+        raise DiarizationRuntimeError("声纹分块检测到的说话人数超出配置范围")
+
+
+def _speaker_mapping(
+    existing: list[DiarizationTurn],
+    incoming: list[DiarizationTurn],
+    *,
+    overlap_start_ms: int,
+    overlap_end_ms: int,
+    bounds: SpeakerBounds,
+    existing_embeddings: dict[str, list[float]] | None = None,
+    incoming_embeddings: dict[str, list[float]] | None = None,
+) -> dict[str, str]:
+    local_ids = sorted({turn.speaker_id for turn in incoming})
+    global_ids = sorted({turn.speaker_id for turn in existing})
+    if bounds.exact == 1:
+        return {local_id: "SPEAKER_00" for local_id in local_ids}
+    mapping = _best_overlap_mapping(
+        existing,
+        incoming,
+        overlap_start_ms=overlap_start_ms,
+        overlap_end_ms=overlap_end_ms,
+    )
+    used_global_ids = set(mapping.values())
+    existing_vectors = existing_embeddings or {}
+    incoming_vectors = incoming_embeddings or {}
+    embedding_candidates = sorted(
+        (
+            (
+                -_cosine_similarity(
+                    incoming_vectors[local_id], existing_vectors[global_id]
+                ),
+                local_id,
+                global_id,
+            )
+            for local_id in local_ids
+            if local_id not in mapping and local_id in incoming_vectors
+            for global_id in global_ids
+            if global_id not in used_global_ids and global_id in existing_vectors
+        )
+    )
+    for negative_score, local_id, global_id in embedding_candidates:
+        if local_id in mapping or global_id in used_global_ids:
+            continue
+        if -negative_score < 0.35:
+            continue
+        mapping[local_id] = global_id
+        used_global_ids.add(global_id)
+
+    maximum = bounds.exact if bounds.exact is not None else bounds.maximum
+    all_used_ids = set(global_ids)
+    for local_id in local_ids:
+        if local_id in mapping:
+            continue
+        if len(all_used_ids) < maximum:
+            new_id = _next_speaker_id(all_used_ids)
+            mapping[local_id] = new_id
+            all_used_ids.add(new_id)
+            used_global_ids.add(new_id)
+            continue
+        available = [item for item in global_ids if item not in used_global_ids]
+        if not available:
+            raise DiarizationRuntimeError("声纹分块说话人无法映射到全局范围")
+        scored = sorted(
+            (
+                (
+                    -_cosine_similarity(
+                        incoming_vectors.get(local_id, []),
+                        existing_vectors.get(global_id, []),
+                    ),
+                    global_id,
+                )
+                for global_id in available
+            )
+        )
+        mapping[local_id] = scored[0][1]
+        used_global_ids.add(scored[0][1])
+    return mapping
 
 
 def _next_speaker_id(used_ids: set[str]) -> str:
@@ -158,25 +245,36 @@ def _stitch_diarization_chunks(
     *,
     overlap_start_ms: int,
     overlap_end_ms: int,
+    bounds: SpeakerBounds,
+    existing_embeddings: dict[str, list[float]] | None = None,
+    incoming_embeddings: dict[str, list[float]] | None = None,
+    mapping: dict[str, str] | None = None,
 ) -> list[DiarizationTurn]:
     if not existing:
         return sorted(
-            incoming, key=lambda turn: (turn.start_ms, turn.end_ms, turn.speaker_id)
+            (
+                DiarizationTurn(
+                    turn.start_ms,
+                    turn.end_ms,
+                    mapping.get(turn.speaker_id, turn.speaker_id)
+                    if mapping is not None
+                    else turn.speaker_id,
+                )
+                for turn in incoming
+            ),
+            key=lambda turn: (turn.start_ms, turn.end_ms, turn.speaker_id),
         )
     if overlap_end_ms <= overlap_start_ms:
         raise DiarizationRuntimeError("声纹分块重叠区无效")
-    mapping = _best_overlap_mapping(
+    selected_mapping = mapping or _speaker_mapping(
         existing,
         incoming,
         overlap_start_ms=overlap_start_ms,
         overlap_end_ms=overlap_end_ms,
+        bounds=bounds,
+        existing_embeddings=existing_embeddings,
+        incoming_embeddings=incoming_embeddings,
     )
-    used_ids = {turn.speaker_id for turn in existing}
-    for local_id in sorted({turn.speaker_id for turn in incoming}):
-        if local_id not in mapping:
-            new_id = _next_speaker_id(used_ids)
-            mapping[local_id] = new_id
-            used_ids.add(new_id)
 
     handoff_ms = (overlap_start_ms + overlap_end_ms) // 2
     stitched: list[DiarizationTurn] = []
@@ -193,7 +291,7 @@ def _stitch_diarization_chunks(
                 DiarizationTurn(
                     clipped_start,
                     turn.end_ms,
-                    mapping[turn.speaker_id],
+                    selected_mapping[turn.speaker_id],
                 )
             )
     return sorted(
@@ -286,6 +384,9 @@ def backend_fingerprint(manifest: dict[str, object]) -> dict[str, object]:
         "min_duration_off": 0.5,
         "chunk_duration_ms": DEFAULT_CHUNK_DURATION_MS,
         "chunk_overlap_ms": DEFAULT_CHUNK_OVERLAP_MS,
+        "stitching_version": 2,
+        "speaker_prototype_max_seconds": 30,
+        "speaker_prototype_similarity": 0.35,
     }
 
 
@@ -314,13 +415,13 @@ def _installed_runtime(
         return None
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
-        expected_state = {
-            "schema_version": 1,
-            "requirements_sha256": sha256_file(requirements_path),
-            "manifest_sha256": sha256_file(manifest_path),
-            "fingerprint": backend_fingerprint(manifest),
-        }
-        if state != expected_state:
+        if (
+            not isinstance(state, dict)
+            or state.get("schema_version") != 1
+            or state.get("requirements_sha256") != sha256_file(requirements_path)
+            or state.get("manifest_sha256") != sha256_file(manifest_path)
+            or not isinstance(state.get("fingerprint"), dict)
+        ):
             return None
         for name, path in (("segmentation", segmentation), ("embedding", embedding)):
             asset = _asset_by_name(manifest, name)
@@ -396,12 +497,16 @@ def _audio_duration_ms(audio_path: Path) -> int:
         raise DiarizationRuntimeError("无法读取声纹 WAV") from error
 
 
-def _read_worker_turns(output_path: Path) -> list[DiarizationTurn]:
+def _read_worker_output(output_path: Path) -> WorkerChunk:
     try:
         payload = json.loads(output_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
         raise DiarizationRuntimeError("声纹 worker 没有返回有效 JSON") from error
-    if not isinstance(payload, dict) or set(payload) != {"turns"}:
+    if (
+        not isinstance(payload, dict)
+        or not set(payload).issubset({"turns", "embeddings"})
+        or "turns" not in payload
+    ):
         raise DiarizationRuntimeError("声纹 worker 输出结构无效")
     raw_turns = payload["turns"]
     if not isinstance(raw_turns, list):
@@ -422,9 +527,84 @@ def _read_worker_turns(output_path: Path) -> list[DiarizationTurn]:
         ):
             raise DiarizationRuntimeError("声纹 worker 时间段值无效")
         turns.append(DiarizationTurn(**item))
-    return sorted(
-        turns, key=lambda turn: (turn.start_ms, turn.end_ms, turn.speaker_id)
+    raw_embeddings = payload.get("embeddings", {})
+    if not isinstance(raw_embeddings, dict):
+        raise DiarizationRuntimeError("声纹 worker 声纹向量无效")
+    embeddings: dict[str, list[float]] = {}
+    vector_size: int | None = None
+    for speaker_id, vector in raw_embeddings.items():
+        if (
+            not isinstance(speaker_id, str)
+            or not _SPEAKER_ID.fullmatch(speaker_id)
+            or not isinstance(vector, list)
+            or not vector
+            or len(vector) > 4096
+            or any(
+                type(value) not in (int, float) or not math.isfinite(value)
+                for value in vector
+            )
+        ):
+            raise DiarizationRuntimeError("声纹 worker 声纹向量无效")
+        if vector_size is None:
+            vector_size = len(vector)
+        elif len(vector) != vector_size:
+            raise DiarizationRuntimeError("声纹 worker 声纹向量维度不一致")
+        embeddings[speaker_id] = [float(value) for value in vector]
+    return WorkerChunk(
+        sorted(
+            turns,
+            key=lambda turn: (turn.start_ms, turn.end_ms, turn.speaker_id),
+        ),
+        embeddings,
     )
+
+
+def _overall_progress(
+    local_progress: int, chunk_index: int, chunk_count: int
+) -> int:
+    return min(
+        100,
+        round((chunk_index + min(100, local_progress) / 100) * 100 / chunk_count),
+    )
+
+
+def _stream_worker(
+    command: list[str],
+    *,
+    popen_factory: PopenFactory,
+    on_progress: Callable[[int], None],
+) -> tuple[int, str]:
+    process = popen_factory(
+        command,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    stderr_stream = getattr(process, "stderr", None)
+    if stderr_stream is None:
+        raise DiarizationRuntimeError("声纹 worker 无法读取进度")
+    tail = ""
+    try:
+        for raw_line in stderr_stream:
+            line = str(raw_line).rstrip("\r\n")
+            match = re.fullmatch(r"PROGRESS (\d{1,3})", line)
+            if match:
+                on_progress(min(100, int(match.group(1))))
+            else:
+                tail = f"{tail}{line}\n"[-500:]
+    except BaseException:
+        try:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        except Exception:
+            pass
+        raise
+    return int(process.wait()), tail.strip()
 
 
 def _run_worker_chunk(
@@ -437,8 +617,9 @@ def _run_worker_chunk(
     chunk_index: int,
     chunk_count: int,
     runner: Runner,
+    popen_factory: PopenFactory | None,
     progress_callback: Callable[[int], None] | None,
-) -> list[DiarizationTurn]:
+) -> WorkerChunk:
     descriptor, output_name = tempfile.mkstemp(
         prefix=".diarization-output-", suffix=".json", dir=audio_path.parent
     )
@@ -461,28 +642,52 @@ def _run_worker_chunk(
         "--end-ms",
         str(end_ms),
     ]
-    if bounds.exact is not None:
+    if bounds.exact == 1 or (bounds.exact is not None and chunk_count == 1):
         command.extend(["--num-speakers", str(bounds.exact)])
     else:
         command.extend(
-            ["--min-speakers", str(bounds.minimum), "--max-speakers", str(bounds.maximum)]
+            [
+                "--min-speakers",
+                "1",
+                "--max-speakers",
+                str(bounds.exact if bounds.exact is not None else bounds.maximum),
+            ]
         )
     try:
-        completed = runner(command, capture_output=True, text=True, check=False)
-        stderr = completed.stderr or ""
-        if completed.returncode != 0:
-            detail = stderr[-500:].strip() or "未知错误"
-            if completed.returncode < 0:
-                detail = f"进程被信号 {-completed.returncode} 终止; {detail}"
-            raise DiarizationRuntimeError(f"声纹分离失败: {detail}")
-        progress_matches = re.findall(r"(?m)^PROGRESS (\d{1,3})$", stderr)
-        if progress_callback is not None and progress_matches:
-            local_progress = min(100, max(int(value) for value in progress_matches))
-            overall_progress = round(
-                (chunk_index + local_progress / 100) * 100 / chunk_count
+        last_progress = -1
+
+        def report(local_progress: int) -> None:
+            nonlocal last_progress
+            overall = _overall_progress(local_progress, chunk_index, chunk_count)
+            if progress_callback is not None and overall > last_progress:
+                last_progress = overall
+                progress_callback(overall)
+
+        selected_popen = popen_factory
+        if selected_popen is None and runner is subprocess.run:
+            selected_popen = subprocess.Popen
+        if selected_popen is not None:
+            returncode, stderr = _stream_worker(
+                command,
+                popen_factory=selected_popen,
+                on_progress=report,
             )
-            progress_callback(min(100, overall_progress))
-        return _read_worker_turns(output_path)
+        else:
+            completed = runner(command, capture_output=True, text=True, check=False)
+            returncode = completed.returncode
+            stderr = completed.stderr or ""
+        if returncode != 0:
+            detail = stderr[-500:].strip() or "未知错误"
+            if returncode < 0:
+                detail = f"进程被信号 {-returncode} 终止; {detail}"
+            raise DiarizationRuntimeError(f"声纹分离失败: {detail}")
+        if selected_popen is None:
+            progress_matches = re.findall(r"(?m)^PROGRESS (\d{1,3})$", stderr)
+            if progress_matches:
+                report(max(int(value) for value in progress_matches))
+        result = _read_worker_output(output_path)
+        _validate_chunk_turns(result.turns, bounds)
+        return result
     finally:
         try:
             output_path.unlink()
@@ -496,6 +701,7 @@ def run_sherpa_backend(
     *,
     runtime: DiarizationRuntime | None = None,
     runner: Runner = subprocess.run,
+    popen_factory: PopenFactory | None = None,
     progress_callback: Callable[[int], None] | None = None,
     chunk_duration_ms: int = DEFAULT_CHUNK_DURATION_MS,
     chunk_overlap_ms: int = DEFAULT_CHUNK_OVERLAP_MS,
@@ -509,9 +715,24 @@ def run_sherpa_backend(
         overlap_ms=chunk_overlap_ms,
     )
     stitched: list[DiarizationTurn] = []
+    prototypes: dict[str, list[float]] = {}
     previous_end_ms = 0
+    last_reported_progress = -1
+
+    def emit_progress(value: int) -> None:
+        nonlocal last_reported_progress
+        if progress_callback is None:
+            return
+        if (
+            last_reported_progress < 0
+            or value == 100
+            or value >= last_reported_progress + 5
+        ):
+            last_reported_progress = value
+            progress_callback(value)
+
     for index, (start_ms, end_ms) in enumerate(ranges):
-        chunk_turns = _run_worker_chunk(
+        chunk = _run_worker_chunk(
             audio_path,
             bounds,
             selected_runtime,
@@ -520,16 +741,40 @@ def run_sherpa_backend(
             chunk_index=index,
             chunk_count=len(ranges),
             runner=runner,
-            progress_callback=progress_callback,
+            popen_factory=popen_factory,
+            progress_callback=emit_progress,
         )
+        chunk_turns = chunk.turns
         if index == 0:
             stitched = chunk_turns
+            prototypes = dict(chunk.embeddings)
         else:
+            mapping = _speaker_mapping(
+                stitched,
+                chunk_turns,
+                overlap_start_ms=start_ms,
+                overlap_end_ms=previous_end_ms,
+                bounds=bounds,
+                existing_embeddings=prototypes,
+                incoming_embeddings=chunk.embeddings,
+            )
             stitched = _stitch_diarization_chunks(
                 stitched,
                 chunk_turns,
                 overlap_start_ms=start_ms,
                 overlap_end_ms=previous_end_ms,
+                bounds=bounds,
+                mapping=mapping,
             )
+            for local_id, vector in chunk.embeddings.items():
+                global_id = mapping[local_id]
+                previous = prototypes.get(global_id)
+                if previous is None or len(previous) != len(vector):
+                    prototypes[global_id] = vector
+                else:
+                    prototypes[global_id] = [
+                        (left + right) / 2
+                        for left, right in zip(previous, vector, strict=True)
+                    ]
         previous_end_ms = end_ms
     return stitched

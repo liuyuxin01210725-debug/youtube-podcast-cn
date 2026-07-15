@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -105,6 +106,55 @@ def _frame_bounds(
     return start_frame, end_frame
 
 
+def _extract_speaker_embeddings(
+    sherpa_onnx: object,
+    embedding_config: object,
+    audio: object,
+    result: list[object],
+    *,
+    sample_rate: int,
+    maximum_seconds: int = 30,
+) -> dict[str, list[float]]:
+    import numpy
+
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(embedding_config)
+    grouped: dict[int, list[tuple[int, int]]] = {}
+    for segment in result:
+        speaker = int(getattr(segment, "speaker"))
+        start = max(0, round(float(getattr(segment, "start")) * sample_rate))
+        end = min(len(audio), round(float(getattr(segment, "end")) * sample_rate))
+        if start < end:
+            grouped.setdefault(speaker, []).append((start, end))
+    embeddings: dict[str, list[float]] = {}
+    sample_limit = maximum_seconds * sample_rate
+    for speaker, ranges in grouped.items():
+        selected: list[object] = []
+        remaining = sample_limit
+        for start, end in sorted(
+            ranges, key=lambda item: item[1] - item[0], reverse=True
+        ):
+            if remaining <= 0:
+                break
+            count = min(end - start, remaining)
+            selected.append(audio[start : start + count])
+            remaining -= count
+        if not selected:
+            continue
+        samples = numpy.concatenate(selected).astype("float32", copy=False)
+        stream = extractor.create_stream()
+        stream.accept_waveform(sample_rate, samples)
+        stream.input_finished()
+        if not extractor.is_ready(stream):
+            continue
+        vector = [float(value) for value in extractor.compute(stream)]
+        norm = math.sqrt(sum(value * value for value in vector))
+        if norm > 0:
+            embeddings[f"SPEAKER_{speaker:02d}"] = [
+                value / norm for value in vector
+            ]
+    return embeddings
+
+
 def run_worker(args: argparse.Namespace) -> None:
     import sherpa_onnx
     import soundfile
@@ -144,9 +194,20 @@ def run_worker(args: argparse.Namespace) -> None:
         sorted_result = result.sort_by_start_time()
         if sorted_result is not None:
             result = sorted_result
+    segments = list(result)
+    embeddings = _extract_speaker_embeddings(
+        sherpa_onnx,
+        config.embedding,
+        audio[:, 0],
+        segments,
+        sample_rate=sample_rate,
+    )
     _atomic_write(
         args.output,
-        {"turns": result_to_turns(result, offset_ms=start_ms)},
+        {
+            "turns": result_to_turns(segments, offset_ms=start_ms),
+            "embeddings": embeddings,
+        },
     )
     print("PROGRESS 100", file=sys.stderr, flush=True)
 

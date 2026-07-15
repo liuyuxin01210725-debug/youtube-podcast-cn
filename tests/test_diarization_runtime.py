@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import io
 import json
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -31,6 +33,7 @@ from diarization_runtime import (  # noqa: E402
     run_sherpa_backend,
 )
 from setup_diarization import _allowed_download_url  # noqa: E402
+import setup_diarization as setup_module  # noqa: E402
 import sherpa_diarization_worker as worker  # noqa: E402
 from sherpa_diarization_worker import result_to_turns  # noqa: E402
 
@@ -46,6 +49,17 @@ def sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(64 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _hold_setup_lock(path: str, acquired: object, release: object) -> None:
+    with setup_module._setup_lock(Path(path)):
+        acquired.set()
+        release.wait(5)
+
+
+def _acquire_setup_lock(path: str, acquired: object) -> None:
+    with setup_module._setup_lock(Path(path)):
+        acquired.set()
 
 
 class RuntimeTests(unittest.TestCase):
@@ -155,11 +169,66 @@ class RuntimeTests(unittest.TestCase):
             second,
             overlap_start_ms=600,
             overlap_end_ms=900,
+            bounds=SpeakerBounds(exact=2),
         )
 
         self.assertEqual({turn.speaker_id for turn in stitched}, {"SPEAKER_00", "SPEAKER_01"})
         self.assertTrue(all(turn.end_ms <= 750 for turn in stitched[:2]))
         self.assertEqual(stitched[-1], DiarizationTurn(1_000, 1_500, "SPEAKER_01"))
+
+    def test_stitching_uses_voice_prototypes_when_overlap_is_silent(self) -> None:
+        stitched = runtime_module._stitch_diarization_chunks(
+            [
+                DiarizationTurn(0, 400, "SPEAKER_00"),
+                DiarizationTurn(400, 600, "SPEAKER_01"),
+            ],
+            [DiarizationTurn(800, 1000, "SPEAKER_00")],
+            overlap_start_ms=600,
+            overlap_end_ms=800,
+            bounds=SpeakerBounds(exact=2),
+            existing_embeddings={
+                "SPEAKER_00": [1.0, 0.0],
+                "SPEAKER_01": [0.0, 1.0],
+            },
+            incoming_embeddings={"SPEAKER_00": [0.99, 0.01]},
+        )
+
+        self.assertEqual(stitched[-1].speaker_id, "SPEAKER_00")
+
+    def test_exact_one_never_invents_a_second_global_speaker(self) -> None:
+        stitched = runtime_module._stitch_diarization_chunks(
+            [DiarizationTurn(0, 400, "SPEAKER_00")],
+            [DiarizationTurn(800, 1000, "SPEAKER_00")],
+            overlap_start_ms=400,
+            overlap_end_ms=800,
+            bounds=SpeakerBounds(exact=1),
+        )
+
+        self.assertEqual({turn.speaker_id for turn in stitched}, {"SPEAKER_00"})
+
+    def test_stitching_applies_mapping_after_an_initial_silent_chunk(self) -> None:
+        stitched = runtime_module._stitch_diarization_chunks(
+            [],
+            [DiarizationTurn(800, 1000, "SPEAKER_03")],
+            overlap_start_ms=400,
+            overlap_end_ms=800,
+            bounds=SpeakerBounds(),
+            mapping={"SPEAKER_03": "SPEAKER_00"},
+        )
+
+        self.assertEqual(
+            stitched,
+            [DiarizationTurn(800, 1000, "SPEAKER_00")],
+        )
+
+    def test_rejects_more_local_speakers_than_configured_before_stitching(self) -> None:
+        turns = [
+            DiarizationTurn(index * 10, index * 10 + 5, f"SPEAKER_{index:02d}")
+            for index in range(7)
+        ]
+
+        with self.assertRaisesRegex(runtime_module.DiarizationRuntimeError, "人数"):
+            runtime_module._validate_chunk_turns(turns, SpeakerBounds())
 
     def test_valid_runtime_and_models_use_no_network_or_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -202,7 +271,7 @@ class RuntimeTests(unittest.TestCase):
                 "schema_version": 1,
                 "requirements_sha256": sha256(requirements_path),
                 "manifest_sha256": sha256(manifest_path),
-                "fingerprint": backend_fingerprint(manifest),
+                "fingerprint": {"legacy_pipeline_values": "must_not_reinstall"},
             }
             (runtime_root / "runtime-state.json").write_text(
                 json.dumps(state), encoding="utf-8"
@@ -219,6 +288,15 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(runtime.python, python)
             self.assertEqual(runtime.segmentation_model, model_root / "segmentation.onnx")
+
+            setup_module.setup_diarization(
+                runtime_root=runtime_root,
+                model_root=model_root,
+                manifest_path=manifest_path,
+                requirements_path=requirements_path,
+                opener=mock.Mock(side_effect=AssertionError("no network")),
+                runner=mock.Mock(side_effect=AssertionError("no subprocess")),
+            )
 
     def test_parent_passes_exact_speaker_count_and_validates_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -332,6 +410,181 @@ class RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(turns[-1], DiarizationTurn(650, 1_000, "SPEAKER_00"))
             self.assertEqual(progress, [50, 100])
+            self.assertNotIn("--num-speakers", calls[0])
+            self.assertEqual(
+                calls[0][calls[0].index("--max-speakers") + 1],
+                "2",
+            )
+
+    def test_production_progress_is_emitted_before_worker_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runtime = SimpleNamespace(
+                python=base / "python",
+                model_dir=base,
+                segmentation_model=base / "segmentation.onnx",
+                embedding_model=base / "embedding.onnx",
+                fingerprint={"backend": "fake"},
+            )
+            events: list[object] = []
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.stderr = io.StringIO("PROGRESS 10\nPROGRESS 100\n")
+                    self.returncode: int | None = None
+
+                def wait(self) -> int:
+                    events.append("wait")
+                    self.returncode = 0
+                    return 0
+
+
+            def fake_popen(
+                command: list[str], **kwargs: object
+            ) -> FakeProcess:
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"turns": []}), encoding="utf-8")
+                return FakeProcess()
+
+            run_sherpa_backend(
+                FIXTURE,
+                SpeakerBounds(),
+                runtime=runtime,
+                runner=mock.Mock(side_effect=AssertionError("subprocess.run forbidden")),
+                popen_factory=fake_popen,
+                progress_callback=lambda value: events.append(value),
+            )
+
+            self.assertLess(events.index(10), events.index("wait"))
+            self.assertLess(events.index(100), events.index("wait"))
+
+    def test_production_progress_is_throttled_to_five_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runtime = SimpleNamespace(
+                python=base / "python",
+                model_dir=base,
+                segmentation_model=base / "segmentation.onnx",
+                embedding_model=base / "embedding.onnx",
+                fingerprint={"backend": "fake"},
+            )
+            progress: list[int] = []
+
+            class FakeProcess:
+                def __init__(self) -> None:
+                    self.stderr = io.StringIO(
+                        "".join(f"PROGRESS {value}\n" for value in range(101))
+                    )
+
+                def wait(self) -> int:
+                    return 0
+
+            def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+                output = Path(command[command.index("--output") + 1])
+                output.write_text(json.dumps({"turns": []}), encoding="utf-8")
+                return FakeProcess()
+
+            run_sherpa_backend(
+                FIXTURE,
+                SpeakerBounds(),
+                runtime=runtime,
+                popen_factory=fake_popen,
+                progress_callback=progress.append,
+            )
+
+            self.assertEqual(progress[0], 0)
+            self.assertEqual(progress[-1], 100)
+            self.assertLessEqual(len(progress), 22)
+
+    def test_streaming_worker_is_terminated_on_keyboard_interrupt(self) -> None:
+        events: list[str] = []
+
+        class InterruptingStream:
+            def __init__(self) -> None:
+                self.lines = iter(["PROGRESS 10\n"])
+
+            def __iter__(self) -> object:
+                return self
+
+            def __next__(self) -> str:
+                try:
+                    return next(self.lines)
+                except StopIteration:
+                    raise KeyboardInterrupt
+
+        class FakeProcess:
+            def __init__(self) -> None:
+                self.stderr = InterruptingStream()
+
+            def terminate(self) -> None:
+                events.append("terminate")
+
+            def wait(self, timeout: int | None = None) -> int:
+                events.append(f"wait:{timeout}")
+                return 0
+
+            def kill(self) -> None:
+                events.append("kill")
+
+        with self.assertRaises(KeyboardInterrupt):
+            runtime_module._stream_worker(
+                ["worker"],
+                popen_factory=lambda *args, **kwargs: FakeProcess(),
+                on_progress=lambda value: None,
+            )
+
+        self.assertEqual(events, ["terminate", "wait:5"])
+
+    def test_publish_restores_previous_directory_after_keyboard_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            staging = base / "runtime.partial"
+            destination = base / "runtime"
+            staging.mkdir()
+            destination.mkdir()
+            (staging / "version").write_text("new", encoding="utf-8")
+            (destination / "version").write_text("old", encoding="utf-8")
+            original_replace = Path.replace
+
+            def interrupt_staging(source: Path, target: Path) -> Path:
+                if source == staging and target == destination:
+                    raise KeyboardInterrupt
+                return original_replace(source, target)
+
+            with mock.patch.object(Path, "replace", interrupt_staging):
+                with self.assertRaises(KeyboardInterrupt):
+                    setup_module._publish_directory(staging, destination)
+
+            self.assertEqual(
+                (destination / "version").read_text(encoding="utf-8"),
+                "old",
+            )
+
+    def test_setup_lock_serializes_concurrent_installers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            context = multiprocessing.get_context("fork")
+            lock_path = str(Path(directory) / "setup.lock")
+            first_acquired = context.Event()
+            release_first = context.Event()
+            second_acquired = context.Event()
+            first = context.Process(
+                target=_hold_setup_lock,
+                args=(lock_path, first_acquired, release_first),
+            )
+            second = context.Process(
+                target=_acquire_setup_lock,
+                args=(lock_path, second_acquired),
+            )
+            first.start()
+            self.assertTrue(first_acquired.wait(2))
+            second.start()
+            self.assertFalse(second_acquired.wait(0.2))
+            release_first.set()
+            self.assertTrue(second_acquired.wait(2))
+            first.join(2)
+            second.join(2)
+            self.assertEqual(first.exitcode, 0)
+            self.assertEqual(second.exitcode, 0)
 
     def test_worker_adapter_rounds_seconds_and_sorts(self) -> None:
         self.assertIn("offset_ms", inspect.signature(result_to_turns).parameters)
