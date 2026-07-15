@@ -3,7 +3,7 @@ PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else e
 .PHONY: test test-public test-podcast test-tts
 
 test: test-public test-podcast test-tts
-	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh
+	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh
 	@echo "All tests passed."
 
 test-public:
@@ -13,6 +13,7 @@ test-podcast:
 	@$(PYTHON) tests/test_podcast_captions.py
 	@$(PYTHON) tests/test_diarization_core.py
 	@$(PYTHON) tests/test_diarization_cache.py
+	@$(PYTHON) tests/test_diarization_runtime.py
 	@$(PYTHON) tests/test_podcast_cn.py
 
 test-tts:
