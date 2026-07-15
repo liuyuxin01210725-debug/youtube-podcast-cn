@@ -548,6 +548,46 @@ def _load_valid_chunk_cache(
         return None
 
 
+def _translate_chunk_with_recovery(
+    segments: list[SubtitleSegment],
+    translator: Callable[[list[SubtitleSegment]], dict[str, str]],
+) -> dict[str, str]:
+    """Bisect a structurally incomplete model response until it validates."""
+    source_ids = [segment.id for segment in segments]
+    try:
+        raw_translated = translator(segments)
+        if not isinstance(raw_translated, dict):
+            raise TranslationValidationError("翻译器必须返回 ID 到译文的对象")
+        return validate_translation_payload(
+            {
+                "translations": [
+                    {"id": segment_id, "text": text}
+                    for segment_id, text in raw_translated.items()
+                ]
+            },
+            source_ids,
+        )
+    except TranslationValidationError:
+        if len(segments) <= 1:
+            raise
+        midpoint = len(segments) // 2
+        translated = _translate_chunk_with_recovery(
+            segments[:midpoint], translator
+        )
+        translated.update(
+            _translate_chunk_with_recovery(segments[midpoint:], translator)
+        )
+        return validate_translation_payload(
+            {
+                "translations": [
+                    {"id": segment_id, "text": translated[segment_id]}
+                    for segment_id in source_ids
+                ]
+            },
+            source_ids,
+        )
+
+
 def translate_with_resume(
     segments: list[SubtitleSegment],
     chunk_dir: Path,
@@ -572,18 +612,7 @@ def translate_with_resume(
             translation_identity,
         )
         if translated is None:
-            raw_translated = translator(chunk)
-            if not isinstance(raw_translated, dict):
-                raise TranslationValidationError("翻译器必须返回 ID 到译文的对象")
-            translated = validate_translation_payload(
-                {
-                    "translations": [
-                        {"id": segment_id, "text": text}
-                        for segment_id, text in raw_translated.items()
-                    ]
-                },
-                source_ids,
-            )
+            translated = _translate_chunk_with_recovery(chunk, translator)
             cache_payload = {
                 "schema_version": 2,
                 "chunk_index": chunk_index,
