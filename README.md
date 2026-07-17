@@ -27,7 +27,7 @@
 - 翻译分块落盘，中断后重跑只补未完成部分。
 - 切换供应商、模型或接口地址时自动隔离旧缓存。
 - API Key 隐藏输入并保存到 macOS 钥匙串，不写入仓库或任务文件。
-- EdgeTTS 默认免费合成，也可显式选择 Qwen3-TTS 高质量语音；任一音频片段失败时不发布残缺成品。
+- EdgeTTS 默认免费合成，也可显式选择 Qwen3-TTS 高质量语音；Qwen 会在付费调用前校验音色性别和模型兼容性，任一音频片段失败时不发布残缺成品。
 
 ## 系统要求
 
@@ -132,6 +132,8 @@ bash bin/tts-cn.sh article.md --tts qwen3-api --style documentary
 
 `--provider qwen` 只选择千问翻译，`--tts qwen3-api` 只选择千问语音，两者相互独立。比如“用千问翻译这个播客”会使用千问翻译和默认 Edge 语音；只有同时明确选择两个参数，翻译和语音才都会走千问。
 
+多人播客的 Qwen 默认男性音色为 `Vincent`、`Neil`、`Eldric Sage`，分别用于男声 1、2、3。三者均已用默认 `qwen3-tts-instruct-flash` 实际调用验证，并会额外使用明确的成年男性表达指令。已知女性系统音色不能配置到男性音色槽；已知不受当前模型支持的音色会在调用前报错，避免生成整期后才发现声音不对。
+
 成功的音频片段会保存在最终输出目录的 `.tts-cache/`，重跑时自动复用，避免重复等待和重复计费。删除 `.tts-cache/` 是安全的，但之后再次运行会重新合成，并可能再次消耗额度。任何片段缺失、为空或无法解码时，程序都不会发布最终 MP3，也不会覆盖已有的完整音频。
 
 ## 模型配置
@@ -140,7 +142,7 @@ bash bin/tts-cn.sh article.md --tts qwen3-api --style documentary
 |---|---|---|---|---|
 | 翻译 | DeepSeek | `deepseek-chat` | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL` |
 | 翻译 | 通义千问 | `qwen-plus` | `DASHSCOPE_API_KEY` | `QWEN_MODEL`、`QWEN_BASE_URL` |
-| 语音 | Qwen3-TTS | `qwen3-tts-instruct-flash` | `DASHSCOPE_API_KEY` | `QWEN_TTS_MODEL`、`QWEN_TTS_BASE_URL` |
+| 语音 | Qwen3-TTS | `qwen3-tts-instruct-flash` | `DASHSCOPE_API_KEY` | `QWEN_TTS_MODEL`、`QWEN_TTS_BASE_URL`、`QWEN_TTS_VOICE_*` |
 
 翻译参数只允许经过测试的 `deepseek` 和 `qwen`，语音参数只允许 `edge` 和 `qwen3-api`；不接受任意第三方接口。
 
