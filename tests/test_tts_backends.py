@@ -90,21 +90,41 @@ class QwenBackendTests(unittest.TestCase):
             {slot: backend.resolve_voice(slot) for slot in tts_backends.VOICE_SLOTS},
             {
                 "default": "Cherry",
-                "male_1": "Ethan",
-                "male_2": "Dylan",
-                "male_3": "Kai",
+                "male_1": "Vincent",
+                "male_2": "Neil",
+                "male_3": "Eldric Sage",
                 "female_1": "Cherry",
                 "female_2": "Serena",
             },
         )
+
+    def test_rejects_system_voice_not_supported_by_instruct_model(self) -> None:
+        voice_map = tts_backends._qwen_voice_map()
+        voice_map["male_2"] = "Dylan"
+        with self.assertRaisesRegex(ValueError, "Dylan.*不支持模型"):
+            tts_backends.Qwen3APIBackend(
+                api_key="test-key",
+                model="qwen3-tts-instruct-flash",
+                voice_map=voice_map,
+            )
+
+    def test_rejects_known_female_system_voice_in_male_slot(self) -> None:
+        voice_map = tts_backends._qwen_voice_map()
+        voice_map["male_1"] = "Cherry"
+        with self.assertRaisesRegex(ValueError, "male_1.*女性音色"):
+            tts_backends.Qwen3APIBackend(
+                api_key="test-key",
+                voice_map=voice_map,
+            )
 
     def test_qwen_default_slot_is_cherry_and_explicit_female_stays_separate(self) -> None:
         backend = tts_backends.Qwen3APIBackend(
             api_key="test-key",
             voice_map={
                 "default": "Cherry",
-                "male_1": "Ethan",
-                "male_2": "Dylan",
+                "male_1": "Vincent",
+                "male_2": "Neil",
+                "male_3": "Eldric Sage",
                 "female_1": "Serena",
                 "female_2": "Chelsie",
             },
@@ -176,7 +196,7 @@ class QwenBackendTests(unittest.TestCase):
             output.write_bytes(b"RIFF-test-wave")
 
         request = tts_backends.SynthesisRequest(
-            text="欢迎收听。", voice_slot="female_1", style="conversation"
+            text="欢迎收听。", voice_slot="male_1", style="conversation"
         )
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "part.wav"
@@ -192,10 +212,11 @@ class QwenBackendTests(unittest.TestCase):
                 usage = asyncio.run(backend.synthesize(request, output))
 
         self.assertEqual(captured["model"], "qwen3-tts-instruct-flash")
-        self.assertEqual(captured["voice"], "Cherry")
+        self.assertEqual(captured["voice"], "Vincent")
         self.assertEqual(captured["language_type"], "Chinese")
         self.assertEqual(captured["text"], "欢迎收听。")
         self.assertTrue(captured["instructions"])
+        self.assertIn("成年男性", captured["instructions"])
         self.assertTrue(captured["optimize_instructions"])
         self.assertFalse(captured["stream"])
         self.assertEqual(

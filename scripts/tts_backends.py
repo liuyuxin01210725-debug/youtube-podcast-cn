@@ -34,6 +34,45 @@ STYLE_INSTRUCTIONS = {
     ),
 }
 
+VOICE_SLOT_INSTRUCTIONS = {
+    "male_1": "使用清晰、自然、可辨识的成年男性声线；保持男性音色，避免偏女性或童声。",
+    "male_2": "使用清晰、自然、可辨识的成年男性声线；保持男性音色，避免偏女性或童声。",
+    "male_3": "使用清晰、自然、可辨识的成年男性声线；保持男性音色，避免偏女性或童声。",
+}
+
+# Only voices used by this project (plus the previously shipped Dylan) are
+# catalogued here. Unknown values are left available for custom/future voices,
+# while known system voices are checked against the selected model family.
+_QWEN_SYSTEM_VOICE_GENDERS = {
+    "Cherry": "female",
+    "Serena": "female",
+    "Chelsie": "female",
+    "Ethan": "male",
+    "Kai": "male",
+    "Dylan": "male",
+    "Vincent": "male",
+    "Neil": "male",
+    "Eldric Sage": "male",
+}
+
+_QWEN_SYSTEM_VOICE_MODEL_FAMILIES = {
+    "Cherry": {"qwen3-tts-instruct-flash", "qwen3-tts-flash", "qwen-tts"},
+    "Serena": {"qwen3-tts-instruct-flash", "qwen3-tts-flash", "qwen-tts"},
+    "Chelsie": {"qwen3-tts-instruct-flash", "qwen3-tts-flash", "qwen-tts"},
+    "Ethan": {"qwen3-tts-instruct-flash", "qwen3-tts-flash", "qwen-tts"},
+    "Kai": {"qwen3-tts-instruct-flash", "qwen3-tts-flash"},
+    "Dylan": {"qwen3-tts-flash", "qwen-tts"},
+    "Vincent": {"qwen3-tts-instruct-flash", "qwen3-tts-flash"},
+    "Neil": {"qwen3-tts-instruct-flash", "qwen3-tts-flash"},
+    "Eldric Sage": {"qwen3-tts-instruct-flash", "qwen3-tts-flash"},
+}
+
+_QWEN_MODEL_FAMILIES = (
+    "qwen3-tts-instruct-flash",
+    "qwen3-tts-flash",
+    "qwen-tts",
+)
+
 
 class TTSBackendError(RuntimeError):
     """Safe-to-log provider error with sensitive details removed."""
@@ -132,12 +171,43 @@ class EdgeTTSBackend:
 def _qwen_voice_map() -> dict[str, str]:
     return {
         "default": os.getenv("QWEN_TTS_VOICE_DEFAULT", "Cherry"),
-        "male_1": os.getenv("QWEN_TTS_VOICE_MALE_1", "Ethan"),
-        "male_2": os.getenv("QWEN_TTS_VOICE_MALE_2", "Dylan"),
-        "male_3": os.getenv("QWEN_TTS_VOICE_MALE_3", "Kai"),
+        "male_1": os.getenv("QWEN_TTS_VOICE_MALE_1", "Vincent"),
+        "male_2": os.getenv("QWEN_TTS_VOICE_MALE_2", "Neil"),
+        "male_3": os.getenv("QWEN_TTS_VOICE_MALE_3", "Eldric Sage"),
         "female_1": os.getenv("QWEN_TTS_VOICE_FEMALE_1", "Cherry"),
         "female_2": os.getenv("QWEN_TTS_VOICE_FEMALE_2", "Serena"),
     }
+
+
+def _qwen_model_family(model: str) -> str | None:
+    for family in _QWEN_MODEL_FAMILIES:
+        if model == family or model.startswith(f"{family}-"):
+            return family
+    return None
+
+
+def _validate_qwen_voice_map(model: str, voice_map: dict[str, str]) -> None:
+    family = _qwen_model_family(model)
+    for slot, voice in voice_map.items():
+        gender = _QWEN_SYSTEM_VOICE_GENDERS.get(voice)
+        if slot.startswith("male_") and gender == "female":
+            raise ValueError(f"voice slot {slot} 不能使用女性音色 {voice}")
+        if slot.startswith("female_") and gender == "male":
+            raise ValueError(f"voice slot {slot} 不能使用男性音色 {voice}")
+
+        supported_families = _QWEN_SYSTEM_VOICE_MODEL_FAMILIES.get(voice)
+        if (
+            family is not None
+            and supported_families is not None
+            and family not in supported_families
+        ):
+            raise ValueError(f"音色 {voice} 不支持模型 {model}（voice slot: {slot}）")
+
+
+def _qwen_instructions(request: SynthesisRequest) -> str:
+    return STYLE_INSTRUCTIONS[request.style] + VOICE_SLOT_INSTRUCTIONS.get(
+        request.voice_slot, ""
+    )
 
 
 def _load_dashscope():
@@ -226,7 +296,10 @@ class Qwen3APIBackend:
                 "QWEN_TTS_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
             )
         )
-        self.voice_map = voice_map or _qwen_voice_map()
+        self.voice_map = _qwen_voice_map()
+        if voice_map:
+            self.voice_map.update(voice_map)
+        _validate_qwen_voice_map(self.model, self.voice_map)
         self.concurrency = int(os.getenv("QWEN_TTS_CONCURRENCY", "2"))
 
     def resolve_voice(self, voice_slot: str) -> str:
@@ -241,6 +314,7 @@ class Qwen3APIBackend:
             "base_url": self.base_url,
             "voices": self.voice_map,
             "styles": STYLE_INSTRUCTIONS,
+            "voice_slot_instructions": VOICE_SLOT_INSTRUCTIONS,
             "max_chars": self.max_chars,
             "language_type": "Chinese",
             "optimize_instructions": True,
@@ -259,7 +333,7 @@ class Qwen3APIBackend:
                 text=request.text,
                 voice=self.resolve_voice(request.voice_slot),
                 language_type="Chinese",
-                instructions=STYLE_INSTRUCTIONS[request.style],
+                instructions=_qwen_instructions(request),
                 optimize_instructions=True,
                 stream=False,
             )
