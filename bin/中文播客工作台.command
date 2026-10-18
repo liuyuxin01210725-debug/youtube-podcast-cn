@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 cd "$(dirname "$0")/.."
+export PATH="$PWD/.venv/bin:$PATH"
 if [ ! -x .venv/bin/python ] || [ ! -x .speech-venv/bin/python ]; then
   echo '首次使用需要安装运行环境，正在打开本地安装程序…'
   bash bin/setup-studio.sh

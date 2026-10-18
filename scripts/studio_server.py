@@ -30,10 +30,33 @@ class Studio:
         p=self.root/ident
         if not p.is_dir() or p.is_symlink(): raise ValueError('任务不存在')
         return p
+    def revision(self,p,preview=False):
+        doc=read(p/'document.json',{}); config=read(p/'config.json',{})
+        selected=doc.get('segments',[])[:3] if preview else doc.get('segments',[])
+        ids={s.get('speaker_id') for s in selected}; backend=config.get('tts','clone')
+        voices={sid:doc.get('speakers',{}).get(sid) for sid in ids}
+        refs={}
+        if backend=='clone':
+            for sid in ids:
+                ref=doc.get('references',{}).get(sid,{})
+                f=(p/ref.get('path','')).resolve()
+                digest=hashlib.sha256(f.read_bytes()).hexdigest() if f.is_relative_to(p.resolve()) and f.is_file() else None
+                refs[sid]={'text':ref.get('text'),'sha256':digest}
+        identity={'segments':[{k:s.get(k) for k in ('id','chinese','speaker_id')} for s in selected], 'voices':voices,'references':refs,'backend':backend,'clone_model':config.get('clone_model')}
+        return hashlib.sha256(json.dumps(identity,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+    def migrate_assets(self,p):
+        s=read(p/'state.json',{}); assets=s.setdefault('asset_revisions',{})
+        changed=False
+        for name in ('preview.mp3','output.mp3'):
+            if (p/name).is_file() and name not in assets:
+                assets[name]=None if s.get('stale') else self.revision(p,name=='preview.mp3'); changed=True
+        if changed: write(p/'state.json',s)
     def info(self,p):
+        self.migrate_assets(p)
         s=read(p/'state.json',{})
+        asset_stale={n:s.get('asset_revisions',{}).get(n)!=self.revision(p,n=='preview.mp3') for n in ('preview.mp3','output.mp3') if (p/n).is_file()}
         progress=read(p/'progress.json',{})
-        return dict(id=p.name,title=s.get('title','合成英文测试对话' if p.name=='demo-dialogue' else p.name),status=s.get('status','complete' if (p/'output.mp3').exists() else 'interrupted'),action=s.get('action'),message=s.get('message'),progress=progress,document=read(p/'document.json'),config=read(p/'config.json',{}),files={n:(p/n).exists() for n in ('preview.mp3','output.mp3')},stale=s.get('stale',False),updated_at=s.get('updated_at',0))
+        return dict(id=p.name,title=s.get('title','合成英文测试对话' if p.name=='demo-dialogue' else p.name),status=s.get('status','complete' if (p/'output.mp3').exists() else 'interrupted'),action=s.get('action'),message=s.get('message'),progress=progress,document=read(p/'document.json'),config=read(p/'config.json',{}),files={n:(p/n).exists() for n in ('preview.mp3','output.mp3')},stale=any(asset_stale.values()),asset_stale=asset_stale,updated_at=s.get('updated_at',0))
     def list(self):
         with self.lock: return sorted([self.info(p) for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and (p/'config.json').exists()],key=lambda j:j['updated_at'],reverse=True)
     def create(self, sources, options):
@@ -62,6 +85,12 @@ class Studio:
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':source.get('title',source['value']),'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()}); ids.append(ident)
         return ids
+    def voice(self,ident,backend):
+        if backend not in ('clone','edge'): raise ValueError('声音模式无效')
+        with self.lock:
+            p=self.job(ident); self.migrate_assets(p); s=read(p/'state.json',{})
+            if s.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后切换声音')
+            config=read(p/'config.json',{}); config['tts']=backend; write(p/'config.json',config)
     def action(self,ident,action,preview=False):
         with self.lock:
             p=self.job(ident); s=read(p/'state.json',{})
@@ -86,6 +115,7 @@ class Studio:
                 jobs.sort(key=lambda p:read(p/'state.json',{}).get('updated_at',0))
                 p=jobs[0] if jobs else None
                 if p:
+                    self.migrate_assets(p)
                     s=read(p/'state.json'); s['status']='running'; write(p/'state.json',s); self.active=p.name
                     (p/'cancel').unlink(missing_ok=True)
                     cmd=self.engine+['--job-dir',str(p),'--config',str(p/'config.json'),'--action',s.get('action','run')]
@@ -96,7 +126,9 @@ class Studio:
                 code=self.process.wait() if self.process else 1
                 with self.lock:
                     s=read(p/'state.json',{}); s['status']='cancelled' if code==130 else ('complete' if code==0 else 'failed')
-                    if code==0 and s.get('action')!='prepare' and not s.get('preview'): s['stale']=False
+                    if code==0 and s.get('action')!='prepare':
+                        name='preview.mp3' if s.get('preview') else 'output.mp3'
+                        if (p/name).is_file(): s.setdefault('asset_revisions',{})[name]=self.revision(p,s.get('preview',False))
                     s['updated_at']=time.time(); write(p/'state.json',s); self.active=None; self.process=None
             else: time.sleep(.25)
 
@@ -156,12 +188,13 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
             data=json.loads(self.rfile.read(length))
             if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
-            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document)',path)
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice)',path)
             if not m: raise ValueError('操作不存在')
             if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False))
+            elif m[2]=='voice': studio.voice(m[1],data['tts'])
             else:
                 with studio.lock:
-                    p=studio.job(m[1]); state=read(p/'state.json',{})
+                    p=studio.job(m[1]); studio.migrate_assets(p); state=read(p/'state.json',{})
                     if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
                     doc=read(p/'document.json',{}); updates=data.get('segments',[])
                     if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
