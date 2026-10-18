@@ -177,6 +177,8 @@ class StudioEngine:
 
     def runner(self, args, **kwargs):
         # Compatible legacy subprocess.run adapter; errors are intentionally redacted.
+        if len(args) > 1 and Path(args[1]).name == 'sherpa_diarization_worker.py':
+            args = [*args, '--cluster-threshold', str(getattr(self, 'diarization_threshold', 0.5))]
         return self.command(args)
 
     def ffmpeg(self, *args):
@@ -247,6 +249,9 @@ class StudioEngine:
         return key
 
     def prepare(self, config, wav):
+        self.diarization_threshold = float(config.get('diarization_threshold', 0.5))
+        if not 0 < self.diarization_threshold < 2:
+            raise StudioInputError('声纹聚类阈值须介于 0 和 2 之间')
         self.progress('transcript')
         pieces, transcript_source = self.transcribe(wav, config)
         if not pieces:

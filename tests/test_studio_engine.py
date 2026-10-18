@@ -12,6 +12,18 @@ from podcast_captions import CaptionPiece
 from diarization_core import SpeakerAssignment, DiarizationTurn
 
 class StudioTests(unittest.TestCase):
+    def test_job_threshold_only_applies_to_diarization_worker(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            engine.diarization_threshold = 0.9
+            with patch.object(engine, 'command') as command:
+                engine.runner(['python', '/tmp/sherpa_diarization_worker.py', '--audio', 'a.wav'])
+                self.assertEqual(command.call_args.args[0][-2:], ['--cluster-threshold', '0.9'])
+                engine.runner(['ffmpeg', '-version'])
+                self.assertEqual(command.call_args.args[0], ['ffmpeg', '-version'])
+            with self.assertRaises(ValueError):
+                engine.prepare({'diarization_threshold': 2}, Path('unused.wav'))
+
     def test_asr_timestamps_and_empty_filter(self):
         result = asr_pieces([{'start': 1, 'end': 3, 'text': ' Hello '}, {'start': 3, 'end': 3, 'text': 'bad'}], 60000)
         self.assertEqual((result[0].start_ms, result[0].end_ms, result[0].text), (61000, 63000, 'Hello'))

@@ -166,6 +166,10 @@ def run_worker(args: argparse.Namespace) -> None:
         args.embedding_model,
         args.num_speakers,
     )
+    threshold = getattr(args, 'cluster_threshold', 0.5)
+    if not 0 < threshold < 2:
+        raise ValueError('声纹聚类阈值须介于 0 和 2 之间')
+    config.clustering.threshold = threshold
     if args.smoke_test:
         return
     if args.audio is None or args.output is None:
@@ -224,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-speakers", type=int)
     parser.add_argument("--min-speakers", type=int)
     parser.add_argument("--max-speakers", type=int)
+    parser.add_argument("--cluster-threshold", type=float, default=0.5)
     parser.add_argument("--smoke-test", action="store_true")
     return parser
 

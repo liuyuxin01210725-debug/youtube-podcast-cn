@@ -26,3 +26,9 @@ ASR uses fixed 60 second local chunks and absolute timestamps. A word crossing a
 Terminal failures retain `failed_stage` and a bounded `error_code` (`source_access_denied`, `network_unavailable`, `model_missing`, `dependency_missing`, `invalid_input`, `process_failed`, or stage-specific failure). Only recognized stderr patterns map to fixed actionable Chinese messages; raw subprocess/provider diagnostics never enter progress. YouTube429/login failures suggest waiting or importing an already downloaded local file. No browser-cookie or keychain-permission automation is performed.
 
 Reference generation uses full original VTT cues independently of rolling-caption deduplication used by translation; overlapping raw cues are never concatenated into repeated reference text. Anonymous speakers receive successive configured system voice slots (`male_1`, `male_2`, `male_3`, `female_1`, `female_2`); these are synthesis presets, not inferred identities or genders. The five-slot pool cycles if more speakers are present and remains user-editable. Selected style is part of every synthesis cache identity.
+
+### 长访谈的声纹参数
+
+任务 `config.json` 可设置 `diarization_threshold`（默认 0.5，合法范围 0–2，不含边界）。这个参数传给隔离的 sherpa worker，仅影响当前任务重新准备译稿时的聚类。数值需要结合原声证据校验，不能通过提高阈值或指定人数来掩盖真实的不同说话人。已完成译稿不会因修改该值自动重算。
+
+2026-10-18 实测 YouTube MM-C3JqCXBk：默认阈值发生过度拆分；0.9 能完成整期分析，但仍有短句分类错误，需要对照清晰参考原声复核。此参数不代表自动声纹识别质量已达到商业配音服务。
