@@ -12,6 +12,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import wave
@@ -144,6 +145,8 @@ class StudioEngine:
 
     def command(self, args, **kwargs):
         self.check_cancel()
+        if args and args[0] == 'yt-dlp':
+            args = [sys.executable, '-m', 'yt_dlp', *args[1:]]
         # File-backed output avoids pipe deadlocks and unbounded child logs.
         with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
             try:

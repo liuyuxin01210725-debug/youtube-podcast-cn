@@ -78,6 +78,11 @@ class StudioTests(unittest.TestCase):
                 self.assertEqual(prior, output.read_bytes())
 
     def test_safe_error_classification(self):
+        with tempfile.TemporaryDirectory() as root:
+            with patch('studio_engine.subprocess.Popen', side_effect=FileNotFoundError) as spawn:
+                with self.assertRaises(StudioError):
+                    StudioEngine(root).command(['yt-dlp', '--version'])
+                self.assertEqual(spawn.call_args.args[0], [sys.executable, '-m', 'yt_dlp', '--version'])
         for raw, code in [('HTTP Error 429 secret_token', 'source_access_denied'), ('Sign in to confirm you are not a bot secret', 'source_access_denied'), ('LocalEntryNotFoundError: cannot find an appropriate cached snapshot secret', 'model_missing'), ('ModuleNotFoundError: No module named secret', 'dependency_missing'), ('Connection refused secret', 'network_unavailable')]:
             error = classify_failure(raw)
             self.assertEqual(error.code, code)
