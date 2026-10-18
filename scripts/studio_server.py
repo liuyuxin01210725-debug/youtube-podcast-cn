@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Loopback-only workbench. Every engine invocation has its own process."""
+import argparse, fcntl, hashlib, json, mimetypes, os, re, secrets, shutil, signal, subprocess, sys, threading, time, uuid
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from pathlib import Path
+from urllib.parse import urlparse, unquote
+ROOT=Path(__file__).resolve().parents[1]
+MAX_UPLOAD=2*1024**3
+
+def read(p, default=None):
+    try: return json.loads(p.read_text())
+    except (OSError,ValueError): return default
+
+def write(p,data):
+    t=p.with_suffix('.new'); t.write_text(json.dumps(data,ensure_ascii=False,indent=2)); t.replace(p)
+
+class Studio:
+    def __init__(self, root, engine=None):
+        self.root=Path(root).expanduser().resolve(); self.root.mkdir(parents=True,exist_ok=True)
+        self.token=secrets.token_urlsafe(32); self.lock=threading.RLock(); self.process=None; self.active=None
+        self.engine=engine or [str(ROOT/'.venv/bin/python'),str(ROOT/'scripts/studio_engine.py')]
+        self.stop=False; self.lock_fd=None
+        for p in self.root.iterdir():
+            if p.is_dir() and (p/'state.json').exists():
+                s=read(p/'state.json',{})
+                if s.get('status') in ('running','queued','cancelling'):
+                    s.update(status='interrupted',message='工作台已重新启动；可继续任务。'); write(p/'state.json',s)
+    def job(self, ident):
+        if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}',ident): raise ValueError('无效任务')
+        p=self.root/ident
+        if not p.is_dir() or p.is_symlink(): raise ValueError('任务不存在')
+        return p
+    def info(self,p):
+        s=read(p/'state.json',{})
+        progress=read(p/'progress.json',{})
+        return dict(id=p.name,title=s.get('title','合成英文测试对话' if p.name=='demo-dialogue' else p.name),status=s.get('status','complete' if (p/'output.mp3').exists() else 'interrupted'),action=s.get('action'),message=s.get('message'),progress=progress,document=read(p/'document.json'),config=read(p/'config.json',{}),files={n:(p/n).exists() for n in ('preview.mp3','output.mp3')},stale=s.get('stale',False),updated_at=s.get('updated_at',0))
+    def list(self):
+        with self.lock: return sorted([self.info(p) for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and (p/'config.json').exists()],key=lambda j:j['updated_at'],reverse=True)
+    def create(self, sources, options):
+        ids=[]
+        if not isinstance(sources,list) or not 1<=len(sources)<=50: raise ValueError('每次可添加 1 至 50 个来源')
+        if options.get('action','prepare') not in ('prepare','run'): raise ValueError('操作无效')
+        if len({s.get('value') for s in sources})!=len(sources): raise ValueError('请移除重复来源')
+        if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','clone') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
+        for source in sources:
+            if source['kind']=='youtube':
+                u=urlparse(source['value'])
+                if u.scheme!='https' or u.hostname not in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be'): raise ValueError('请输入有效的 HTTPS YouTube 链接')
+            elif source['kind']=='upload':
+                name=source['value']
+                if not re.fullmatch(r'[a-f0-9]{32}\.[a-z0-9]{1,8}',name): raise ValueError('上传文件无效')
+                if not (self.root/'.uploads'/name).is_file(): raise ValueError('上传文件不存在')
+            else: raise ValueError('不支持的来源')
+        with self.lock:
+            for source in sources:
+                ident=uuid.uuid4().hex; p=self.root/ident; p.mkdir()
+                if source['kind']=='upload':
+                    dest=p/('source'+Path(source['value']).suffix); shutil.move(str(self.root/'.uploads'/source['value']),dest)
+                    src={'kind':'local','value':str(dest)}
+                else: src=source
+                config={'source':src,'provider':options.get('provider','deepseek'),'tts':options.get('tts','clone'),'style':options.get('style','conversation')}
+                if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
+                write(p/'config.json',config); write(p/'state.json',{'title':source.get('title',source['value']),'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()}); ids.append(ident)
+        return ids
+    def action(self,ident,action,preview=False):
+        with self.lock:
+            p=self.job(ident); s=read(p/'state.json',{})
+            if action=='cancel':
+                if s.get('status')=='queued': s['status']='cancelled'
+                elif self.active==ident:
+                    (p/'cancel').touch(); s['status']='cancelling'
+                else: s['status']='cancelled'
+            elif action=='delete':
+                if self.active==ident or s.get('status')=='queued': raise ValueError('请先取消任务，等待停止后再删除')
+                shutil.rmtree(p); return
+            else:
+                if s.get('status') in ('running','queued','cancelling'): raise ValueError('任务已在队列中')
+                if action not in ('prepare','render','run'): raise ValueError('操作无效')
+                if action=='render' and not (p/'document.json').exists(): raise ValueError('请先准备译稿')
+                s.update(status='queued',action=action,preview=bool(preview),message=None)
+            s['updated_at']=time.time(); write(p/'state.json',s)
+    def worker(self):
+        while not self.stop:
+            with self.lock:
+                jobs=[p for p in self.root.iterdir() if p.is_dir() and read(p/'state.json',{}).get('status')=='queued']
+                jobs.sort(key=lambda p:read(p/'state.json',{}).get('updated_at',0))
+                p=jobs[0] if jobs else None
+                if p:
+                    s=read(p/'state.json'); s['status']='running'; write(p/'state.json',s); self.active=p.name
+                    (p/'cancel').unlink(missing_ok=True)
+                    cmd=self.engine+['--job-dir',str(p),'--config',str(p/'config.json'),'--action',s.get('action','run')]
+                    if s.get('preview'): cmd+=['--preview','3']
+                    try: self.process=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,pass_fds=(self.lock_fd,) if self.lock_fd is not None else ())
+                    except OSError: self.process=None
+            if p:
+                code=self.process.wait() if self.process else 1
+                with self.lock:
+                    s=read(p/'state.json',{}); s['status']='cancelled' if code==130 else ('complete' if code==0 else 'failed')
+                    if code==0 and s.get('action')!='prepare' and not s.get('preview'): s['stale']=False
+                    s['updated_at']=time.time(); write(p/'state.json',s); self.active=None; self.process=None
+            else: time.sleep(.25)
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def send(self,data,status=200,ctype='application/json'):
+        b=json.dumps(data,ensure_ascii=False).encode() if ctype=='application/json' else data
+        self.send_response(status); self.send_header('Content-Type',ctype); self.send_header('Content-Length',str(len(b))); self.send_header('Cache-Control','no-store'); self.send_header('X-Content-Type-Options','nosniff'); self.end_headers(); self.wfile.write(b)
+    def guard(self,mutate=False):
+        host=self.headers.get('Host','')
+        if host not in (f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'): raise ValueError('拒绝非本机请求')
+        origin=self.headers.get('Origin')
+        if origin and origin not in (f'http://127.0.0.1:{self.server.server_port}',f'http://localhost:{self.server.server_port}'): raise ValueError('请求来源无效')
+        if mutate and self.headers.get('X-CSRF-Token')!=self.server.studio.token: raise ValueError('请刷新页面后重试')
+    def do_GET(self):
+        try:
+            self.guard(); path=urlparse(self.path).path; studio=self.server.studio
+            if path=='/api/session': return self.send({'token':studio.token})
+            if path=='/api/jobs': return self.send(studio.list())
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/files/(preview.mp3|output.mp3|transcript.txt|reference-\w+)',path)
+            if m:
+                p=studio.job(m[1]); name=m[2]
+                if name=='transcript.txt':
+                    d=read(p/'document.json',{}); return self.send('\n\n'.join(f"{s.get('speaker_id','')}\n{s.get('text','')}\n{s.get('chinese','')}" for s in d.get('segments',[])).encode(),ctype='text/plain; charset=utf-8')
+                if name.startswith('reference-'):
+                    ref=read(p/'document.json',{}).get('references',{}).get(name[10:],{}); f=(p/ref.get('path','')).resolve()
+                    if not f.is_relative_to(p.resolve()) or not f.is_file(): raise ValueError('参考音频不存在')
+                else: f=p/name
+                if not f.resolve().is_relative_to(p.resolve()) or not f.is_file(): raise ValueError('文件不存在')
+                self.send_response(200); self.send_header('Content-Type',mimetypes.guess_type(f.name)[0] or 'application/octet-stream'); self.send_header('Content-Length',str(f.stat().st_size)); self.end_headers()
+                with f.open('rb') as stream: shutil.copyfileobj(stream,self.wfile,1024*1024)
+                return
+            assets={'/':'index.html','/app.js':'app.js','/style.css':'style.css'}
+            if path in assets:
+                f=ROOT/'studio_static'/assets[path]; return self.send(f.read_bytes(),ctype=mimetypes.guess_type(f.name)[0]+'; charset=utf-8')
+            self.send({'error':'不存在'},404)
+        except (ValueError,OSError) as e: self.send({'error':str(e)},400)
+    def do_POST(self):
+        try:
+            self.guard(True); studio=self.server.studio; path=urlparse(self.path).path
+            length=int(self.headers.get('Content-Length','0'))
+            if path=='/api/uploads':
+                ext=Path(unquote(self.headers.get('X-Filename',''))).suffix.lower()
+                if ext not in ('.wav','.mp3','.mp4','.m4a','.mov','.flac','.ogg','.webm','.aac'): raise ValueError('请选择常见音频或视频文件')
+                if not 0<length<=MAX_UPLOAD: raise ValueError('文件大小须在 2 GB 以内')
+                folder=studio.root/'.uploads'; folder.mkdir(exist_ok=True); ident=uuid.uuid4().hex+ext; target=folder/ident
+                try:
+                    with target.open('wb') as out:
+                        remaining=length
+                        while remaining:
+                            chunk=self.rfile.read(min(1024*1024,remaining))
+                            if not chunk: raise ValueError('上传中断')
+                            out.write(chunk); remaining-=len(chunk)
+                except Exception:
+                    target.unlink(missing_ok=True); raise
+                return self.send({'id':ident})
+            if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
+            data=json.loads(self.rfile.read(length))
+            if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document)',path)
+            if not m: raise ValueError('操作不存在')
+            if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False))
+            else:
+                with studio.lock:
+                    p=studio.job(m[1]); state=read(p/'state.json',{})
+                    if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+                    doc=read(p/'document.json',{}); updates=data.get('segments',[])
+                    if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
+                    for original,new in zip(doc['segments'],updates):
+                        if original['id']!=new['id'] or new.get('speaker_id') not in doc['speakers'] or not isinstance(new.get('chinese'),str) or len(new['chinese'])>20000: raise ValueError('译稿数据无效')
+                        original.update(chinese=new['chinese'],speaker_id=new['speaker_id'])
+                    for ident,slot in data.get('voices',{}).items():
+                        if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')
+                        doc['speakers'][ident]['voice_slot']=slot
+                    write(p/'document.json',doc); state['stale']=True; write(p/'state.json',state)
+            self.send({'ok':True})
+        except (ValueError,KeyError,TypeError,AttributeError,OSError) as e: self.send({'error':str(e)},400)
+
+def main():
+    ap=argparse.ArgumentParser(); ap.add_argument('--port',type=int,default=8765); ap.add_argument('--jobs',default='~/Desktop/音频/中文播客工作台/jobs'); args=ap.parse_args()
+    owned_root=Path(args.jobs).expanduser().resolve(); owned_root.mkdir(parents=True,exist_ok=True)
+    lease=(owned_root/'.server.lock').open('a+')
+    try: fcntl.flock(lease,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError: raise SystemExit('同一任务目录仍有工作台或引擎运行，请等待停止后再打开。')
+    studio=Studio(args.jobs); studio.lock_fd=lease.fileno()
+    for p in owned_root.iterdir():
+        if p.is_dir() and read(p/'state.json',{}).get('status')=='interrupted':
+            shutil.rmtree(p/'temporary',ignore_errors=True)
+    server=ThreadingHTTPServer(('127.0.0.1',args.port),Handler); server.studio=studio
+    threading.Thread(target=studio.worker,daemon=True).start(); print(f'中文播客工作台：http://127.0.0.1:{args.port}',flush=True)
+    def stop(*_):
+        studio.stop=True
+        if studio.active: (studio.job(studio.active)/'cancel').touch()
+        if studio.process:
+            studio.process.send_signal(signal.SIGTERM)
+            try: studio.process.wait(timeout=30)
+            except subprocess.TimeoutExpired: pass
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM,stop)
+    try: server.serve_forever()
+    except KeyboardInterrupt:
+        studio.stop=True
+        if studio.active: (studio.job(studio.active)/'cancel').touch()
+        if studio.process:
+            studio.process.send_signal(signal.SIGTERM)
+            try: studio.process.wait(timeout=30)
+            except subprocess.TimeoutExpired: pass
+    finally: server.server_close()
+if __name__=='__main__': main()
