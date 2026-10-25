@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from studio_engine import StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError
+from studio_engine import select_preview_segments, StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError
 from podcast_captions import CaptionPiece
 from diarization_core import SpeakerAssignment, DiarizationTurn
 
@@ -174,5 +174,18 @@ class StudioTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 engine.render({}, doc)
             self.assertEqual(prior.read_bytes(), b'prior')
+
+
+    def test_preview_prefers_distinct_speakers(self):
+        segments = [
+            {'id': 'a', 'speaker_id': 's0', 'chinese': '一'},
+            {'id': 'b', 'speaker_id': 's0', 'chinese': '二'},
+            {'id': 'c', 'speaker_id': 's1', 'chinese': '三'},
+            {'id': 'd', 'speaker_id': 's2', 'chinese': '四'},
+        ]
+        chosen = select_preview_segments(segments, 3)
+        self.assertEqual([s['id'] for s in chosen], ['a', 'c', 'd'])
+        self.assertEqual([s['speaker_id'] for s in chosen], ['s0', 's1', 's2'])
+
 
 if __name__ == '__main__': unittest.main()

@@ -30,6 +30,30 @@ CLONE_MODEL = 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit'
 ASR_MODEL = 'mlx-community/whisper-small.en-mlx'
 
 
+
+def select_preview_segments(segments, limit=3):
+    """Prefer first clip from each distinct speaker so preview voices differ."""
+    if limit <= 0:
+        return []
+    chosen = []
+    seen = set()
+    for segment in segments:
+        speaker = segment.get('speaker_id')
+        if speaker in seen:
+            continue
+        seen.add(speaker)
+        chosen.append(segment)
+        if len(chosen) >= limit:
+            return chosen
+    chosen_ids = {segment['id'] for segment in chosen}
+    for segment in segments:
+        if segment['id'] in chosen_ids:
+            continue
+        chosen.append(segment)
+        if len(chosen) >= limit:
+            break
+    return chosen
+
 class StudioInputError(ValueError):
     """Engine-owned validation message, safe for display."""
     pass
@@ -312,7 +336,7 @@ class StudioEngine:
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
             raise StudioInputError('段落为空或编号重复')
-        selected = segments if preview is None else segments[:int(preview)]
+        selected = segments if preview is None else select_preview_segments(segments, int(preview))
         if not selected:
             raise StudioInputError('试听段数必须大于零')
         backend_name = config.get('tts', 'edge')

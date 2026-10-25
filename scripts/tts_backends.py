@@ -164,7 +164,17 @@ class EdgeTTSBackend:
         communicate = edge_tts.Communicate(
             request.text, self.resolve_voice(request.voice_slot)
         )
-        await communicate.save(str(output))
+        try:
+            await communicate.save(str(output))
+        except Exception as error:
+            message = str(error)
+            lowered = message.casefold()
+            if "403" in message or "invalid response status" in lowered:
+                raise RuntimeError(
+                    "系统音色服务暂时拒绝连接（常见于 edge-tts 过旧）。请升级到 edge-tts>=7.3.1 后重试："
+                    ".venv/bin/pip install -U 'edge-tts>=7.3.1'"
+                ) from error
+            raise
         return SynthesisUsage()
 
 

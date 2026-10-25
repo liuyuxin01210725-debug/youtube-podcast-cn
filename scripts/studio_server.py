@@ -7,6 +7,22 @@ from urllib.parse import urlparse, unquote
 ROOT=Path(__file__).resolve().parents[1]
 MAX_UPLOAD=2*1024**3
 
+def select_preview_segments(segments, limit=3):
+    if limit<=0: return []
+    chosen=[]; seen=set()
+    for segment in segments:
+        speaker=segment.get('speaker_id')
+        if speaker in seen: continue
+        seen.add(speaker); chosen.append(segment)
+        if len(chosen)>=limit: return chosen
+    ids={s['id'] for s in chosen}
+    for segment in segments:
+        if segment['id'] in ids: continue
+        chosen.append(segment)
+        if len(chosen)>=limit: break
+    return chosen
+
+
 def read(p, default=None):
     try: return json.loads(p.read_text())
     except (OSError,ValueError): return default
@@ -32,7 +48,7 @@ class Studio:
         return p
     def revision(self,p,preview=False):
         doc=read(p/'document.json',{}); config=read(p/'config.json',{})
-        selected=doc.get('segments',[])[:3] if preview else doc.get('segments',[])
+        selected=select_preview_segments(doc.get('segments',[]),3) if preview else doc.get('segments',[])
         ids={s.get('speaker_id') for s in selected}; backend=config.get('tts','edge')
         voices={sid:doc.get('speakers',{}).get(sid) for sid in ids}
         refs={}
