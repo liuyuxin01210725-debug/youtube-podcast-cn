@@ -92,6 +92,23 @@ class AlignmentTests(unittest.TestCase):
         self.assertIsNone(assignments[1].speaker_id)
         self.assertEqual(assignments[1].method, "unassigned")
 
+    def test_review_fill_keeps_a_distant_cue_ambiguous(self) -> None:
+        from diarization_core import fill_unassigned_for_review
+
+        pieces = [
+            CaptionPiece(2000, 2300, "near", 0),
+            CaptionPiece(4000, 4300, "far", 1),
+        ]
+        turns = [DiarizationTurn(0, 1000, "SPEAKER_00")]
+        aligned = align_caption_pieces(pieces, turns)
+        filled = fill_unassigned_for_review(pieces, turns, aligned)
+
+        self.assertIsNone(aligned[1].speaker_id)
+        self.assertEqual(filled[0].speaker_id, "SPEAKER_00")
+        self.assertEqual(filled[1].speaker_id, "SPEAKER_00")
+        self.assertTrue(filled[1].ambiguous)
+        self.assertEqual(filled[1].method, "nearest")
+
     def test_short_unassigned_cue_inherits_equal_direct_neighbors(self) -> None:
         pieces = [
             CaptionPiece(0, 1000, "before", 0),

@@ -606,7 +606,11 @@ def backend_fingerprint(manifest: dict[str, object]) -> dict[str, object]:
         "min_duration_off": 0.5,
         "chunk_duration_ms": DEFAULT_CHUNK_DURATION_MS,
         "chunk_overlap_ms": DEFAULT_CHUNK_OVERLAP_MS,
-        "stitching_version": 2,
+        # 3 invalidates CLI turn caches from stitching_version 2 so soft
+        # closed-world, <20s ghost collapse, and per-chunk budget fit rerun.
+        # cluster_threshold here is the CLI default. Studio YouTube jobs pass
+        # 0.9 on the worker argv and do not read this cache.
+        "stitching_version": 3,
         "speaker_prototype_max_seconds": 30,
         "speaker_prototype_similarity": 0.35,
     }

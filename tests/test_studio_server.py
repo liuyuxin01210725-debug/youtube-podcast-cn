@@ -23,6 +23,30 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request('/api/jobs',{}, {'X-CSRF-Token':'bad'})[0],400)
         self.assertEqual(self.request('/api/jobs/../../etc/files/passwd')[0],404)
         self.assertEqual(self.request('/api/session')[0],200)
+    def test_preview_command_covers_up_to_five_speakers(self):
+        ident = self.create()
+        self.studio.action(ident, 'cancel')
+        p = self.studio.job(ident)
+        segments = [
+            {'id': str(i), 'chinese': '你好', 'speaker_id': f's{i}', 'text': 'Hi'}
+            for i in range(6)
+        ]
+        write(p / 'document.json', {
+            'segments': segments,
+            'speakers': {f's{i}': {'voice_slot': 'male_1'} for i in range(6)},
+            'references': {},
+        })
+        args = self.studio.engine_args(p, {'action': 'render', 'preview': True})
+        self.assertEqual(args[args.index('--preview') + 1], '5')
+        segments = segments[:2]
+        write(p / 'document.json', {
+            'segments': segments,
+            'speakers': {f's{i}': {'voice_slot': 'male_1'} for i in range(2)},
+            'references': {},
+        })
+        args = self.studio.engine_args(p, {'action': 'render', 'preview': True})
+        self.assertEqual(args[args.index('--preview') + 1], '2')
+
     def test_new_jobs_default_to_system_voice(self):
         ident = self.create()
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')

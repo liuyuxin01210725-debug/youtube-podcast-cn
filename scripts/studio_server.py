@@ -7,7 +7,7 @@ from urllib.parse import urlparse, unquote
 ROOT=Path(__file__).resolve().parents[1]
 MAX_UPLOAD=2*1024**3
 
-from studio_preview import select_preview_segments
+from studio_preview import preview_limit, select_preview_segments
 
 def read(p, default=None):
     try: return json.loads(p.read_text())
@@ -34,7 +34,8 @@ class Studio:
         return p
     def revision(self,p,preview=False):
         doc=read(p/'document.json',{}); config=read(p/'config.json',{})
-        selected=select_preview_segments(doc.get('segments',[]),3) if preview else doc.get('segments',[])
+        segments=doc.get('segments',[])
+        selected=select_preview_segments(segments, preview_limit(segments)) if preview else segments
         ids={s.get('speaker_id') for s in selected}; backend=config.get('tts','edge')
         voices={sid:doc.get('speakers',{}).get(sid) for sid in ids}
         refs={}
@@ -116,6 +117,13 @@ class Studio:
                 if action=='render' and not (p/'document.json').exists(): raise ValueError('请先准备译稿')
                 s.update(status='queued',action=action,preview=bool(preview),message=None)
             s['updated_at']=time.time(); write(p/'state.json',s)
+    def engine_args(self, p, state):
+        cmd=self.engine+['--job-dir',str(p),'--config',str(p/'config.json'),'--action',state.get('action','run')]
+        if state.get('preview'):
+            doc=read(p/'document.json',{}) or {}
+            segments=doc.get('segments') if isinstance(doc, dict) else []
+            cmd+=['--preview', str(preview_limit(segments or []))]
+        return cmd
     def worker(self):
         while not self.stop:
             with self.lock:
@@ -126,8 +134,7 @@ class Studio:
                     self.migrate_assets(p)
                     s=read(p/'state.json'); s['status']='running'; write(p/'state.json',s); self.active=p.name
                     (p/'cancel').unlink(missing_ok=True)
-                    cmd=self.engine+['--job-dir',str(p),'--config',str(p/'config.json'),'--action',s.get('action','run')]
-                    if s.get('preview'): cmd+=['--preview','3']
+                    cmd=self.engine_args(p, s)
                     try: self.process=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,pass_fds=(self.lock_fd,) if self.lock_fd is not None else ())
                     except OSError: self.process=None
             if p:

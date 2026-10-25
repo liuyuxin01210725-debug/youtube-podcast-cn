@@ -4,7 +4,11 @@
 
 ## 实施状态
 
-P0 已按下面的裁定实现，上限仍是 6。`_run_worker_chunk` 在 `_validate_chunk_turns` 之前调用 `_fit_turns_to_speaker_budget`：返回给拼接的 turns（含第一块）按 `exact` 或 `maximum` 折叠，embedding 键跟着幸存者改写。锁死「7 人必须先拒绝」的测试已换成折叠后通过，并补了「长于 20s 的多余 ID 也要折进上限」。P1 没做。下文是裁定时的证据；「当前仍会先拒绝」说的是修复前的顺序。
+P0 已实现，上限仍是 6。`_run_worker_chunk` 在 `_validate_chunk_turns` 之前调用 `_fit_turns_to_speaker_budget`：返回给拼接的 turns（含第一块）按 `exact` 或 `maximum` 折叠，embedding 键跟着幸存者改写。锁死「7 人必须先拒绝」的测试已换成折叠后通过。
+
+同一 PR 上又收了一批会明显伤体验的平台层问题：试听按说话人覆盖到最多 5 个声槽；已知的安全中文错误能进 `progress.json`；工作室里单个远处字幕变成待核对，不再在声纹跑完后作废整期；CLI 声纹缓存的 `stitching_version` 升到 3。缺 ffmpeg 不再被说成「音频无效」；解码失败的缓存仍当作坏片段重做。
+
+下文「缺陷」是裁定时的证据。「当前仍会先拒绝」说的是 P0 修复前的顺序。做了什么、明确没做什么，以文末「架构 / 流程优化」为准。
 
 未重跑 `https://www.youtube.com/watch?v=Jk7RAkFN4vk`。下面的判断来自这条报错在当前代码里的唯一落点，以及它前后还有哪些同类的门。
 
@@ -117,4 +121,41 @@ CLI 的 `SherpaDiarizationBackend.diarize` 调用同一个 `run_sherpa_backend`�
 
 只修 P0，并且一次补齐这些点：返回给拼接的 turns（含第一块）先折进**现有**上限，embedding 一起改，替换锁死旧顺序的测试，补一条「长于 20s 的多余 ID 也要折进上限」。不要把 6 改成 8。不要再抬 YouTube 阈值。不要让工作室在声纹失败时静默继续。
 
-这一条已经落地。P1 的试听人数、安全中文错误、单 cue 作废整期、CLI 指纹，都值得做，但都不是 DOAC 这次的炸点。其中试听上限最好等「留下几个人」再改，避免和预算各改各的。
+这一条已经落地。试听人数、安全中文错误、工作室单 cue、CLI 指纹里值得一次做完的部分，见下一节；那里同时写明哪些看起来相关、这次明确不做。
+
+## 架构 / 流程优化
+
+用户要求用 Opus 5.5 做整体审查。那次调用没有返回正文（周用量额度不足）。下面是同一产品标准下的裁定：私人英→中收听，大约 4–5 个声能分开，默认低成本 Edge，不要求名人克隆，不为「跨国串门儿」加匹配层。不是另一模型的输出。
+
+流程仍是一条：取源 → 字幕或 60 秒 ASR → `run_sherpa_backend`（分块、预算折叠、拼接、短鬼影折叠）→ 对齐 → 20% 未对齐门 → 工作室补最近说话人并标待核对 → 翻译 → 试听或成片。CLI 与工作室共享声纹运行时。工作室不走 `prepare_episode`，因此不会在声纹失败时静默丢掉说话人。这是结构，不是债。
+
+### 一次做完
+
+| 问题 | 收益 | 改动面 |
+| --- | --- | --- |
+| 单块人数在折叠前硬拒。DOAC 类「一块 > 上限」停在 `声纹分块检测到的说话人数超出配置范围`。 | 折进现有 `exact` 或 `maximum`（6）之后才校验。第一块也折，embedding 跟着改，第二块不会再撞匹配器的 6 人门。 | 已在 `scripts/diarization_runtime.py`。上限不改成 8。 |
+| 试听固定 3 段，盖不住 4–5 个可辨声。`revision()` 若仍按 3 算，和真实试听不一致时会把成品标成过期或不过期。 | 试听人数 = 文档里的说话人数，最多 5（现有声槽）。两人就试两句，不再用别人的句子垫满。服务端命令和过期检测用同一个 `preview_limit`。 | `scripts/studio_preview.py`、`scripts/studio_server.py`。挑选函数仍只有一处。 |
+| 缺 key、Edge 403 的中文提示到不了界面；私享/下架/年龄限制收成笼统的「处理程序执行失败」。任意 SDK 字符串仍可能带密钥。 | `progress.json` 只放白名单类型的句子。带 `http(s)://`、`Bearer` 或 `token=` 的句子继续换成笼统失败。Edge 403 改抛 `TTSBackendError`，正文不含上游原文。私享类 yt-dlp 输出映射成固定中文，不落原始 stderr。 | `scripts/studio_engine.py` 的 `user_facing_message`、`classify_failure`；`scripts/tts_backends.py`。 |
+| 一条离语音超过 1.5 秒的字幕，在声纹跑完后让工作室整期失败。20% 门比这条更松，实际走不到。 | 20% 门仍先执行。通过之后，工作室把仍未分配的 cue 贴到最近的已有说话人，标 `ambiguous`。试听和成片继续拒绝待核对段。克隆参考仍跳过这些 cue。 | 新函数 `fill_unassigned_for_review`，只由工作室 `prepare` 调用。CLI 的 1500ms 语义和「任意 None 即失败」不动。 |
+| CLI 缓存指纹停在 `stitching_version` 2，软闭环、20 秒折叠和这次的人数预算都不会重跑。 | 升到 3，旧 turns 缓存失效，下次 CLI 声纹重算。 | `backend_fingerprint` 一个字段。 |
+| `valid_audio` 把缺 ffmpeg 说成「音频无效」。若把所有 `StudioError` 都抛出去，坏缓存又会变成整期失败。 | 只有 `dependency_missing` 向上抛。ffmpeg 解码失败仍返回假，缓存重做。 | `StudioEngine.valid_audio`。 |
+
+### 明确不做
+
+- 不把说话人上限从 6 改成 8，不加第 6 套声槽。第 6 人仍会循环到已有槽，试听也不覆盖第 6 人。验收是 4–5 个可辨声。
+- 不再把 YouTube 聚类阈值抬过 0.9。阈值越大簇越少，再抬会并掉真的客人。
+- 不把 CLI `diarize=auto` 的静默回退抄进工作室。声纹失败继续失败关闭。
+- 不为工作室新做一份声纹缓存，不把工作室的 0.9 写进 CLI 指纹里那个写死的 `cluster_threshold`。工作室不读 `DiarizationCache`。指纹里的 0.5 只描述 CLI 默认。
+- 不改保存译稿时清掉全部 `ambiguous`。界面把保存当成「我核对过了」。只改一个错字也会签收全部，这是已知代价，不是这次的炸点。
+- 不改 CLI 对齐的 1500ms，不改 CLI「任意未分配 cue 即失败」。
+- 不合并 `.venv`、`.speech-venv`、`.diarization-venv`。不并行声纹分块，不改 60 秒 ASR，不加跨集声纹或名人克隆。
+- 不改 `rmtree(..., ignore_errors=False)`。清理失败盖住原异常的窗口很小。
+
+### 做完之后仍在的边界
+
+- 未分配比例超过 20% 时，填充之前就会失败。短文件里 4 条字幕有 1 条离得很远，仍可能整期停下。
+- 待核对段在用户改正或保存之前，试听和成片都会停。保存仍会签收每一行。
+- worker 的 `--max-speakers` 仍不读取。人数预算在 Python 折叠，不在 sherpa。
+- 第 6 个说话人与某一声槽同声，试听听不到这个人。
+- 未重跑 DOAC 那条 YouTube。单测覆盖的是「一块里 7 个 ID，含第一块、含都长于 20 秒」会折进 6 再继续，而不是那条视频本身。
+- `tests/test_diarization_runtime.py` 里要求本机安装声纹运行时的那条，在 Linux 上仍会因「当前声纹版本仅支持 macOS arm64」失败。这是平台检查，不是这批改动。

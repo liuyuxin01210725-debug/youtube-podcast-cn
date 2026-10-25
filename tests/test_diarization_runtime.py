@@ -119,6 +119,7 @@ class RuntimeTests(unittest.TestCase):
         fingerprint = backend_fingerprint(load_model_manifest(MANIFEST))
         serialized = json.dumps(fingerprint).casefold()
         self.assertEqual(fingerprint["cluster_threshold"], 0.5)
+        self.assertEqual(fingerprint["stitching_version"], 3)
         self.assertNotIn("https://", serialized)
         self.assertNotIn("license_url", serialized)
 

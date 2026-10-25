@@ -2,6 +2,26 @@
 
 from __future__ import annotations
 
+# Five system slots are the distinguishable set. Do not grow this with the
+# diarization ID cap: a sixth speaker already aliases an existing slot.
+PREVIEW_SPEAKER_CAP = 5
+
+
+def preview_limit(segments, cap=PREVIEW_SPEAKER_CAP):
+    """One line per speaker, and never more lines than the distinguishable slots."""
+    if not isinstance(segments, list) or cap <= 0:
+        return 1 if cap > 0 else 0
+    speakers = set()
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        speaker = segment.get("speaker_id")
+        if speaker:
+            speakers.add(speaker)
+    if not speakers:
+        return 1
+    return min(len(speakers), cap)
+
 
 def select_preview_segments(segments, limit=3):
     """Pick the longest Chinese line per speaker, then pad to limit."""

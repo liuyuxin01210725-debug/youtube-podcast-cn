@@ -165,6 +165,52 @@ def align_caption_pieces(
     return assignments
 
 
+def fill_unassigned_for_review(
+    pieces: list[CaptionPiece],
+    turns: list[DiarizationTurn],
+    assignments: list[SpeakerAssignment],
+) -> list[SpeakerAssignment]:
+    """Attach still-unassigned cues to the nearest turn and flag them for review.
+
+    align_caption_pieces keeps the 1500 ms gate, so CLI can still reject a
+    distant cue. The studio calls this after the 20% unassigned check: one
+    outro caption must not discard a finished diarization. The cue stays
+    ambiguous, so synthesis will not mix it in until a person confirms it.
+    """
+    if len(pieces) != len(assignments):
+        raise ValueError("字幕与说话人分配数量不一致")
+    if not turns:
+        return list(assignments)
+    filled: list[SpeakerAssignment] = []
+    for piece, assignment in zip(pieces, assignments, strict=True):
+        if assignment.speaker_id is not None:
+            filled.append(assignment)
+            continue
+        _gap_ms, speaker_id, _start_ms, _end_ms = min(
+            (
+                (
+                    _interval_gap_ms(piece, turn),
+                    turn.speaker_id,
+                    turn.start_ms,
+                    turn.end_ms,
+                )
+                for turn in turns
+            ),
+            key=lambda item: item,
+        )
+        filled.append(
+            replace(
+                assignment,
+                speaker_id=speaker_id,
+                overlap_ms=0,
+                confidence=0.0,
+                ambiguous=True,
+                method="nearest",
+            )
+        )
+    return filled
+
+
 def validate_diarization(
     turns: list[DiarizationTurn],
     *,
