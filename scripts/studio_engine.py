@@ -274,7 +274,9 @@ class StudioEngine:
         return key
 
     def prepare(self, config, wav):
-        self.diarization_threshold = float(config.get('diarization_threshold', 0.5))
+        # YouTube interviews over-split at 0.5; omit → 0.9. Explicit config wins.
+        default_threshold = 0.9 if config.get('source', {}).get('kind') == 'youtube' else 0.5
+        self.diarization_threshold = float(config.get('diarization_threshold', default_threshold))
         if not 0 < self.diarization_threshold < 2:
             raise StudioInputError('声纹聚类阈值须介于 0 和 2 之间')
         self.progress('transcript')
@@ -417,6 +419,19 @@ class StudioEngine:
             self.progress('cancelled', message='任务已取消；已完成片段可继续复用')
             raise
         except Exception as error:
+            # Durable local diagnosis (Chinese app strings / type names — not stderr dumps).
+            try:
+                atomic_json(self.job / 'debug-failure.json', {
+                    'stage': self.stage,
+                    'exc_type': type(error).__name__,
+                    'exc_message': str(error)[:500],
+                    'updated_at': time.time(),
+                })
+            except OSError:
+                pass
+            # Diarization* carry safe Chinese reasons; surface them like StudioInputError.
+            if type(error).__name__.startswith('Diarization') and not isinstance(error, (StudioError, StudioInputError)):
+                error = StudioInputError(str(error))
             # Never serialize arbitrary exception strings: SDKs may embed credentials.
             self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, StudioError) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=str(error) if isinstance(error, (StudioError, StudioInputError)) else '处理失败，请检查当前阶段、依赖和模型配置后重试')
             raise

@@ -98,6 +98,7 @@ class Studio:
                     src={'kind':'local','value':str(dest)}
                 else: src=source
                 config={'source':src,'provider':options.get('provider','deepseek'),'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
+                if source['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':source.get('title',source['value']),'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()}); ids.append(ident)
         return ids
