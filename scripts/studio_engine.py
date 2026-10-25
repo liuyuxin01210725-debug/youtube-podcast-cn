@@ -32,27 +32,36 @@ ASR_MODEL = 'mlx-community/whisper-small.en-mlx'
 
 
 def select_preview_segments(segments, limit=3):
-    """Prefer first clip from each distinct speaker so preview voices differ."""
+    """Pick the longest Chinese line per speaker, then pad to limit."""
     if limit <= 0:
         return []
-    chosen = []
+    best_by_speaker = {}
+    for segment in segments:
+        speaker = segment.get('speaker_id')
+        if not speaker:
+            continue
+        score = len((segment.get('chinese') or '').strip())
+        current = best_by_speaker.get(speaker)
+        if current is None or score > len((current.get('chinese') or '').strip()):
+            best_by_speaker[speaker] = segment
+    ordered = []
     seen = set()
     for segment in segments:
         speaker = segment.get('speaker_id')
-        if speaker in seen:
-            continue
-        seen.add(speaker)
-        chosen.append(segment)
-        if len(chosen) >= limit:
-            return chosen
-    chosen_ids = {segment['id'] for segment in chosen}
+        if speaker in best_by_speaker and speaker not in seen:
+            ordered.append(best_by_speaker[speaker])
+            seen.add(speaker)
+            if len(ordered) >= limit:
+                return ordered
+    ids = {segment['id'] for segment in ordered}
     for segment in segments:
-        if segment['id'] in chosen_ids:
+        if segment['id'] in ids:
             continue
-        chosen.append(segment)
-        if len(chosen) >= limit:
+        ordered.append(segment)
+        if len(ordered) >= limit:
             break
-    return chosen
+    return ordered
+
 
 class StudioInputError(ValueError):
     """Engine-owned validation message, safe for display."""
