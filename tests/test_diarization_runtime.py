@@ -194,6 +194,37 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(mapping, {"L0": "G1", "L1": "G0"})
 
+    def test_soft_closed_world_remaps_instead_of_inventing_without_exact_count(
+        self,
+    ) -> None:
+        """Long interviews must not invent SPEAKER_02.. when prototypes exist."""
+        mapping = runtime_module._speaker_mapping(
+            [
+                DiarizationTurn(0, 300, "SPEAKER_00"),
+                DiarizationTurn(300, 600, "SPEAKER_01"),
+            ],
+            [
+                DiarizationTurn(800, 900, "SPEAKER_00"),
+                DiarizationTurn(900, 1000, "SPEAKER_01"),
+            ],
+            overlap_start_ms=600,
+            overlap_end_ms=800,
+            bounds=SpeakerBounds(),  # no exact → previously invented / failed later
+            existing_embeddings={
+                "SPEAKER_00": [1.0, 0.0],
+                "SPEAKER_01": [0.0, 1.0],
+            },
+            incoming_embeddings={
+                "SPEAKER_00": [0.2, 0.8],  # below 0.35 vs unused; still clearly 01
+                "SPEAKER_01": [0.8, 0.2],
+            },
+        )
+        self.assertEqual(
+            mapping,
+            {"SPEAKER_00": "SPEAKER_01", "SPEAKER_01": "SPEAKER_00"},
+        )
+        self.assertEqual(set(mapping.values()), {"SPEAKER_00", "SPEAKER_01"})
+
     def test_mapping_fails_when_capacity_is_full_without_identity_evidence(
         self,
     ) -> None:

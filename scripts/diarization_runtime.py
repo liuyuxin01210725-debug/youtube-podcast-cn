@@ -258,6 +258,34 @@ def _speaker_mapping(
         mapping.update(fallback_mapping)
         used_global_ids.update(fallback_mapping.values())
 
+    # Soft closed-world for long audio: when overlap/prototype evidence is
+    # weak, prefer remapping onto existing globals over inventing new IDs.
+    # Inventing across many chunks exhausts the speaker budget and then fails
+    # with "无法安全映射说话人" on interviews that are only 2–3 talkers.
+    unmatched_local = [item for item in local_ids if item not in mapping]
+    for local_id in unmatched_local:
+        if local_id not in incoming_vectors:
+            continue
+        best_global: str | None = None
+        best_score = float("-inf")
+        for global_id in global_ids:
+            if global_id not in existing_vectors:
+                continue
+            score = _cosine_similarity(
+                incoming_vectors[local_id], existing_vectors[global_id]
+            )
+            unused = global_id not in used_global_ids
+            if score > best_score or (
+                score == best_score
+                and unused
+                and (best_global is None or best_global in used_global_ids)
+            ):
+                best_score = score
+                best_global = global_id
+        if best_global is not None and best_score > -1.0:
+            mapping[local_id] = best_global
+            used_global_ids.add(best_global)
+
     maximum = bounds.exact if bounds.exact is not None else bounds.maximum
     all_used_ids = set(global_ids)
     for local_id in local_ids:
