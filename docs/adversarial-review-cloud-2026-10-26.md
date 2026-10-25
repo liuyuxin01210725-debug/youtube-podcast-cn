@@ -1,6 +1,10 @@
 # 对抗性审阅 · 中文播客工作台（2026-10-26）
 
-基线：`codex/podcast-studio-20261018` @ `0f8e35d`（`fix(studio): lock diarization ghosts + stage ETA progress`）。私人英→中流水线，验收是一期里大约 4–5 个声能分开，默认 Edge/系统声槽，克隆可选。本轮只审阅，不改行为。
+基线：`codex/podcast-studio-20261018` @ `0f8e35d`（`fix(studio): lock diarization ghosts + stage ETA progress`）。私人英→中流水线，验收是一期里大约 4–5 个声能分开，默认 Edge/系统声槽，克隆可选。
+
+## 实施状态
+
+P0 已按下面的裁定实现，上限仍是 6。`_run_worker_chunk` 在 `_validate_chunk_turns` 之前调用 `_fit_turns_to_speaker_budget`：返回给拼接的 turns（含第一块）按 `exact` 或 `maximum` 折叠，embedding 键跟着幸存者改写。锁死「7 人必须先拒绝」的测试已换成折叠后通过，并补了「长于 20s 的多余 ID 也要折进上限」。P1 没做。下文是裁定时的证据；「当前仍会先拒绝」说的是修复前的顺序。
 
 未重跑 `https://www.youtube.com/watch?v=Jk7RAkFN4vk`。下面的判断来自这条报错在当前代码里的唯一落点，以及它前后还有哪些同类的门。
 
@@ -113,8 +117,4 @@ CLI 的 `SherpaDiarizationBackend.diarize` 调用同一个 `run_sherpa_backend`�
 
 只修 P0，并且一次补齐这些点：返回给拼接的 turns（含第一块）先折进**现有**上限，embedding 一起改，替换锁死旧顺序的测试，补一条「长于 20s 的多余 ID 也要折进上限」。不要把 6 改成 8。不要再抬 YouTube 阈值。不要让工作室在声纹失败时静默继续。
 
-P1 的试听人数、安全中文错误、单 cue 作废整期、CLI 指纹，都值得做，但都不是 DOAC 这次的炸点。其中试听上限最好等 P0 的「留下几个人」定下来再改，避免 3→5 和预算各改各的。
-
-## 本轮没有改代码
-
-P0 要改的是说话人预算的语义和一条正在保护旧语义的测试，还要动 embedding 与第一块的返回值。这不是一行能看完的补丁，先写在这里等裁定。
+这一条已经落地。P1 的试听人数、安全中文错误、单 cue 作废整期、CLI 指纹，都值得做，但都不是 DOAC 这次的炸点。其中试听上限最好等「留下几个人」再改，避免和预算各改各的。

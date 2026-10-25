@@ -184,12 +184,94 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     )
 
 
+def _speaker_cap(bounds: SpeakerBounds) -> int:
+    """Configured speaker ceiling. exact wins; the default maximum stays 6."""
+    return bounds.exact if bounds.exact is not None else bounds.maximum
+
+
 def _validate_chunk_turns(
     turns: list[DiarizationTurn], bounds: SpeakerBounds
 ) -> None:
-    maximum = bounds.exact if bounds.exact is not None else bounds.maximum
-    if len({turn.speaker_id for turn in turns}) > maximum:
+    if len({turn.speaker_id for turn in turns}) > _speaker_cap(bounds):
         raise DiarizationRuntimeError("声纹分块检测到的说话人数超出配置范围")
+
+
+def _fit_turns_to_speaker_budget(
+    turns: list[DiarizationTurn],
+    embeddings: dict[str, list[float]],
+    bounds: SpeakerBounds,
+) -> tuple[list[DiarizationTurn], dict[str, list[float]]]:
+    """Merge extra cluster IDs down to the configured cap before validation.
+
+    Sherpa can emit more than six IDs in one chunk even when the worker was
+    passed ``--max-speakers``. Rejecting those IDs before folding aborts the
+    episode (the chunk-count error). Fold the turns stitching will actually
+    see, including the first chunk, and keep embedding keys on the survivors.
+    The cap is the existing exact count or maximum (6). It is not raised.
+    """
+    cap = _speaker_cap(bounds)
+    duration: dict[str, int] = {}
+    for turn in turns:
+        duration[turn.speaker_id] = duration.get(turn.speaker_id, 0) + (
+            turn.end_ms - turn.start_ms
+        )
+    if cap < 1 or len(duration) <= cap:
+        return turns, embeddings
+
+    vectors = {speaker_id: list(vector) for speaker_id, vector in embeddings.items()}
+    alias = {speaker_id: speaker_id for speaker_id in duration}
+
+    def nearest_or_longest(donor: str, others: list[str]) -> str:
+        donor_vector = vectors.get(donor) or []
+        best_id: str | None = None
+        best_key: tuple[float, int, str] | None = None
+        if donor_vector:
+            for candidate in others:
+                score = _cosine_similarity(donor_vector, vectors.get(candidate) or [])
+                if score <= -1.0:
+                    continue
+                key = (score, duration[candidate], candidate)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_id = candidate
+        if best_id is not None:
+            return best_id
+        return max(others, key=lambda speaker_id: (duration[speaker_id], speaker_id))
+
+    while len(duration) > cap:
+        donor = min(duration, key=lambda speaker_id: (duration[speaker_id], speaker_id))
+        others = [speaker_id for speaker_id in duration if speaker_id != donor]
+        target = nearest_or_longest(donor, others)
+        duration[target] += duration.pop(donor)
+        donor_vector = vectors.pop(donor, None)
+        target_vector = vectors.get(target)
+        if donor_vector is not None:
+            if target_vector is None:
+                vectors[target] = donor_vector
+            elif len(target_vector) == len(donor_vector):
+                vectors[target] = [
+                    (left + right) / 2
+                    for left, right in zip(target_vector, donor_vector, strict=True)
+                ]
+        for original, current in list(alias.items()):
+            if current == donor:
+                alias[original] = target
+
+    fitted = [
+        DiarizationTurn(
+            turn.start_ms,
+            turn.end_ms,
+            alias.get(turn.speaker_id, turn.speaker_id),
+        )
+        for turn in turns
+    ]
+    surviving = set(alias.values())
+    fitted_embeddings = {
+        speaker_id: vectors[speaker_id]
+        for speaker_id in surviving
+        if speaker_id in vectors
+    }
+    return fitted, fitted_embeddings
 
 
 def _speaker_mapping(
@@ -307,7 +389,7 @@ def _speaker_mapping(
             mapping[local_id] = dominant
             used_global_ids.add(dominant)
 
-    maximum = bounds.exact if bounds.exact is not None else bounds.maximum
+    maximum = _speaker_cap(bounds)
     all_used_ids = set(global_ids)
     for local_id in local_ids:
         if local_id in mapping:
@@ -826,8 +908,14 @@ def _run_worker_chunk(
             if progress_matches:
                 report(max(int(value) for value in progress_matches))
         result = _read_worker_output(output_path)
-        _validate_chunk_turns(result.turns, bounds)
-        return result
+        # Fit before the hard count check. The first chunk is stitched as-is,
+        # so the folded turns and embeddings are what later chunks map against.
+        turns, embeddings = _fit_turns_to_speaker_budget(
+            result.turns, result.embeddings, bounds
+        )
+        fitted = WorkerChunk(turns, embeddings)
+        _validate_chunk_turns(fitted.turns, bounds)
+        return fitted
     finally:
         try:
             output_path.unlink()
