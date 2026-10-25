@@ -29,3 +29,13 @@ E. 对照 CLI：能复用的调用 podcast_cn 路径，工作台只做编排与 
 
 ## 建议下一刀
 先做 A+C（快、体感大），再加固 B 的测试夹具；D 可并行。
+
+## 默认声纹阈值策略（B，可解释）
+- **本地文件**：`cluster_threshold=0.5`（sherpa 默认，尽量保留真实嘉宾分轨）
+- **YouTube**：工作台创建任务时写入 `diarization_threshold=0.9`（0.5 时长访谈易过切出 SPEAKER_02/04 鬼影）
+- **残差治理**（不靠继续抬阈值）：soft closed-world 拼接优先映射到已有全局说话人；拼接后将合计时长 &lt;~20s 的短说话人塌缩进主导声轨。回归夹具：`tests/fixtures/diarization-regression.json`。
+- 用户在任务 `config.json` 显式设置的阈值始终优先。
+
+## 阶段 ETA（D）
+- `progress.json` 增加 `stage_started_at`、`eta_seconds`（按当前阶段 completed/total 线性外推），ASR / 声纹 / 翻译 / 合成均写入。
+- 字幕回退时写入 `subtitle_fallback_reason`（并落盘 `debug-subtitle-fallback.json`）；`studio_server.info` 与 UI 状态行展示原因与剩余时间。

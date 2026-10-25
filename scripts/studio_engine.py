@@ -18,11 +18,13 @@ import time
 import wave
 
 from podcast_cn import (fetch_video_info, download_english_subtitles, create_translation_client,
-                        translate_with_resume, get_provider_config, SherpaDiarizationBackend, _is_exact_youtube_url)
+                        translate_with_resume, get_provider_config, _is_exact_youtube_url)
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
 from diarization_core import SpeakerBounds, align_caption_pieces, validate_diarization
 from diarization_cache import VOICE_ORDER
+from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
 from studio_preview import select_preview_segments
+from studio_progress import build_progress_payload
 from temporary_audio import download_audio_only, sha256_file
 from tts_backends import build_backend, SynthesisRequest
 
@@ -135,6 +137,8 @@ class StudioEngine:
         self.cancelled = False
         self.process = None
         self.stage = 'queued'
+        self._stage_started_at = time.time()
+        self.subtitle_fallback_reason = None
         self.reference_pieces = None
         self.temp = self.job / 'temporary'
 
@@ -143,9 +147,24 @@ class StudioEngine:
             raise Cancelled('任务已取消，可继续使用已完成的缓存')
 
     def progress(self, stage, completed=0, total=0, **extra):
+        now = time.time()
         if stage not in ('failed', 'cancelled'):
+            if stage != self.stage:
+                self._stage_started_at = now
             self.stage = stage
-        atomic_json(self.job / 'progress.json', {'stage': stage, 'completed': completed, 'total': total, 'updated_at': time.time(), **extra})
+        reason = extra.pop('subtitle_fallback_reason', None)
+        if reason:
+            self.subtitle_fallback_reason = reason
+        payload = build_progress_payload(
+            stage,
+            completed=completed,
+            total=total,
+            stage_started_at=getattr(self, '_stage_started_at', now),
+            updated_at=now,
+            subtitle_fallback_reason=self.subtitle_fallback_reason,
+            **extra,
+        )
+        atomic_json(self.job / 'progress.json', payload)
 
     def command(self, args, **kwargs):
         self.check_cancel()
@@ -237,15 +256,20 @@ class StudioEngine:
                 })
             except OSError:
                 pass
-            self.progress('asr', message=f'英文字幕不可用（{(reason or "")[:80]}），改用本地识别')
+            self.progress(
+                'asr',
+                message=f'英文字幕不可用（{(reason or "")[:80]}），改用本地识别',
+                subtitle_fallback_reason=(reason or 'unknown')[:180],
+            )
         with wave.open(str(wav)) as audio:
             seconds = audio.getnframes() / audio.getframerate()
         pieces = []
         # Small fixed chunks keep ASR memory bounded. Offsets preserve source time.
+        asr_total = max(1, int(seconds / 60) + 1)
         for index, start in enumerate(range(0, int(seconds) + 1, 60)):
             if start >= seconds:
                 break
-            self.progress('asr', index, max(1, int(seconds / 60) + 1))
+            self.progress('asr', index, asr_total)
             chunk = self.temp / 'asr.wav'
             output = self.temp / 'asr.json'
             self.ffmpeg('-ss', start, '-i', wav, '-t', 60, chunk)
@@ -263,8 +287,41 @@ class StudioEngine:
                 key = result.stdout.strip()
         return key
 
+    def diarize_with_progress(self, wav, bounds):
+        """Run sherpa chunks with stage progress; keep threshold + cancel wiring."""
+        runtime = ensure_diarization_runtime(runner=self.runner)
+
+        def popen_factory(command, **kwargs):
+            args = list(command)
+            if len(args) > 1 and Path(args[1]).name == 'sherpa_diarization_worker.py':
+                args = [*args, '--cluster-threshold', str(getattr(self, 'diarization_threshold', 0.5))]
+            self.check_cancel()
+            process = subprocess.Popen(args, start_new_session=True, **kwargs)
+            self.process = process
+            return process
+
+        def on_progress(percent):
+            self.check_cancel()
+            self.progress('diarization', int(percent), 100)
+
+        try:
+            return run_sherpa_backend(
+                wav,
+                bounds,
+                runtime=runtime,
+                runner=self.runner,
+                popen_factory=popen_factory,
+                progress_callback=on_progress,
+            )
+        finally:
+            self.process = None
+
     def prepare(self, config, wav):
-        # YouTube interviews over-split at 0.5; omit → 0.9. Explicit config wins.
+        # Default cluster threshold strategy (do not raise to "fix" oversplit):
+        # - local files: 0.5 (sherpa default; preserves real guest splits)
+        # - YouTube interviews: 0.9 (0.5 over-splits long talk shows into ghost IDs)
+        # Soft closed-world stitch + <~20s ghost collapse handle residual oversplit
+        # without needing a higher global threshold. Explicit config always wins.
         default_threshold = 0.9 if config.get('source', {}).get('kind') == 'youtube' else 0.5
         self.diarization_threshold = float(config.get('diarization_threshold', default_threshold))
         if not 0 < self.diarization_threshold < 2:
@@ -273,10 +330,9 @@ class StudioEngine:
         pieces, transcript_source = self.transcribe(wav, config)
         if not pieces:
             raise StudioInputError('没有识别出英文对白，请检查文件或字幕')
-        self.progress('diarization')
-        backend = SherpaDiarizationBackend(runner=self.runner)
+        self.progress('diarization', 0, 100)
         bounds = SpeakerBounds(exact=config.get('speaker_count'))
-        turns = backend.diarize(wav, bounds)
+        turns = self.diarize_with_progress(wav, bounds)
         assignments = align_caption_pieces(pieces, turns)
         validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=bounds, assignments=assignments)
         if any(a.speaker_id is None for a in assignments):
@@ -285,10 +341,18 @@ class StudioEngine:
         self.progress('translation', 0, len(segments))
         provider = config.get('provider', 'deepseek')
         client = create_translation_client(provider, api_key=self.credential(provider))
+        translated_count = 0
         def translate(batch):
+            nonlocal translated_count
             self.check_cancel()
-            return client.translate(batch)
+            result = client.translate(batch)
+            translated_count += len(batch)
+            self.progress('translation', translated_count, len(segments))
+            return result
         translated = translate_with_resume(segments, self.job / 'translations', translate, translation_identity=client.translation_identity)
+        if translated_count < len(segments):
+            # Cache hits never call translate(); snap progress to done for ETA UI.
+            self.progress('translation', len(segments), len(segments))
         reference_pieces = self.reference_pieces if self.reference_pieces is not None else pieces
         reference_assignments = align_caption_pieces(reference_pieces, turns) if self.reference_pieces is not None else assignments
         refs = select_references(reference_pieces, reference_assignments, turns)

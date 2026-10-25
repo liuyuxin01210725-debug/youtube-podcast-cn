@@ -57,7 +57,12 @@ class Studio:
         self.migrate_assets(p)
         s=read(p/'state.json',{})
         asset_stale={n:s.get('asset_revisions',{}).get(n)!=self.revision(p,n=='preview.mp3') for n in ('preview.mp3','output.mp3') if (p/n).is_file()}
-        progress=read(p/'progress.json',{})
+        progress=dict(read(p/'progress.json',{}) or {})
+        # Surface durable subtitle-fallback reason even if progress.json was rewritten mid-stage.
+        if not progress.get('subtitle_fallback_reason'):
+            fallback=read(p/'debug-subtitle-fallback.json') or {}
+            reason=fallback.get('reason') if isinstance(fallback,dict) else None
+            if reason: progress['subtitle_fallback_reason']=reason
         return dict(id=p.name,title=s.get('title','合成英文测试对话' if p.name=='demo-dialogue' else p.name),status=s.get('status','complete' if (p/'output.mp3').exists() else 'interrupted'),action=s.get('action'),message=s.get('message'),progress=progress,document=read(p/'document.json'),config=read(p/'config.json',{}),files={n:(p/n).exists() for n in ('preview.mp3','output.mp3')},stale=any(asset_stale.values()),asset_stale=asset_stale,updated_at=s.get('updated_at',0))
     def list(self):
         with self.lock: return sorted([self.info(p) for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and (p/'config.json').exists()],key=lambda j:j['updated_at'],reverse=True)

@@ -97,4 +97,20 @@ class ServerTests(unittest.TestCase):
         self.assertGreaterEqual(float((p2/'started').read_text()),float((p1/'finished').read_text()))
         self.assertEqual((p1/'output.mp3').read_bytes(),b'old')
         self.studio.stop=True;t.join(2)
+    def test_info_surfaces_subtitle_fallback_reason(self):
+        with tempfile.TemporaryDirectory() as root:
+            studio = Studio(root, engine=['/bin/true'])
+            job = Path(root) / 'jobfb'
+            job.mkdir()
+            (job / 'config.json').write_text(json.dumps({
+                'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=dQw4w9WgXcQ'},
+                'provider': 'deepseek', 'tts': 'edge', 'style': 'conversation',
+            }))
+            (job / 'state.json').write_text(json.dumps({'title': 't', 'status': 'running', 'updated_at': 1}))
+            (job / 'progress.json').write_text(json.dumps({'stage': 'asr', 'completed': 1, 'total': 4, 'updated_at': 1}))
+            (job / 'debug-subtitle-fallback.json').write_text(json.dumps({'reason': '英文字幕文件为空或无法解析', 'updated_at': 1}))
+            info = studio.info(job)
+            self.assertEqual(info['progress']['subtitle_fallback_reason'], '英文字幕文件为空或无法解析')
+
+
 if __name__=='__main__': unittest.main()

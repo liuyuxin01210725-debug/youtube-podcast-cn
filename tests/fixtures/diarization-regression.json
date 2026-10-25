@@ -1,0 +1,238 @@
+{
+  "description": "Regression cases for soft closed-world stitch, <~20s ghost collapse, and first-chunk even-id oversplit. Times are milliseconds; collapse default min_ms=20000 (~20s).",
+  "default_threshold_strategy": {
+    "local": 0.5,
+    "youtube": 0.9,
+    "rationale": "YouTube long interviews over-split at 0.5 into ghost SPEAKER_02/04/…; raise only the YouTube default to 0.9. Soft closed-world remap + collapse of speakers totaling <~20s into the dominant lasting voice clean residual ghosts without a higher global threshold that would merge real guests."
+  },
+  "cases": [
+    {
+      "id": "soft_closed_world_remap",
+      "kind": "speaker_mapping",
+      "existing": [
+        [
+          0,
+          300,
+          "SPEAKER_00"
+        ],
+        [
+          300,
+          600,
+          "SPEAKER_01"
+        ]
+      ],
+      "incoming": [
+        [
+          800,
+          900,
+          "SPEAKER_00"
+        ],
+        [
+          900,
+          1000,
+          "SPEAKER_01"
+        ]
+      ],
+      "overlap_start_ms": 600,
+      "overlap_end_ms": 800,
+      "exact": null,
+      "existing_embeddings": {
+        "SPEAKER_00": [
+          1.0,
+          0.0
+        ],
+        "SPEAKER_01": [
+          0.0,
+          1.0
+        ]
+      },
+      "incoming_embeddings": {
+        "SPEAKER_00": [
+          0.2,
+          0.8
+        ],
+        "SPEAKER_01": [
+          0.8,
+          0.2
+        ]
+      },
+      "expected_mapping": {
+        "SPEAKER_00": "SPEAKER_01",
+        "SPEAKER_01": "SPEAKER_00"
+      },
+      "forbidden_globals": [
+        "SPEAKER_02",
+        "SPEAKER_03",
+        "SPEAKER_04"
+      ]
+    },
+    {
+      "id": "collapse_under_20s_into_dominant",
+      "kind": "collapse",
+      "turns": [
+        [
+          0,
+          100000,
+          "SPEAKER_00"
+        ],
+        [
+          100000,
+          105000,
+          "SPEAKER_02"
+        ],
+        [
+          105000,
+          400000,
+          "SPEAKER_06"
+        ]
+      ],
+      "prototypes": {
+        "SPEAKER_00": [
+          1.0,
+          0.0
+        ],
+        "SPEAKER_02": [
+          0.95,
+          0.05
+        ],
+        "SPEAKER_06": [
+          0.0,
+          1.0
+        ]
+      },
+      "min_ms": 20000,
+      "expected_speakers": [
+        "SPEAKER_00",
+        "SPEAKER_06"
+      ],
+      "expected_remap": {
+        "SPEAKER_02": "SPEAKER_00"
+      }
+    },
+    {
+      "id": "first_chunk_even_id_oversplit_no_ghost_keep",
+      "kind": "collapse",
+      "note": "First chunk often invents even SPEAKER_02/04 ghosts beside two real talkers; collapse must drop them when total speech <~20s.",
+      "turns": [
+        [
+          0,
+          180000,
+          "SPEAKER_00"
+        ],
+        [
+          180000,
+          360000,
+          "SPEAKER_01"
+        ],
+        [
+          50000,
+          55000,
+          "SPEAKER_02"
+        ],
+        [
+          200000,
+          208000,
+          "SPEAKER_04"
+        ]
+      ],
+      "prototypes": {
+        "SPEAKER_00": [
+          1.0,
+          0.0
+        ],
+        "SPEAKER_01": [
+          0.0,
+          1.0
+        ],
+        "SPEAKER_02": [
+          0.9,
+          0.1
+        ],
+        "SPEAKER_04": [
+          0.1,
+          0.9
+        ]
+      },
+      "min_ms": 20000,
+      "expected_speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01"
+      ],
+      "forbidden_speakers": [
+        "SPEAKER_02",
+        "SPEAKER_04"
+      ]
+    },
+    {
+      "id": "multi_chunk_soft_closed_world_no_invent",
+      "kind": "stitch_then_collapse",
+      "first": [
+        [
+          0,
+          400000,
+          "SPEAKER_00"
+        ],
+        [
+          400000,
+          700000,
+          "SPEAKER_01"
+        ],
+        [
+          100000,
+          108000,
+          "SPEAKER_02"
+        ]
+      ],
+      "second": [
+        [
+          650000,
+          750000,
+          "SPEAKER_00"
+        ],
+        [
+          750000,
+          950000,
+          "SPEAKER_01"
+        ]
+      ],
+      "overlap_start_ms": 600000,
+      "overlap_end_ms": 700000,
+      "exact": null,
+      "existing_embeddings": {
+        "SPEAKER_00": [
+          1.0,
+          0.0
+        ],
+        "SPEAKER_01": [
+          0.0,
+          1.0
+        ],
+        "SPEAKER_02": [
+          0.7,
+          0.3
+        ]
+      },
+      "incoming_embeddings": {
+        "SPEAKER_00": [
+          0.05,
+          0.95
+        ],
+        "SPEAKER_01": [
+          0.95,
+          0.05
+        ]
+      },
+      "min_ms": 20000,
+      "expected_speakers": [
+        "SPEAKER_00",
+        "SPEAKER_01"
+      ],
+      "forbidden_new_speakers": [
+        "SPEAKER_03",
+        "SPEAKER_04",
+        "SPEAKER_05"
+      ],
+      "note": "First chunk may already contain even-id oversplit ghosts; soft closed-world remaps onto existing globals (possibly including that ghost) rather than inventing SPEAKER_03+. Collapse then drops <~20s ghosts."
+    }
+  ]
+}
