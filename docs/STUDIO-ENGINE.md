@@ -6,10 +6,10 @@ The caller must serialize runs per job and serialize ML jobs globally on a 16 GB
 Config (credentials must never be in this file):
 
 ```json
-{"source":{"kind":"local","value":"/absolute/English.wav"},"provider":"deepseek","tts":"clone","speaker_count":2}
+{"source":{"kind":"local","value":"/absolute/English.wav"},"provider":"deepseek","tts":"edge","speaker_count":2}
 ```
 
-Use `source.kind=youtube` and the exact video URL. Optional `tts` is `clone` (default), `edge`, or `qwen3-api`; `style` is `conversation` or `documentary`. Optional `clone_model`, `asr_model` override defaults. Official defaults resolve pinned, already downloaded HF snapshots, with no model network downloads during jobs. `.speech-venv/bin/python` runs MLX; legacy `.venv` runs the orchestrator, `.diarization-venv` remains managed by the existing runtime. Translation credentials resolve environment then the existing macOS keychain service/account; never pass keys via arguments.
+Use `source.kind=youtube` and the exact video URL. Optional `tts` is `edge` (default), `clone`, or `qwen3-api`; `style` is `conversation` or `documentary`. Optional `clone_model`, `asr_model` override defaults. Official defaults resolve pinned, already downloaded HF snapshots, with no model network downloads during jobs. `.speech-venv/bin/python` runs MLX; legacy `.venv` runs the orchestrator, `.diarization-venv` remains managed by the existing runtime. Translation credentials resolve environment then the existing macOS keychain service/account; never pass keys via arguments.
 
 `prepare` writes `document.json` without synthesizing. `run` prepares if needed then synthesizes; `render` reuses a prepared document. Render never retranslates edited Chinese text. To change source/translation provider, create a new job or explicitly run prepare. A job's source is immutable by caller contract. `--preview N` renders the first N segments to `preview.mp3`; the default full export is `output.mp3`.
 

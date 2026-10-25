@@ -21,6 +21,7 @@ from podcast_cn import (fetch_video_info, download_english_subtitles, create_tra
                         translate_with_resume, get_provider_config, SherpaDiarizationBackend, _is_exact_youtube_url)
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
 from diarization_core import SpeakerBounds, align_caption_pieces, validate_diarization
+from diarization_cache import VOICE_ORDER
 from temporary_audio import download_audio_only, sha256_file
 from tts_backends import build_backend, SynthesisRequest
 
@@ -286,7 +287,7 @@ class StudioEngine:
             references[speaker] = {**ref, 'path': str(output.relative_to(self.job)), 'sha256': sha256_file(output)}
         document = {'schema_version': 1, 'transcript_source': transcript_source,
                     'segments': [{**asdict(s), 'chinese': translated[s.id], 'speaker_id': s.speaker_id} for s in segments],
-                    'speakers': {speaker: {'voice_slot': ['male_1', 'male_2', 'male_3', 'female_1', 'female_2'][index % 5]} for index, speaker in enumerate(dict.fromkeys(s.speaker_id for s in segments))}, 'references': references}
+                    'speakers': {speaker: {'voice_slot': VOICE_ORDER[index % len(VOICE_ORDER)]} for index, speaker in enumerate(dict.fromkeys(s.speaker_id for s in segments))}, 'references': references}
         atomic_json(self.job / 'document.json', document)
         return document
 
@@ -314,7 +315,10 @@ class StudioEngine:
         selected = segments if preview is None else segments[:int(preview)]
         if not selected:
             raise StudioInputError('试听段数必须大于零')
-        backend_name = config.get('tts', 'clone')
+        backend_name = config.get('tts', 'edge')
+        pending = [segment['id'] for segment in selected if segment.get('ambiguous')]
+        if pending:
+            raise StudioInputError(f'有 {len(pending)} 段说话人待核对，请先在译稿中改正每段的说话人后再试听或生成')
         model = config.get('clone_model', CLONE_MODEL)
         backend = None
         if backend_name != 'clone':

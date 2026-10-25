@@ -33,7 +33,7 @@ class Studio:
     def revision(self,p,preview=False):
         doc=read(p/'document.json',{}); config=read(p/'config.json',{})
         selected=doc.get('segments',[])[:3] if preview else doc.get('segments',[])
-        ids={s.get('speaker_id') for s in selected}; backend=config.get('tts','clone')
+        ids={s.get('speaker_id') for s in selected}; backend=config.get('tts','edge')
         voices={sid:doc.get('speakers',{}).get(sid) for sid in ids}
         refs={}
         if backend=='clone':
@@ -64,7 +64,7 @@ class Studio:
         if not isinstance(sources,list) or not 1<=len(sources)<=50: raise ValueError('每次可添加 1 至 50 个来源')
         if options.get('action','prepare') not in ('prepare','run'): raise ValueError('操作无效')
         if len({s.get('value') for s in sources})!=len(sources): raise ValueError('请移除重复来源')
-        if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','clone') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
+        if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','edge') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
         for source in sources:
             if source['kind']=='youtube':
                 u=urlparse(source['value'])
@@ -81,7 +81,7 @@ class Studio:
                     dest=p/('source'+Path(source['value']).suffix); shutil.move(str(self.root/'.uploads'/source['value']),dest)
                     src={'kind':'local','value':str(dest)}
                 else: src=source
-                config={'source':src,'provider':options.get('provider','deepseek'),'tts':options.get('tts','clone'),'style':options.get('style','conversation')}
+                config={'source':src,'provider':options.get('provider','deepseek'),'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':source.get('title',source['value']),'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()}); ids.append(ident)
         return ids
@@ -200,7 +200,7 @@ class Handler(BaseHTTPRequestHandler):
                     if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
                     for original,new in zip(doc['segments'],updates):
                         if original['id']!=new['id'] or new.get('speaker_id') not in doc['speakers'] or not isinstance(new.get('chinese'),str) or len(new['chinese'])>20000: raise ValueError('译稿数据无效')
-                        original.update(chinese=new['chinese'],speaker_id=new['speaker_id'])
+                        original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False)
                     for ident,slot in data.get('voices',{}).items():
                         if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')
                         doc['speakers'][ident]['voice_slot']=slot
