@@ -22,6 +22,7 @@ from podcast_cn import (fetch_video_info, download_english_subtitles, create_tra
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
 from diarization_core import SpeakerBounds, align_caption_pieces, validate_diarization
 from diarization_cache import VOICE_ORDER
+from studio_preview import select_preview_segments
 from temporary_audio import download_audio_only, sha256_file
 from tts_backends import build_backend, SynthesisRequest
 
@@ -30,37 +31,6 @@ CLONE_MODEL = 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit'
 ASR_MODEL = 'mlx-community/whisper-small.en-mlx'
 
 
-
-def select_preview_segments(segments, limit=3):
-    """Pick the longest Chinese line per speaker, then pad to limit."""
-    if limit <= 0:
-        return []
-    best_by_speaker = {}
-    for segment in segments:
-        speaker = segment.get('speaker_id')
-        if not speaker:
-            continue
-        score = len((segment.get('chinese') or '').strip())
-        current = best_by_speaker.get(speaker)
-        if current is None or score > len((current.get('chinese') or '').strip()):
-            best_by_speaker[speaker] = segment
-    ordered = []
-    seen = set()
-    for segment in segments:
-        speaker = segment.get('speaker_id')
-        if speaker in best_by_speaker and speaker not in seen:
-            ordered.append(best_by_speaker[speaker])
-            seen.add(speaker)
-            if len(ordered) >= limit:
-                return ordered
-    ids = {segment['id'] for segment in ordered}
-    for segment in segments:
-        if segment['id'] in ids:
-            continue
-        ordered.append(segment)
-        if len(ordered) >= limit:
-            break
-    return ordered
 
 
 class StudioInputError(ValueError):
@@ -245,6 +215,7 @@ class StudioEngine:
 
     def transcribe(self, wav, config):
         if config['source']['kind'] == 'youtube':
+            reason = None
             try:
                 info = fetch_video_info(config['source']['value'], runner=self.runner)
                 vtt = download_english_subtitles(config['source']['value'], self.temp, info, runner=self.runner)
@@ -253,10 +224,20 @@ class StudioEngine:
                 self.reference_pieces = raw_reference_pieces(vtt_text)
                 if pieces:
                     return pieces, 'subtitles'
+                reason = '英文字幕文件为空或无法解析'
             except Cancelled:
                 raise
-            except Exception:
-                self.progress('asr', message='英文字幕不可用，改用本地识别')
+            except Exception as error:
+                reason = f'{type(error).__name__}: {str(error)[:180]}'
+            try:
+                atomic_json(self.job / 'debug-subtitle-fallback.json', {
+                    'reason': reason or 'unknown',
+                    'source': config['source'].get('value'),
+                    'updated_at': time.time(),
+                })
+            except OSError:
+                pass
+            self.progress('asr', message=f'英文字幕不可用（{(reason or "")[:80]}），改用本地识别')
         with wave.open(str(wav)) as audio:
             seconds = audio.getnframes() / audio.getframerate()
         pieces = []
