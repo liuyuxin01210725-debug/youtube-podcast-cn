@@ -23,6 +23,10 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request('/api/jobs',{}, {'X-CSRF-Token':'bad'})[0],400)
         self.assertEqual(self.request('/api/jobs/../../etc/files/passwd')[0],404)
         self.assertEqual(self.request('/api/session')[0],200)
+    def test_new_jobs_default_to_system_voice(self):
+        ident = self.create()
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
+
     def test_source_restrictions_and_atomic_validation(self):
         for value in ('file:///etc/passwd','https://evil.example/a','https://youtube.com.evil/a'):
             with self.assertRaises(ValueError): self.studio.create([{'kind':'youtube','value':value}],{})
@@ -63,6 +67,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(all(self.studio.info(p)['asset_stale'].values()))
     def test_backend_switch_preserves_source_document_and_invalidates_audio(self):
         ident=self.create();p=self.studio.job(ident);self.studio.action(ident,'cancel')
+        config=read(p/'config.json');config['tts']='clone';write(p/'config.json',config)
         doc={'segments':[{'id':'a','chinese':'你好','speaker_id':'s'}],'speakers':{'s':{'voice_slot':'male_1'}},'references':{}}
         write(p/'document.json',doc);(p/'output.mp3').write_bytes(b'audio');self.studio.migrate_assets(p)
         source=read(p/'config.json')['source'];before=(p/'document.json').read_bytes()

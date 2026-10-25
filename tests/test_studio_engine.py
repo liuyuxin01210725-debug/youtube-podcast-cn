@@ -75,18 +75,19 @@ class StudioTests(unittest.TestCase):
             audio(ref)
             doc = {'segments':[{'id':'s1','chinese':'你好','speaker_id':'a'}, {'id':'s2','chinese':'再见','speaker_id':'a'}], 'speakers':{'a':{'voice_slot':'male_1'}}, 'references':{'a':{'path':'ref.wav','text':'Hello'}}}
             with patch.object(engine, 'worker', side_effect=lambda payload: audio(payload['output'])) as worker:
-                output = engine.render({}, doc)
+                clone = {'tts': 'clone'}
+                output = engine.render(clone, doc)
                 self.assertTrue(output.is_file())
                 self.assertEqual(worker.call_count, 2)
-                engine.render({}, doc)
+                engine.render(clone, doc)
                 self.assertEqual(worker.call_count, 2)
                 doc['segments'][1]['chinese'] = '明天见'
-                engine.render({}, doc)
+                engine.render(clone, doc)
                 self.assertEqual(worker.call_count, 3)
                 doc['segments'][1]['chinese'] = ''
                 prior = output.read_bytes()
                 with self.assertRaises(ValueError):
-                    engine.render({}, doc)
+                    engine.render(clone, doc)
                 self.assertEqual(prior, output.read_bytes())
 
     def test_safe_error_classification(self):
@@ -149,6 +150,19 @@ class StudioTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(ValueError):
                 StudioEngine(root).owned('../escape.wav')
+
+    def test_render_blocks_while_speaker_assignment_is_ambiguous(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            doc = {
+                'segments': [
+                    {'id': 's1', 'chinese': '你好', 'speaker_id': 'a', 'ambiguous': True},
+                ],
+                'speakers': {'a': {'voice_slot': 'male_1'}},
+                'references': {},
+            }
+            with self.assertRaisesRegex(ValueError, '说话人待核对'):
+                engine.render({'tts': 'edge'}, doc)
 
     def test_incomplete_export_keeps_previous(self):
         with tempfile.TemporaryDirectory() as root:
