@@ -8,19 +8,29 @@ ROOT=Path(__file__).resolve().parents[1]
 MAX_UPLOAD=2*1024**3
 
 def select_preview_segments(segments, limit=3):
+    """Pick one solid line per speaker (longest Chinese), then pad to limit."""
     if limit<=0: return []
-    chosen=[]; seen=set()
+    best_by_speaker={}
     for segment in segments:
         speaker=segment.get('speaker_id')
-        if speaker in seen: continue
-        seen.add(speaker); chosen.append(segment)
-        if len(chosen)>=limit: return chosen
-    ids={s['id'] for s in chosen}
+        if not speaker: continue
+        score=len((segment.get('chinese') or '').strip())
+        current=best_by_speaker.get(speaker)
+        if current is None or score>len((current.get('chinese') or '').strip()):
+            best_by_speaker[speaker]=segment
+    # Stable order: first appearance order of speakers in the document.
+    ordered=[]; seen=set()
+    for segment in segments:
+        speaker=segment.get('speaker_id')
+        if speaker in best_by_speaker and speaker not in seen:
+            ordered.append(best_by_speaker[speaker]); seen.add(speaker)
+            if len(ordered)>=limit: return ordered
+    ids={s['id'] for s in ordered}
     for segment in segments:
         if segment['id'] in ids: continue
-        chosen.append(segment)
-        if len(chosen)>=limit: break
-    return chosen
+        ordered.append(segment)
+        if len(ordered)>=limit: break
+    return ordered
 
 
 def read(p, default=None):
