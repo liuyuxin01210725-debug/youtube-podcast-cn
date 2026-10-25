@@ -324,6 +324,54 @@ def _speaker_mapping(
     return mapping
 
 
+
+def _collapse_minor_speakers(
+    turns: list[DiarizationTurn],
+    prototypes: dict[str, list[float]],
+    *,
+    min_ms: int = 20_000,
+) -> list[DiarizationTurn]:
+    """Merge speakers shorter than min_ms into the nearest lasting voice.
+
+    Sherpa clustering on interview chunks often emits tiny ghost IDs alongside
+    the real talkers. Collapsing them after stitch keeps voice slots usable
+    without raising the global cluster threshold (which collapses real guests).
+    """
+    if not turns or min_ms <= 0:
+        return turns
+    duration_by: dict[str, int] = {}
+    for turn in turns:
+        duration_by[turn.speaker_id] = duration_by.get(turn.speaker_id, 0) + (
+            turn.end_ms - turn.start_ms
+        )
+    majors = {sid for sid, total in duration_by.items() if total >= min_ms}
+    minors = [sid for sid in duration_by if sid not in majors]
+    if not minors or not majors:
+        return turns
+    remap: dict[str, str] = {}
+    dominant = max(majors, key=lambda sid: (duration_by[sid], sid))
+    for minor in minors:
+        best = dominant
+        best_score = float("-inf")
+        if minor in prototypes:
+            for major in majors:
+                if major not in prototypes:
+                    continue
+                score = _cosine_similarity(prototypes[minor], prototypes[major])
+                if score > best_score:
+                    best_score = score
+                    best = major
+        remap[minor] = best
+    return [
+        DiarizationTurn(
+            turn.start_ms,
+            turn.end_ms,
+            remap.get(turn.speaker_id, turn.speaker_id),
+        )
+        for turn in turns
+    ]
+
+
 def _next_speaker_id(used_ids: set[str]) -> str:
     index = 0
     while f"SPEAKER_{index:02d}" in used_ids:
@@ -869,4 +917,4 @@ def run_sherpa_backend(
                         for left, right in zip(previous, vector, strict=True)
                     ]
         previous_end_ms = end_ms
-    return stitched
+    return _collapse_minor_speakers(stitched, prototypes)

@@ -194,7 +194,29 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(mapping, {"L0": "G1", "L1": "G0"})
 
+    def test_collapse_minor_speakers_merges_ghosts_by_prototype(self) -> None:
+        turns = [
+            DiarizationTurn(0, 100_000, "SPEAKER_00"),
+            DiarizationTurn(100_000, 105_000, "SPEAKER_02"),
+            DiarizationTurn(105_000, 400_000, "SPEAKER_06"),
+        ]
+        collapsed = runtime_module._collapse_minor_speakers(
+            turns,
+            {
+                "SPEAKER_00": [1.0, 0.0],
+                "SPEAKER_02": [0.95, 0.05],
+                "SPEAKER_06": [0.0, 1.0],
+            },
+            min_ms=20_000,
+        )
+        self.assertEqual(
+            {turn.speaker_id for turn in collapsed},
+            {"SPEAKER_00", "SPEAKER_06"},
+        )
+        self.assertEqual(collapsed[1].speaker_id, "SPEAKER_00")
+
     def test_missing_prototypes_attach_to_dominant_instead_of_inventing(
+
         self,
     ) -> None:
         mapping = runtime_module._speaker_mapping(
