@@ -7,7 +7,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from studio_engine import select_preview_segments, StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError
+from studio_engine import select_preview_segments, StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError, user_facing_message
+from studio_preview import preview_limit
+from podcast_cn import DeepSeekConfigurationError, PodcastPipelineError
+from tts_backends import TTSBackendError
 from podcast_captions import CaptionPiece
 from diarization_core import SpeakerAssignment, DiarizationTurn
 
@@ -186,6 +189,73 @@ class StudioTests(unittest.TestCase):
         chosen = select_preview_segments(segments, 3)
         self.assertEqual([s['id'] for s in chosen], ['a', 'c', 'd'])
         self.assertEqual([s['speaker_id'] for s in chosen], ['s0', 's1', 's2'])
+
+    def test_preview_limit_covers_speakers_up_to_five(self):
+        two = [
+            {'id': 'a', 'speaker_id': 's0', 'chinese': '短'},
+            {'id': 'b', 'speaker_id': 's0', 'chinese': '更长的一句'},
+            {'id': 'c', 'speaker_id': 's1', 'chinese': '另一人'},
+        ]
+        self.assertEqual(preview_limit(two), 2)
+        self.assertEqual(
+            [s['id'] for s in select_preview_segments(two, preview_limit(two))],
+            ['b', 'c'],
+        )
+        six = [
+            {'id': str(i), 'speaker_id': f's{i}', 'chinese': '啊' * (i + 1)}
+            for i in range(6)
+        ]
+        self.assertEqual(preview_limit(six), 5)
+        chosen = select_preview_segments(six, preview_limit(six))
+        self.assertEqual(len(chosen), 5)
+        self.assertEqual(len({s['speaker_id'] for s in chosen}), 5)
+        self.assertNotIn('s5', {s['speaker_id'] for s in chosen})
+
+    def test_known_errors_reach_progress_and_secrets_do_not(self):
+        cases = [
+            DeepSeekConfigurationError('缺少 DEEPSEEK_API_KEY,请先配置 DeepSeek API Key'),
+            TTSBackendError('系统音色服务暂时拒绝连接。请升级 edge-tts'),
+        ]
+        for error in cases:
+            with tempfile.TemporaryDirectory() as root:
+                engine = StudioEngine(root)
+                source = Path(root) / 'source.wav'
+                source.write_bytes(b'x')
+                with patch.object(engine, 'acquire', side_effect=error):
+                    with self.assertRaises(type(error)):
+                        engine.run({'source': {'kind': 'local', 'value': str(source)}}, 'prepare')
+                progress = json.loads((engine.job / 'progress.json').read_text())
+                self.assertEqual(progress['message'], str(error))
+        leaked = PodcastPipelineError('失败 https://evil.example/file?token=secret')
+        self.assertIsNone(user_facing_message(leaked))
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            source = Path(root) / 'source.wav'
+            source.write_bytes(b'x')
+            with patch.object(engine, 'acquire', side_effect=leaked):
+                with self.assertRaises(PodcastPipelineError):
+                    engine.run({'source': {'kind': 'local', 'value': str(source)}}, 'prepare')
+            progress = json.loads((engine.job / 'progress.json').read_text())
+            self.assertNotIn('secret', progress['message'])
+            self.assertNotIn('https://', progress['message'])
+
+    def test_private_video_has_a_fixed_message(self):
+        error = classify_failure('ERROR: Private video. Sign in if you have been granted access to this video')
+        self.assertEqual(error.code, 'source_access_denied')
+        self.assertIn('私享', str(error))
+        self.assertNotIn('granted', str(error))
+
+    def test_valid_audio_does_not_hide_missing_ffmpeg(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            target = engine.job / 'clip.wav'
+            target.write_bytes(b'x' * 64)
+            with patch.object(engine, 'command', side_effect=StudioError('dependency_missing', '找不到运行程序')):
+                with self.assertRaises(StudioError) as caught:
+                    engine.valid_audio(target)
+            self.assertEqual(caught.exception.code, 'dependency_missing')
+            with patch.object(engine, 'command', side_effect=StudioError('process_failed', '处理程序执行失败')):
+                self.assertFalse(engine.valid_audio(target))
 
 
 if __name__ == '__main__': unittest.main()

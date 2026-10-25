@@ -78,6 +78,25 @@ class EdgeBackendTests(unittest.TestCase):
             )
             self.assertEqual(usage.output_tokens, 0)
 
+    def test_edge_403_is_a_safe_backend_error(self) -> None:
+        class Denied:
+            def __init__(self, text: str, voice: str) -> None:
+                del text, voice
+
+            async def save(self, output: str) -> None:
+                del output
+                raise RuntimeError("403, message=Invalid response status, secret-token")
+
+        request = tts_backends.SynthesisRequest(
+            text="你好。", voice_slot="female_1", style="conversation"
+        )
+        backend = tts_backends.EdgeTTSBackend()
+        with mock.patch.object(tts_backends.edge_tts, "Communicate", Denied):
+            with self.assertRaises(tts_backends.TTSBackendError) as caught:
+                asyncio.run(backend.synthesize(request, Path("unused.mp3")))
+        self.assertIn("edge-tts", str(caught.exception))
+        self.assertNotIn("secret-token", str(caught.exception))
+
 
 class QwenBackendTests(unittest.TestCase):
     def test_requires_api_key(self) -> None:

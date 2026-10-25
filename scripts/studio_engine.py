@@ -18,15 +18,17 @@ import time
 import wave
 
 from podcast_cn import (fetch_video_info, download_english_subtitles, create_translation_client,
-                        translate_with_resume, get_provider_config, _is_exact_youtube_url)
+                        translate_with_resume, get_provider_config, _is_exact_youtube_url,
+                        PodcastPipelineError)
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
-from diarization_core import SpeakerBounds, align_caption_pieces, validate_diarization
+from diarization_core import (SpeakerBounds, align_caption_pieces, fill_unassigned_for_review,
+                              validate_diarization)
 from diarization_cache import VOICE_ORDER
 from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
 from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
 from temporary_audio import download_audio_only, sha256_file
-from tts_backends import build_backend, SynthesisRequest
+from tts_backends import TTSBackendError, build_backend, SynthesisRequest
 
 ROOT = Path(__file__).resolve().parents[1]
 CLONE_MODEL = 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit'
@@ -57,7 +59,29 @@ def classify_failure(stderr, executable=''):
         return StudioError('dependency_missing', '运行依赖缺失，请修复项目 Python/语音环境后重试。')
     if any(value in text for value in ('timed out', 'connection refused', 'network is unreachable', 'temporary failure in name resolution', 'failed to resolve', 'unable to download')):
         return StudioError('network_unavailable', '网络连接失败，请检查连接后重试；YouTube 来源也可改用本地文件。')
+    if any(value in text for value in ('private video', 'video unavailable', 'this video is unavailable', 'video is private', 'age-restricted', 'confirm your age')):
+        return StudioError('source_access_denied', '这个视频不可用、私享或有年龄限制。请改用已下载的本地文件。')
     return StudioError('process_failed', '处理程序执行失败，请检查当前阶段的依赖、音源与模型配置后重试。')
+
+
+_LEAKED_DETAIL = re.compile(r"https?://|bearer\s+\S+|token=", re.IGNORECASE)
+
+
+def user_facing_message(error):
+    """Return a message safe for progress.json, or None to keep the generic one.
+
+    Arbitrary SDK text can contain keys and signed URLs. Known pipeline and
+    TTS errors are fixed Chinese (or an env-var name, not the secret).
+    """
+    if isinstance(error, (StudioError, StudioInputError, PodcastPipelineError, TTSBackendError)):
+        text = str(error)
+    elif type(error).__name__.startswith('Diarization'):
+        text = str(error)
+    else:
+        return None
+    if not text or _LEAKED_DETAIL.search(text):
+        return None
+    return text[:500]
 
 
 def raw_reference_pieces(vtt):
@@ -335,8 +359,9 @@ class StudioEngine:
         turns = self.diarize_with_progress(wav, bounds)
         assignments = align_caption_pieces(pieces, turns)
         validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=bounds, assignments=assignments)
-        if any(a.speaker_id is None for a in assignments):
-            raise StudioInputError('部分对白无法匹配说话人，请检查音源')
+        # One distant cue (outro, music) used to abort after diarization.
+        # Keep the 20% unassigned gate above; attach the rest for review.
+        assignments = fill_unassigned_for_review(pieces, turns, assignments)
         segments = group_caption_pieces(pieces, {a.source_index: a.speaker_id for a in assignments}, {a.source_index for a in assignments if a.ambiguous}, max_chars=180)
         self.progress('translation', 0, len(segments))
         provider = config.get('provider', 'deepseek')
@@ -385,6 +410,12 @@ class StudioEngine:
             return True
         except Cancelled:
             raise
+        except StudioError as error:
+            # A missing ffmpeg is not a bad clip. Decode failures stay False so
+            # a corrupt cache entry is regenerated instead of aborting the job.
+            if getattr(error, 'code', None) == 'dependency_missing':
+                raise
+            return False
         except RuntimeError:
             return False
 
@@ -483,11 +514,9 @@ class StudioEngine:
                 })
             except OSError:
                 pass
-            # Diarization* carry safe Chinese reasons; surface them like StudioInputError.
-            if type(error).__name__.startswith('Diarization') and not isinstance(error, (StudioError, StudioInputError)):
-                error = StudioInputError(str(error))
+            visible = user_facing_message(error)
             # Never serialize arbitrary exception strings: SDKs may embed credentials.
-            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, StudioError) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=str(error) if isinstance(error, (StudioError, StudioInputError)) else '处理失败，请检查当前阶段、依赖和模型配置后重试')
+            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, StudioError) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试')
             raise
         finally:
             shutil.rmtree(self.temp, ignore_errors=False)

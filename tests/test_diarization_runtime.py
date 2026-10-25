@@ -119,6 +119,7 @@ class RuntimeTests(unittest.TestCase):
         fingerprint = backend_fingerprint(load_model_manifest(MANIFEST))
         serialized = json.dumps(fingerprint).casefold()
         self.assertEqual(fingerprint["cluster_threshold"], 0.5)
+        self.assertEqual(fingerprint["stitching_version"], 3)
         self.assertNotIn("https://", serialized)
         self.assertNotIn("license_url", serialized)
 
@@ -370,14 +371,127 @@ class RuntimeTests(unittest.TestCase):
             [DiarizationTurn(800, 1000, "SPEAKER_00")],
         )
 
-    def test_rejects_more_local_speakers_than_configured_before_stitching(self) -> None:
-        turns = [
+    def test_fits_extra_chunk_speakers_before_the_hard_reject(self) -> None:
+        """Seven raw IDs must be folded to the existing cap, then accepted.
+
+        The old test required ``_validate_chunk_turns`` to reject this list
+        before stitching. That is the DOAC failure: one sherpa chunk over the
+        cap aborted the episode even when the extra ID was only a few milliseconds.
+        """
+        with self.assertRaises(ValueError):
+            SpeakerBounds(maximum=8)
+
+        raw = [
             DiarizationTurn(index * 10, index * 10 + 5, f"SPEAKER_{index:02d}")
             for index in range(7)
         ]
+        fitted, embeddings = runtime_module._fit_turns_to_speaker_budget(
+            raw, {}, SpeakerBounds()
+        )
+        runtime_module._validate_chunk_turns(fitted, SpeakerBounds())
+        self.assertEqual(len(fitted), 7)
+        self.assertEqual(
+            {turn.speaker_id for turn in fitted},
+            {f"SPEAKER_{index:02d}" for index in range(1, 7)},
+        )
+        self.assertEqual(fitted[0], DiarizationTurn(0, 5, "SPEAKER_06"))
+        self.assertEqual(embeddings, {})
 
-        with self.assertRaisesRegex(runtime_module.DiarizationRuntimeError, "人数"):
-            runtime_module._validate_chunk_turns(turns, SpeakerBounds())
+        exact, _ = runtime_module._fit_turns_to_speaker_budget(
+            raw, {}, SpeakerBounds(exact=2)
+        )
+        runtime_module._validate_chunk_turns(exact, SpeakerBounds(exact=2))
+        self.assertEqual(
+            {turn.speaker_id for turn in exact},
+            {"SPEAKER_05", "SPEAKER_06"},
+        )
+
+    def test_long_extra_speakers_fit_to_cap_and_follow_nearest_embedding(self) -> None:
+        """Duration collapse keeps every ID at or above 20s. The budget fold must not."""
+        specs = [
+            (0, 50_000, "SPEAKER_00", [1.0, 0.0]),
+            (50_000, 100_000, "SPEAKER_01", [0.0, 1.0]),
+            (100_000, 121_000, "SPEAKER_02", [0.2, 0.8]),
+            (121_000, 151_000, "SPEAKER_03", [0.9, 0.1]),
+            (151_000, 191_000, "SPEAKER_04", [-1.0, 0.0]),
+            (191_000, 231_000, "SPEAKER_05", [0.0, -1.0]),
+            (231_000, 261_000, "SPEAKER_06", [0.95, 0.05]),
+        ]
+        raw = [
+            DiarizationTurn(start, end, speaker)
+            for start, end, speaker, _vector in specs
+        ]
+        prototypes = {speaker: vector for _start, _end, speaker, vector in specs}
+        untouched = runtime_module._collapse_minor_speakers(
+            raw, prototypes, min_ms=20_000
+        )
+        self.assertEqual(len({turn.speaker_id for turn in untouched}), 7)
+
+        fitted, embeddings = runtime_module._fit_turns_to_speaker_budget(
+            raw, prototypes, SpeakerBounds()
+        )
+        runtime_module._validate_chunk_turns(fitted, SpeakerBounds())
+        self.assertEqual(len({turn.speaker_id for turn in fitted}), 6)
+        merged = next(turn for turn in fitted if turn.start_ms == 100_000)
+        self.assertEqual(merged.speaker_id, "SPEAKER_01")
+        self.assertNotIn("SPEAKER_02", embeddings)
+        self.assertEqual(embeddings["SPEAKER_01"], [0.1, 0.9])
+        self.assertEqual(embeddings["SPEAKER_00"], [1.0, 0.0])
+        self.assertEqual(set(embeddings), {turn.speaker_id for turn in fitted})
+
+    def test_first_chunk_over_cap_is_fitted_before_stitch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runtime = SimpleNamespace(
+                python=base / "python",
+                model_dir=base,
+                segmentation_model=base / "segmentation.onnx",
+                embedding_model=base / "embedding.onnx",
+                fingerprint={"backend": "fake"},
+            )
+
+            def fake_runner(
+                command: list[str], **kwargs: object
+            ) -> subprocess.CompletedProcess[str]:
+                start = int(command[command.index("--start-ms") + 1])
+                output = Path(command[command.index("--output") + 1])
+                origin = 0 if start == 0 else 700
+                turns = [
+                    {
+                        "start_ms": origin + index * 10,
+                        "end_ms": origin + index * 10 + 5,
+                        "speaker_id": f"SPEAKER_{index:02d}",
+                    }
+                    for index in range(7)
+                ]
+                embeddings = {
+                    f"SPEAKER_{index:02d}": [
+                        1.0 if axis == index else 0.0 for axis in range(7)
+                    ]
+                    for index in range(7)
+                }
+                output.write_text(
+                    json.dumps({"turns": turns, "embeddings": embeddings}),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "PROGRESS 100\n")
+
+            turns = run_sherpa_backend(
+                FIXTURE,
+                SpeakerBounds(),
+                runtime=runtime,
+                runner=fake_runner,
+                chunk_duration_ms=600,
+                chunk_overlap_ms=200,
+            )
+
+        self.assertEqual(len(turns), 14)
+        self.assertLessEqual(len({turn.speaker_id for turn in turns}), 6)
+        self.assertNotIn("SPEAKER_00", {turn.speaker_id for turn in turns})
+        self.assertIn(
+            DiarizationTurn(0, 5, "SPEAKER_06"),
+            turns,
+        )
 
     def test_valid_runtime_and_models_use_no_network_or_subprocess(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
