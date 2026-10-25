@@ -194,6 +194,31 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(mapping, {"L0": "G1", "L1": "G0"})
 
+    def test_missing_prototypes_attach_to_dominant_instead_of_inventing(
+        self,
+    ) -> None:
+        mapping = runtime_module._speaker_mapping(
+            [
+                DiarizationTurn(0, 500, "SPEAKER_00"),
+                DiarizationTurn(500, 600, "SPEAKER_01"),
+            ],
+            [
+                DiarizationTurn(800, 900, "SPEAKER_00"),
+                DiarizationTurn(900, 1000, "SPEAKER_01"),
+            ],
+            overlap_start_ms=600,
+            overlap_end_ms=800,
+            bounds=SpeakerBounds(),
+            existing_embeddings={
+                "SPEAKER_00": [1.0, 0.0],
+                "SPEAKER_01": [0.0, 1.0],
+            },
+            incoming_embeddings={},  # worker failed to publish prototypes
+        )
+        self.assertEqual(set(mapping.values()), {"SPEAKER_00"})
+        self.assertEqual(mapping["SPEAKER_00"], "SPEAKER_00")
+        self.assertEqual(mapping["SPEAKER_01"], "SPEAKER_00")
+
     def test_soft_closed_world_remaps_instead_of_inventing_without_exact_count(
         self,
     ) -> None:

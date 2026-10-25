@@ -286,6 +286,27 @@ def _speaker_mapping(
             mapping[local_id] = best_global
             used_global_ids.add(best_global)
 
+    # When a chunk local has no voice print, inventing a new global ID is how
+    # long interviews grow ghost speakers (SPEAKER_02/04/…). With no exact
+    # count, attach those leftovers to the dominant existing talker instead.
+    unmatched_local = [item for item in local_ids if item not in mapping]
+    if (
+        unmatched_local
+        and bounds.exact is None
+        and len(global_ids) >= 2
+    ):
+        duration_by: dict[str, int] = {}
+        for turn in existing:
+            duration_by[turn.speaker_id] = duration_by.get(turn.speaker_id, 0) + (
+                turn.end_ms - turn.start_ms
+            )
+        dominant = max(global_ids, key=lambda sid: (duration_by.get(sid, 0), sid))
+        for local_id in unmatched_local:
+            if local_id in incoming_vectors:
+                continue
+            mapping[local_id] = dominant
+            used_global_ids.add(dominant)
+
     maximum = bounds.exact if bounds.exact is not None else bounds.maximum
     all_used_ids = set(global_ids)
     for local_id in local_ids:
