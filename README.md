@@ -17,6 +17,19 @@
 
 开发启动：`.venv/bin/python scripts/studio_server.py`。可用 `--jobs /absolute/path` 指定任务根目录，`--port 8765` 指定端口。引擎接口见 [docs/STUDIO-ENGINE.md](docs/STUDIO-ENGINE.md)。工作台不提供任意本地文件读取接口。
 
+## 私人听（只给自己的 iPhone）
+
+完整 MP3 生成成功后，工作台会把这一期复制到 iCloud Drive 的「中文播客私人库」。试听不会发布。复制失败只打日志，任务仍然算成功。路径、清单格式和补发命令见 [docs/private-listen.md](docs/private-listen.md)。
+
+在 Mac 上打开 [ios/PrivateListen/PrivateListen.xcodeproj](ios/PrivateListen/PrivateListen.xcodeproj)：
+
+1. 选中 PrivateListen 目标，打开 Signing & Capabilities，Team 选你的个人开发团队。Bundle id 已是 `com.liuyuxin.privatelisten`。
+2. 确认有 iCloud → iCloud Documents，容器为 `iCloud.com.liuyuxin.privatelisten`。
+3. 运行目标选这台 iPhone「不取经的小刘」，然后 Run。模拟器只用来确认工程能编译；收听用这台手机。
+4. 第一次打开点「选择资料库」，在 iCloud Drive 里选中「中文播客私人库」。之后下拉或重新打开即可看到新节目。没有登录，也不访问互联网。
+
+已有成品（例如 Creatine，任务 `6d898d4192de495fafcec86b9c938430`）不用重跑合成，按文档里的命令补发一次即可。
+
 以下为保留的旧版命令行 / Agent Skill 文档，其字幕回退策略不代表工作台引擎；工作台的说话人区分失败会明确停止，避免悄悄改变声音方案。
 
 ---
