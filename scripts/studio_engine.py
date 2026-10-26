@@ -19,7 +19,7 @@ import wave
 
 from podcast_cn import (fetch_video_info, download_english_subtitles, create_translation_client,
                         translate_with_resume, get_provider_config, _is_exact_youtube_url,
-                        PodcastPipelineError)
+                        video_metadata_from_info, PodcastPipelineError)
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
 from diarization_core import (SpeakerBounds, align_caption_pieces, fill_unassigned_for_review,
                               validate_diarization)
@@ -299,6 +299,7 @@ class StudioEngine:
             reason = None
             try:
                 info = fetch_video_info(config['source']['value'], runner=self.runner)
+                self.remember_video_info(info, config.get('provider', 'deepseek'))
                 vtt = download_english_subtitles(config['source']['value'], self.temp, info, runner=self.runner)
                 vtt_text = vtt.read_text()
                 pieces = parse_vtt_pieces(vtt_text)
@@ -525,10 +526,33 @@ class StudioEngine:
         staged.replace(target)
         return target
 
+    def remember_video_info(self, info, provider='deepseek'):
+        """Persist the YouTube title before subtitles or ASR can fail."""
+        try:
+            metadata = video_metadata_from_info(info)
+        except PodcastPipelineError:
+            return
+        try:
+            import studio_publish_icloud
+            studio_publish_icloud.remember_source_title(
+                self.job,
+                source_title=metadata.source_title,
+                video_id=metadata.video_id,
+                channel=metadata.channel,
+                webpage_url=metadata.webpage_url,
+                provider=provider if provider in ('deepseek', 'qwen') else 'deepseek',
+            )
+        except Exception:
+            return
+
     def publish_private_library(self):
         """Copy a finished full episode to iCloud. Never changes the job result."""
         try:
             import studio_publish_icloud
+            try:
+                studio_publish_icloud.ensure_publishable_title(self.job)
+            except Exception:
+                pass
             result = studio_publish_icloud.publish_job(self.job)
         except Exception as error:
             message = f'{type(error).__name__}: {error}'[:500]

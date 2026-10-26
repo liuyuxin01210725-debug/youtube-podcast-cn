@@ -11,9 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from studio_engine import StudioEngine
 from studio_publish_icloud import (
     PublishError,
+    compose_display_title,
+    fetch_youtube_metadata,
+    looks_like_url_title,
     main,
     probe_duration_sec,
     publish_job,
+    remember_source_title,
+    translate_episode_topic,
     youtube_id_from_url,
 )
 from studio_server import Studio, read, write
@@ -77,6 +82,153 @@ class PublishTests(unittest.TestCase):
             episode = json.loads((Path(library) / 'episodes' / job.name / 'episode.json').read_text(encoding='utf-8'))
             self.assertEqual(episode['title'], '肌酸：该怎么吃')
             self.assertEqual(episode['youtube_id'], 'dQw4w9WgXcQ')
+            self.assertFalse(looks_like_url_title(episode['title']))
+
+    def test_url_only_candidates_never_publish_as_title(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root, '6d898d4192de495fafcec86b9c938430', title=url, youtube=url)
+            write(job / 'metadata.json', {
+                'source_title': url,
+                'title': 'https://youtu.be/Jk7RAkFN4vk',
+                'channel': 'The Diary Of A CEO',
+                'video_id': 'Jk7RAkFN4vk',
+                'webpage_url': url,
+            })
+            publish_job(job, library)
+            episode = json.loads((Path(library) / 'episodes' / job.name / 'episode.json').read_text(encoding='utf-8'))
+            listing = json.loads((Path(library) / 'library.json').read_text(encoding='utf-8'))
+            for title in (episode['title'], listing['episodes'][0]['title']):
+                self.assertFalse(looks_like_url_title(title))
+                self.assertNotIn('http', title.casefold())
+                self.assertNotIn('youtube.com', title.casefold())
+                self.assertNotIn('youtu.be', title.casefold())
+                self.assertEqual(title, 'The Diary Of A CEO · Jk7RAkFN4vk')
+
+    def test_english_source_title_becomes_chinese_display_title(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        english = 'Creatine Expert: Creatine Is The Secret To Weight Loss'
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root, '6d898d4192de495fafcec86b9c938430', title=url, youtube=url)
+            seen = []
+
+            def translator(topic):
+                seen.append(topic)
+                return '肌酸专家：肌酸是减肥的秘密'
+
+            remember_source_title(
+                job,
+                source_title=english,
+                video_id='Jk7RAkFN4vk',
+                channel='The Diary Of A CEO',
+                webpage_url=url,
+                translator=translator,
+            )
+            publish_job(job, library)
+            episode = json.loads((Path(library) / 'episodes' / job.name / 'episode.json').read_text(encoding='utf-8'))
+            metadata = json.loads((job / 'metadata.json').read_text(encoding='utf-8'))
+            self.assertEqual(seen, [english])
+            self.assertNotIn('Diary', seen[0])
+            self.assertEqual(metadata['source_title'], english)
+            self.assertEqual(metadata['title_zh'], '肌酸专家：肌酸是减肥的秘密')
+            self.assertEqual(metadata['title_status'], 'translated')
+            self.assertEqual(episode['title'], '肌酸专家：肌酸是减肥的秘密 · The Diary Of A CEO')
+            self.assertIn('The Diary Of A CEO', episode['title'])
+            self.assertFalse(looks_like_url_title(episode['title']))
+            self.assertTrue(any('\u4e00' <= char <= '\u9fff' for char in episode['title']))
+
+    def test_missing_translator_falls_back_without_publishing_a_url(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        english = 'Creatine Expert: Creatine Is The Secret To Weight Loss | The Diary Of A CEO'
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root, title=url, youtube=url)
+            remember_source_title(
+                job,
+                source_title=english,
+                channel='The Diary Of A CEO',
+                video_id='Jk7RAkFN4vk',
+                translator=lambda topic: None,
+            )
+            publish_job(job, library)
+            episode = json.loads((Path(library) / 'episodes' / job.name / 'episode.json').read_text(encoding='utf-8'))
+            metadata = json.loads((job / 'metadata.json').read_text(encoding='utf-8'))
+            self.assertEqual(metadata['title_status'], 'untranslated')
+            self.assertNotIn('display_title', metadata)
+            self.assertEqual(episode['title'], 'Creatine Expert: Creatine Is The Secret To Weight Loss · The Diary Of A CEO')
+            self.assertFalse(looks_like_url_title(episode['title']))
+            self.assertNotIn('http', episode['title'].casefold())
+
+    def test_refresh_title_rewrites_title_without_changing_audio(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        english = 'Creatine Expert: Creatine Is The Secret To Weight Loss'
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root, '6d898d4192de495fafcec86b9c938430', title=url, youtube=url)
+            before = (job / 'output.mp3').read_bytes()
+            fetched = {
+                'source_title': english,
+                'channel': 'The Diary Of A CEO',
+                'video_id': 'Jk7RAkFN4vk',
+                'webpage_url': url,
+            }
+            with patch('studio_publish_icloud.fetch_youtube_metadata', return_value=fetched), patch('studio_publish_icloud.translate_episode_topic', return_value='肌酸专家：肌酸是减肥的秘密'):
+                self.assertEqual(main(['--job-dir', str(job), '--library', library, '--refresh-title']), 0)
+            self.assertEqual((job / 'output.mp3').read_bytes(), before)
+            episode = json.loads((Path(library) / 'episodes' / job.name / 'episode.json').read_text(encoding='utf-8'))
+            self.assertEqual(episode['title'], '肌酸专家：肌酸是减肥的秘密 · The Diary Of A CEO')
+            self.assertEqual((Path(library) / 'episodes' / job.name / 'output.mp3').read_bytes(), before)
+
+    def test_oembed_stores_human_title_and_ignores_a_url_title(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    'title': 'Creatine Expert: Creatine Is The Secret To Weight Loss',
+                    'author_name': 'The Diary Of A CEO',
+                }).encode()
+
+        with patch('studio_publish_icloud.urllib.request.urlopen', return_value=FakeResponse()):
+            meta = fetch_youtube_metadata('https://youtu.be/Jk7RAkFN4vk', allow_ytdlp=False)
+        self.assertEqual(meta['source_title'], 'Creatine Expert: Creatine Is The Secret To Weight Loss')
+        self.assertEqual(meta['channel'], 'The Diary Of A CEO')
+        self.assertEqual(meta['video_id'], 'Jk7RAkFN4vk')
+        self.assertFalse(looks_like_url_title(meta['source_title']))
+
+        class UrlTitle:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self):
+                return json.dumps({'title': 'https://www.youtube.com/watch?v=Jk7RAkFN4vk', 'author_name': 'The Diary Of A CEO'}).encode()
+
+        with patch('studio_publish_icloud.urllib.request.urlopen', return_value=UrlTitle()):
+            rejected = fetch_youtube_metadata('https://www.youtube.com/watch?v=Jk7RAkFN4vk')
+        self.assertNotIn('source_title', rejected)
+        self.assertEqual(rejected['channel'], 'The Diary Of A CEO')
+
+    def test_translate_hook_without_api_key_returns_none(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(translate_episode_topic('Creatine is the secret to weight loss', provider='deepseek'))
+        self.assertEqual(
+            compose_display_title('肌酸专家：肌酸是减肥的秘密', 'Huberman'),
+            '肌酸专家：肌酸是减肥的秘密 · Huberman',
+        )
+
+    def test_bare_http_url_without_video_id_falls_back_to_job_id(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root, 'job-plain-url', title='https://example.com/episode', youtube='https://example.com/episode')
+            write(job / 'config.json', {'source': {'kind': 'youtube', 'value': 'https://example.com/episode'}})
+            publish_job(job, library)
+            episode = json.loads((Path(library) / 'episodes' / job.name / 'episode.json').read_text(encoding='utf-8'))
+            self.assertEqual(episode['title'], 'job-plain-url')
+            self.assertFalse(looks_like_url_title(episode['title']))
 
     def test_rejects_missing_symlink_and_bad_id(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:

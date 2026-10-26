@@ -1,5 +1,6 @@
 import http.client, json, sys, tempfile, threading, time, unittest
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from studio_server import Studio, Handler, ThreadingHTTPServer, write, read
 
@@ -7,9 +8,13 @@ class ServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.studio=Studio(self.tmp.name)
         self.http=ThreadingHTTPServer(('127.0.0.1',0),Handler); self.http.studio=self.studio
+        self.metadata_patch=patch('studio_server.lookup_source_metadata', return_value=None)
+        self.topic_patch=patch('studio_server.lookup_chinese_topic', return_value=None)
+        self.metadata_patch.start(); self.topic_patch.start()
         threading.Thread(target=self.http.serve_forever,daemon=True).start(); self.port=self.http.server_port
     def tearDown(self):
         self.studio.stop=True; self.http.shutdown(); self.http.server_close(); self.tmp.cleanup()
+        self.topic_patch.stop(); self.metadata_patch.stop()
     def request(self,path,data=None,headers=None,method=None):
         c=http.client.HTTPConnection('127.0.0.1',self.port)
         h={'X-CSRF-Token':self.studio.token}; h.update(headers or {})
@@ -50,6 +55,31 @@ class ServerTests(unittest.TestCase):
     def test_new_jobs_default_to_system_voice(self):
         ident = self.create()
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
+
+    def test_youtube_create_stores_chinese_title_not_the_url(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        english = 'Creatine Expert: Creatine Is The Secret To Weight Loss'
+        meta = {'source_title': english, 'channel': 'The Diary Of A CEO', 'video_id': 'Jk7RAkFN4vk', 'webpage_url': url}
+        with patch('studio_server.lookup_source_metadata', return_value=meta), patch('studio_server.lookup_chinese_topic', return_value='肌酸专家：肌酸是减肥的秘密') as topic:
+            ident = self.studio.create([{'kind': 'youtube', 'value': url}], {'action': 'prepare', 'provider': 'deepseek'})[0]
+        job = self.studio.job(ident)
+        state = read(job / 'state.json')
+        metadata = read(job / 'metadata.json')
+        self.assertEqual(metadata['source_title'], english)
+        self.assertEqual(state['title'], '肌酸专家：肌酸是减肥的秘密 · The Diary Of A CEO')
+        self.assertEqual(metadata['display_title'], state['title'])
+        self.assertNotIn('http', state['title'])
+        self.assertNotIn('youtube.com', state['title'])
+        self.assertIn('Creatine', topic.call_args.args[0])
+        self.assertNotIn('Diary Of A CEO', topic.call_args.args[0])
+
+    def test_youtube_create_without_metadata_does_not_store_the_url(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        ident = self.studio.create([{'kind': 'youtube', 'value': url}], {'action': 'prepare'})[0]
+        title = read(self.studio.job(ident) / 'state.json')['title']
+        self.assertEqual(title, 'Jk7RAkFN4vk')
+        self.assertNotIn('http', title.casefold())
+        self.assertNotIn('youtube', title.casefold())
 
     def test_source_restrictions_and_atomic_validation(self):
         for value in ('file:///etc/passwd','https://evil.example/a','https://youtube.com.evil/a'):

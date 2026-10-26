@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Loopback-only workbench. Every engine invocation has its own process."""
 import argparse, fcntl, hashlib, json, mimetypes, os, re, secrets, shutil, signal, subprocess, sys, threading, time, uuid
+from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse, unquote
@@ -12,6 +13,38 @@ from diarization_cache import assign_studio_voices
 
 def as_bool(value):
     return value is True
+
+def lookup_source_metadata(url):
+    """English YouTube title and channel. None when oEmbed is unavailable."""
+    try:
+        import studio_publish_icloud
+        return studio_publish_icloud.fetch_youtube_metadata(url, timeout=5)
+    except Exception:
+        return None
+
+def lookup_chinese_topic(topic, provider):
+    """Chinese episode topic via the studio translation API. None if no key."""
+    try:
+        import studio_publish_icloud
+        return studio_publish_icloud.translate_episode_topic(topic, provider=provider or 'deepseek')
+    except Exception:
+        return None
+
+def _youtube_metadata(sources):
+    urls=[s.get('value') for s in sources if isinstance(s, dict) and s.get('kind')=='youtube' and isinstance(s.get('value'), str)]
+    found={}
+    if not urls:
+        return found
+    def one(url):
+        try:
+            return url, lookup_source_metadata(url)
+        except Exception:
+            return url, None
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        for url, meta in pool.map(one, urls):
+            if isinstance(meta, dict):
+                found[url]=meta
+    return found
 
 def read(p, default=None):
     try: return json.loads(p.read_text())
@@ -86,17 +119,41 @@ class Studio:
                 if not re.fullmatch(r'[a-f0-9]{32}\.[a-z0-9]{1,8}',name): raise ValueError('上传文件无效')
                 if not (self.root/'.uploads'/name).is_file(): raise ValueError('上传文件不存在')
             else: raise ValueError('不支持的来源')
+        fetched=_youtube_metadata(sources)
+        provider=options.get('provider','deepseek')
         with self.lock:
             for source in sources:
                 ident=uuid.uuid4().hex; p=self.root/ident; p.mkdir()
                 if source['kind']=='upload':
                     dest=p/('source'+Path(source['value']).suffix); shutil.move(str(self.root/'.uploads'/source['value']),dest)
                     src={'kind':'local','value':str(dest)}
-                else: src=source
-                config={'source':src,'provider':options.get('provider','deepseek'),'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
+                    label=source.get('title') or dest.name
+                else:
+                    src=source
+                    import studio_publish_icloud
+                    label=studio_publish_icloud.youtube_id_from_url(source['value']) or ident
+                config={'source':src,'provider':provider,'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
                 if source['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
-                write(p/'config.json',config); write(p/'state.json',{'title':source.get('title',source['value']),'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()}); ids.append(ident)
+                write(p/'config.json',config); write(p/'state.json',{'title':label,'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()})
+                if source['kind']=='youtube':
+                    meta=fetched.get(source['value']) or {}
+                    given=source.get('title')
+                    if not isinstance(given, str) or studio_publish_icloud.looks_like_url_title(given):
+                        given=None
+                    try:
+                        studio_publish_icloud.remember_source_title(
+                            p,
+                            source_title=meta.get('source_title') or given,
+                            video_id=meta.get('video_id') or studio_publish_icloud.youtube_id_from_url(source['value']),
+                            channel=meta.get('channel'),
+                            webpage_url=meta.get('webpage_url') or source['value'],
+                            provider=provider,
+                            translator=lambda topic, prov=provider: lookup_chinese_topic(topic, prov),
+                        )
+                    except Exception:
+                        pass
+                ids.append(ident)
         return ids
     def voice(self,ident,backend):
         if backend not in ('clone','edge'): raise ValueError('声音模式无效')
@@ -173,6 +230,10 @@ class Studio:
         # Engine stdout is discarded. Retry here so the workbench window shows the result.
         try:
             import studio_publish_icloud
+            try:
+                studio_publish_icloud.ensure_publishable_title(p)
+            except Exception:
+                pass
             result=studio_publish_icloud.publish_job(p)
         except Exception as error:
             print(f'私人听：iCloud 发布未成功（任务成品仍保留）：{type(error).__name__}: {error}', flush=True)

@@ -417,6 +417,50 @@ class TranslationClientTests(unittest.TestCase):
 
         self.assertNotIn(secret, str(raised.exception))
 
+    def test_translate_title_keeps_brand_names_out_of_the_user_message(self) -> None:
+        requests: list[tuple[urllib.request.Request, float]] = []
+        response_payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {"title": "肌酸专家：肌酸是减肥的秘密"},
+                            ensure_ascii=False,
+                        )
+                    }
+                }
+            ]
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
+
+        def fake_opener(request, timeout):
+            requests.append((request, timeout))
+            return FakeResponse()
+
+        client = podcast_cn.OpenAICompatibleTranslationClient(
+            "deepseek", api_key="title-secret", opener=fake_opener
+        )
+        topic = "Creatine Expert: Creatine Is The Secret To Weight Loss"
+        self.assertEqual(client.translate_title(topic), "肌酸专家：肌酸是减肥的秘密")
+        request, timeout = requests[0]
+        self.assertEqual(timeout, 45)
+        body = json.loads(request.data.decode("utf-8"))
+        system = body["messages"][0]["content"]
+        self.assertIn("Huberman", system)
+        self.assertIn("All-In", system)
+        self.assertIn("The Diary Of A CEO", system)
+        self.assertEqual(body["messages"][1]["content"], topic)
+        self.assertNotIn("title-secret", request.data.decode("utf-8"))
+
 
 class DeepSeekClientTests(unittest.TestCase):
     def test_requires_api_key_without_exposing_configuration(self) -> None:

@@ -34,7 +34,7 @@
 | 字段 | 含义 |
 | --- | --- |
 | `id` | 任务目录名 |
-| `title` | `state.json` 的标题；若标题是链接，则改用 `metadata.json` 的 `source_title` |
+| `title` | 手机上的显示标题，格式是 `中文主题 · 原节目名`。不会是 YouTube 或别的链接 |
 | `created_at` | 成品 `output.mp3` 的修改时间，UTC，ISO-8601 |
 | `duration_sec` | 有 `ffprobe` 就探测，否则为 `null` |
 | `source_job_id` | 同 `id` |
@@ -47,16 +47,59 @@
 
 试听只写 `preview.mp3`，不会进资料库。
 
+## 标题
+
+手机列表和播放器都用 `episode.json` 的 `title`。约定是：
+
+```text
+中文主题 · 原节目名
+```
+
+例如 Creatine 这一期（The Diary Of A CEO）：
+
+```text
+肌酸专家：肌酸是减肥的秘密 · The Diary Of A CEO
+```
+
+中文在前，一眼能看出在讲什么。节目名、主持人、品牌保持原文，不勉强译成中文，例如 Huberman、All-In、The Diary Of A CEO、DOAC。节目名来自 YouTube 频道名，原样接在间隔号后面。
+
+任务目录里的 `metadata.json`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `source_title` | YouTube 上的英文原题，由 oEmbed 或 yt-dlp 写入，不会是链接 |
+| `display_title` | 译好的中文显示标题（含节目名）。没有这一项时，发布不会拿链接充数 |
+| `title_zh` | 只含中文主题，不含节目名 |
+| `channel` | 原节目名 |
+| `video_id` | YouTube 视频编号 |
+| `title_status` | `translated`（接口译出）、`source_zh`（原题已是中文）、`untranslated`（没有可用的翻译接口） |
+
+翻译走工作台已经在用的 DeepSeek / 通义千问接口（`translate_title`）。密钥用任务里的 `provider`，从 `DEEPSEEK_API_KEY` 或 `DASHSCOPE_API_KEY` 读取；在 Mac 上也会查原来的钥匙串项。没有密钥时不会编造中文，显示标题退回「英文主题 · 原节目名」，或者只有频道名和视频编号、任务编号。这比链接好认，但主题仍是英文。配好密钥后用下面的 `--refresh-title` 再译一次即可，不用重新合成。
+
+新建 YouTube 任务时就会拉取原题并尽量译成中文。引擎拿到 yt-dlp 信息后会再写一次，所以字幕失败改走本地识别时，标题也已经留下。
+
 ## 补发已有任务
 
-不用重新合成。任务目录里已经有完整 `output.mp3` 即可。Creatine 这一期的编号是 `6d898d4192de495fafcec86b9c938430`，默认在工作台任务根目录下：
+不用重新合成，也不用重新朗读。任务目录里已经有完整 `output.mp3` 即可。Creatine 这一期的编号是 `6d898d4192de495fafcec86b9c938430`，默认在工作台任务根目录下。
+
+只把现有成品拷进资料库（标题用任务里已经写好的非链接标题）：
 
 ```bash
 python3 scripts/studio_publish_icloud.py \
   --job-dir "$HOME/Desktop/音频/中文播客工作台/jobs/6d898d4192de495fafcec86b9c938430"
 ```
 
-任务若放在别处，把 `--job-dir` 换成那个目录。标题不理想时，先改该目录 `state.json` 里的 `title`，再跑同一条命令。
+要重新拉取英文原题、译成「中文主题 · 原节目名」，并改掉手机上这一期的标题：
+
+```bash
+python3 scripts/studio_publish_icloud.py \
+  --refresh-title \
+  --job-dir "$HOME/Desktop/音频/中文播客工作台/jobs/6d898d4192de495fafcec86b9c938430"
+```
+
+这会更新该任务的 `metadata.json`、`state.json` 标题，以及资料库里的 `episode.json` / `library.json`。音频仍然是原来的 `output.mp3`。
+
+想自己指定手机上的句子时，把 `metadata.json` 的 `display_title` 写成 `中文主题 · 原节目名`，再跑不带 `--refresh-title` 的发布命令。`state.json` 里如果只剩一条链接，发布会忽略它。
 
 成功后可以核对：
 
