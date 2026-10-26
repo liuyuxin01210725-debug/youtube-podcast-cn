@@ -79,6 +79,10 @@ final class PlayerModel: ObservableObject {
 
     func open(_ episode: Episode, resumeAt: Double, force: Bool = false) {
         if !force, currentID == episode.id, errorText == nil, player.currentItem != nil {
+            // Cover may have arrived after the first open — refresh Now Playing artwork.
+            artist = Self.showName(in: episode.title)
+            nowArtwork = ArtworkImage.nowPlayingItem(for: episode)
+            updateNowPlaying()
             return
         }
         currentID = episode.id
@@ -221,7 +225,9 @@ final class PlayerModel: ObservableObject {
         if lastSaved < 0 || abs(seconds - lastSaved) >= 5 {
             checkpoint()
         }
-        updateNowPlaying()
+        // Only nudge elapsed/rate — rewriting full Now Playing (with artwork) every 0.5s
+        // can leave the lock-screen artwork blank on recent iOS.
+        updateNowPlayingProgress()
     }
 
     private func handleEnded() {
@@ -285,6 +291,23 @@ final class PlayerModel: ObservableObject {
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(speed.rate) : 0,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
+        if duration > 0 {
+            info[MPMediaItemPropertyPlaybackDuration] = duration
+        }
+        if let nowArtwork {
+            info[MPMediaItemPropertyArtwork] = nowArtwork
+        }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func updateNowPlayingProgress() {
+        guard currentID != nil else { return }
+        guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo, !info.isEmpty else {
+            updateNowPlaying()
+            return
+        }
+        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = current
+        info[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? Double(speed.rate) : 0
         if duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = duration
         }
