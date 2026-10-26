@@ -525,6 +525,22 @@ class StudioEngine:
         staged.replace(target)
         return target
 
+    def publish_private_library(self):
+        """Copy a finished full episode to iCloud. Never changes the job result."""
+        try:
+            import studio_publish_icloud
+            result = studio_publish_icloud.publish_job(self.job)
+        except Exception as error:
+            message = f'{type(error).__name__}: {error}'[:500]
+            print(f'私人听：发布失败（成品已保留，任务仍成功）：{message}', flush=True)
+            try:
+                import studio_publish_icloud
+                studio_publish_icloud.record_status(self.job, ok=False, error=message)
+            except Exception:
+                pass
+            return
+        print(f"私人听：已发布「{result.get('title', '')}」→ {result.get('episode_dir', '')}", flush=True)
+
     def run(self, config, action='run', preview=None, accept_unreviewed=False):
         self.temp.mkdir(exist_ok=True)
         try:
@@ -546,6 +562,9 @@ class StudioEngine:
             output = None
             if action != 'prepare':
                 output = self.render(config, document, preview, accept_unreviewed=accept_unreviewed)
+            # Preview stays on the Mac. Only a full output.mp3 is offered to the phone.
+            if preview is None and output is not None and Path(output).name == 'output.mp3':
+                self.publish_private_library()
             self.progress('complete', output=str(output) if output else None)
             return output
         except Cancelled:

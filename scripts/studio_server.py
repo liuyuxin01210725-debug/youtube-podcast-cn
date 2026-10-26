@@ -164,6 +164,20 @@ class Studio:
         if state.get('accept_unreviewed'):
             cmd.append('--accept-unreviewed')
         return cmd
+    def private_listen_needs_retry(self, p, state):
+        if state.get('action')=='prepare' or state.get('preview'): return False
+        audio=p/'output.mp3'
+        if not audio.is_file() or audio.is_symlink(): return False
+        return not (read(p/'private-listen.json') or {}).get('ok')
+    def retry_private_listen(self, p):
+        # Engine stdout is discarded. Retry here so the workbench window shows the result.
+        try:
+            import studio_publish_icloud
+            result=studio_publish_icloud.publish_job(p)
+        except Exception as error:
+            print(f'私人听：iCloud 发布未成功（任务成品仍保留）：{type(error).__name__}: {error}', flush=True)
+            return
+        print(f"私人听：iCloud 资料库已更新 {result.get('episode_dir','')}", flush=True)
     def worker(self):
         while not self.stop:
             with self.lock:
@@ -179,12 +193,20 @@ class Studio:
                     except OSError: self.process=None
             if p:
                 code=self.process.wait() if self.process else 1
+                retry_private=False
                 with self.lock:
                     s=read(p/'state.json',{}); s['status']='cancelled' if code==130 else ('complete' if code==0 else 'failed')
                     if code==0 and s.get('action')!='prepare':
                         name='preview.mp3' if s.get('preview') else 'output.mp3'
                         if (p/name).is_file(): s.setdefault('asset_revisions',{})[name]=self.revision(p,s.get('preview',False))
-                    s['updated_at']=time.time(); write(p/'state.json',s); self.active=None; self.process=None
+                    s['updated_at']=time.time(); write(p/'state.json',s)
+                    retry_private=code==0 and self.private_listen_needs_retry(p, s)
+                    if code==0 and not retry_private and not s.get('preview') and s.get('action')!='prepare' and (p/'output.mp3').is_file():
+                        note=read(p/'private-listen.json') or {}
+                        if note.get('ok'): print(f"私人听：iCloud 资料库已更新 {note.get('episode_dir','')}", flush=True)
+                        else: print(f"私人听：iCloud 发布未成功（任务成品仍保留）：{note.get('error') or '引擎未留下发布记录'}", flush=True)
+                    self.active=None; self.process=None
+                if retry_private: self.retry_private_listen(p)
             else: time.sleep(.25)
 
 class Handler(BaseHTTPRequestHandler):
