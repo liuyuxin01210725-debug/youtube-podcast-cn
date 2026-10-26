@@ -10,6 +10,9 @@ struct PrivateListenApp: App {
             LibraryView()
                 .environmentObject(library)
                 .environmentObject(player)
+                .onOpenURL { url in
+                    library.acceptIncoming(url)
+                }
         }
     }
 }

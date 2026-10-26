@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
+from studio_urls import is_public_https
+
 LIBRARY_NAME = '中文播客私人库'
 AUDIO_NAME = 'output.mp3'
 _JOB_ID = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
@@ -313,6 +315,7 @@ def remember_source_title(
     video_id: str | None = None,
     channel: str | None = None,
     webpage_url: str | None = None,
+    thumbnail_url: str | None = None,
     provider: str = 'deepseek',
     translator=None,
     force_translate: bool = False,
@@ -346,6 +349,10 @@ def remember_source_title(
     show = _clean_show(metadata.get('channel'))
     if isinstance(webpage_url, str) and webpage_url.strip():
         metadata['webpage_url'] = webpage_url.strip()[:500]
+    if isinstance(thumbnail_url, str):
+        cleaned_thumb = thumbnail_url.strip()
+        if is_public_https(cleaned_thumb) and len(cleaned_thumb) <= 800:
+            metadata['thumbnail_url'] = cleaned_thumb
     if isinstance(metadata.get('title'), str) and looks_like_url_title(metadata['title']):
         metadata.pop('title', None)
 
@@ -426,6 +433,9 @@ def _oembed_metadata(video_id: str, timeout: float) -> dict | None:
     channel = _clean_show(payload.get('author_name'))
     if channel:
         result['channel'] = channel
+    thumbnail = payload.get('thumbnail_url')
+    if isinstance(thumbnail, str) and is_public_https(thumbnail.strip()) and len(thumbnail.strip()) <= 800:
+        result['thumbnail_url'] = thumbnail.strip()
     return result
 
 
@@ -517,6 +527,7 @@ def ensure_publishable_title(job: Path, *, translator=None, fetch: bool = True, 
         video_id=fetched.get('video_id'),
         channel=fetched.get('channel'),
         webpage_url=fetched.get('webpage_url') or (_job_source_url(job) or None),
+        thumbnail_url=fetched.get('thumbnail_url'),
         provider=_job_provider(job),
         translator=translator,
         force_translate=force_translate,
@@ -599,6 +610,11 @@ def _episode_record(episode_dir: Path) -> dict | None:
     youtube_id = _valid_youtube_id(data.get('youtube_id'))
     if youtube_id:
         record['youtube_id'] = youtube_id
+    artwork = data.get('artwork')
+    kind = data.get('artwork_kind')
+    if isinstance(artwork, str) and artwork in ('cover.jpg', 'cover.png', 'cover.webp') and kind in ('provided', 'thumbnail', 'title', 'placeholder'):
+        record['artwork'] = artwork
+        record['artwork_kind'] = kind
     return record
 
 
@@ -669,6 +685,14 @@ def publish_job(job_dir, library_root=None) -> dict:
         record['youtube_id'] = youtube_id
     episode_dir = library / 'episodes' / job_id
     _copy_audio(src, episode_dir)
+    try:
+        from studio_artwork import attach_cover
+        cover = attach_cover(job, episode_dir, title, thumbnail_url=_metadata_dict(job).get('thumbnail_url') if isinstance(_metadata_dict(job).get('thumbnail_url'), str) else None)
+    except Exception:
+        cover = None
+    if isinstance(cover, dict) and cover.get('file') in ('cover.jpg', 'cover.png', 'cover.webp') and cover.get('kind') in ('provided', 'thumbnail', 'title', 'placeholder'):
+        record['artwork'] = cover['file']
+        record['artwork_kind'] = cover['kind']
     try:
         atomic_write_json(episode_dir / 'episode.json', record)
         rebuild_library(library)

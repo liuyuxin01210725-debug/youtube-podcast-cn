@@ -11,12 +11,15 @@ final class LibraryStore: ObservableObject {
     }
 
     @Published private(set) var episodes: [Episode] = []
+    @Published private(set) var inbox: [InboxEntry] = []
     @Published private(set) var hasFolder = false
     @Published var message: String?
     @Published private var progress: [String: ListenMark] = [:]
 
     private let bookmarkKey = "PrivateListen.libraryBookmark"
     private let progressKey = "PrivateListen.progress"
+    private let pendingKey = "PrivateListen.pendingShares"
+    private var pendingShares: [PendingShare] = []
     private var folderURL: URL?
     private var scopeHeld = false
     private let folderName = "中文播客私人库"
@@ -26,8 +29,44 @@ final class LibraryStore: ObservableObject {
            let stored = try? JSONDecoder().decode([String: ListenMark].self, from: data) {
             progress = stored
         }
+        if let data = UserDefaults.standard.data(forKey: pendingKey),
+           let stored = try? JSONDecoder().decode([PendingShare].self, from: data) {
+            pendingShares = stored
+        }
         restore()
         reload()
+    }
+
+    func acceptShare(url: URL, sourceApp: String?) {
+        guard InboxDrop.accepts(url) else {
+            message = "这条不是公开的 HTTPS 链接。"
+            return
+        }
+        guard let folderURL else {
+            pendingShares.append(PendingShare(url: url.absoluteString, sourceApp: sourceApp, sharedAt: Date()))
+            savePending()
+            message = "先选择「中文播客私人库」，这条链接会放进收件箱。"
+            return
+        }
+        do {
+            try InboxDrop.write(url: url, sourceApp: sourceApp, into: folderURL)
+            message = "已放入收件箱。Mac 上的监听会开始转换。"
+            reload()
+        } catch {
+            message = "没能写入收件箱，请重新选择资料库。"
+        }
+    }
+
+    func acceptIncoming(_ url: URL) {
+        guard url.scheme?.lowercased() == "privatelisten" else { return }
+        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        guard let shared = components?.queryItems?.first(where: { $0.name == "url" })?.value,
+              let target = URL(string: shared) else {
+            message = "分享里没有链接。"
+            return
+        }
+        let source = components?.queryItems?.first(where: { $0.name == "source_app" })?.value
+        acceptShare(url: target, sourceApp: source)
     }
 
     func isUnplayed(_ id: String) -> Bool {
@@ -71,18 +110,46 @@ final class LibraryStore: ObservableObject {
         guard let folderURL else {
             hasFolder = false
             episodes = []
+            inbox = []
             return
         }
         hasFolder = true
         let readable = FileManager.default.isReadableFile(atPath: folderURL.path)
         if !readable && !scopeHeld {
             episodes = []
+            inbox = []
             message = "打不开资料库，请重新选择「中文播客私人库」。"
             return
         }
+        flushPending()
         episodes = loadEpisodes(from: folderURL)
+        inbox = InboxDrop.items(in: folderURL)
         if message == "打不开资料库，请重新选择「中文播客私人库」。" {
             message = nil
+        }
+    }
+
+    private func flushPending() {
+        guard let folderURL, !pendingShares.isEmpty else { return }
+        var left: [PendingShare] = []
+        for item in pendingShares {
+            guard let url = URL(string: item.url) else { continue }
+            do {
+                try InboxDrop.write(url: url, sourceApp: item.sourceApp, into: folderURL)
+            } catch {
+                left.append(item)
+            }
+        }
+        pendingShares = left
+        savePending()
+        if left.isEmpty {
+            message = "已放入收件箱。Mac 上的监听会开始转换。"
+        }
+    }
+
+    private func savePending() {
+        if let data = try? JSONEncoder().encode(pendingShares) {
+            UserDefaults.standard.set(data, forKey: pendingKey)
         }
     }
 
@@ -158,13 +225,22 @@ final class LibraryStore: ObservableObject {
                 try? fileManager.startDownloadingUbiquitousItem(at: audioURL)
             }
             let title = record.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let artworkFile = EpisodeArtwork.file(record.artwork, kind: record.artworkKind)
+            if let artworkFile, record.artworkKind != "placeholder" {
+                let artworkURL = folder.appendingPathComponent(artworkFile)
+                if !LocalAudio.isPlayable(artworkURL) {
+                    try? fileManager.startDownloadingUbiquitousItem(at: artworkURL)
+                }
+            }
             return Episode(
                 id: id,
                 title: (title?.isEmpty == false ? title! : id),
                 createdAt: EpisodeDate.parse(record.createdAt) ?? Date(timeIntervalSince1970: 0),
                 durationSec: record.durationSec,
                 audioURL: audioURL,
-                downloading: !local
+                downloading: !local,
+                artworkFile: artworkFile,
+                artworkKind: record.artworkKind
             )
         }
         .sorted { lhs, rhs in
@@ -203,6 +279,22 @@ private struct EpisodeRecord: Decodable {
     var durationSec: Double?
     var file: String?
     var youtubeId: String?
+    var artwork: String?
+    var artworkKind: String?
+}
+
+private struct PendingShare: Codable {
+    var url: String
+    var sourceApp: String?
+    var sharedAt: Date
+}
+
+private enum EpisodeArtwork {
+    static func file(_ name: String?, kind: String?) -> String? {
+        guard let name, ["cover.jpg", "cover.png", "cover.webp"].contains(name) else { return nil }
+        guard kind == nil || ["provided", "thumbnail", "title", "placeholder"].contains(kind) else { return nil }
+        return name
+    }
 }
 
 private extension JSONDecoder {

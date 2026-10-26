@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from studio_engine import StudioEngine
+from studio_artwork import solid_placeholder_png
 from studio_publish_icloud import (
     PublishError,
     compose_display_title,
@@ -189,6 +190,7 @@ class PublishTests(unittest.TestCase):
                 return json.dumps({
                     'title': 'Creatine Expert: Creatine Is The Secret To Weight Loss',
                     'author_name': 'The Diary Of A CEO',
+                    'thumbnail_url': 'https://i.ytimg.com/vi/Jk7RAkFN4vk/hqdefault.jpg',
                 }).encode()
 
         with patch('studio_publish_icloud.urllib.request.urlopen', return_value=FakeResponse()):
@@ -196,6 +198,7 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(meta['source_title'], 'Creatine Expert: Creatine Is The Secret To Weight Loss')
         self.assertEqual(meta['channel'], 'The Diary Of A CEO')
         self.assertEqual(meta['video_id'], 'Jk7RAkFN4vk')
+        self.assertEqual(meta['thumbnail_url'], 'https://i.ytimg.com/vi/Jk7RAkFN4vk/hqdefault.jpg')
         self.assertFalse(looks_like_url_title(meta['source_title']))
 
         class UrlTitle:
@@ -266,6 +269,44 @@ class PublishTests(unittest.TestCase):
                 self.assertEqual(main(['--job-dir', str(job), '--library', library]), 0)
             self.assertIn(job.name, stdout.getvalue())
             self.assertTrue((Path(library) / 'library.json').is_file())
+
+    def test_publish_copies_provided_cover_and_falls_back_to_a_card(self):
+        png = solid_placeholder_png('肌酸专家 · Huberman')
+        self.assertTrue(png.startswith(b'\x89PNG'))
+        self.assertIn('肌酸专家 · Huberman'.encode(), png)
+        self.assertNotEqual(png, solid_placeholder_png('另一期'))
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            provided = self.make_job(root, 'job-cover', '肌酸对谈')
+            jpeg = b'\xff\xd8\xff' + b'\x00' * 64
+            (provided / 'cover.jpg').write_bytes(jpeg)
+            with patch('studio_artwork.download_image', side_effect=AssertionError('should not download')):
+                publish_job(provided, library)
+            episode_dir = Path(library) / 'episodes' / 'job-cover'
+            self.assertEqual((episode_dir / 'cover.jpg').read_bytes(), jpeg)
+            episode = json.loads((episode_dir / 'episode.json').read_text(encoding='utf-8'))
+            self.assertEqual(episode['artwork'], 'cover.jpg')
+            self.assertEqual(episode['artwork_kind'], 'provided')
+
+            thumb = self.make_job(root, 'job-thumb', '封面来自视频')
+            write(thumb / 'metadata.json', {'thumbnail_url': 'https://i.ytimg.com/vi/MM-C3JqCXBk/hqdefault.jpg', 'display_title': '封面来自视频'})
+            downloaded = b'\xff\xd8\xff' + b'\x11' * 80
+            with patch('studio_artwork.download_image', return_value=downloaded):
+                publish_job(thumb, library)
+            thumb_dir = Path(library) / 'episodes' / 'job-thumb'
+            self.assertEqual((thumb_dir / 'cover.jpg').read_bytes(), downloaded)
+            thumb_episode = json.loads((thumb_dir / 'episode.json').read_text(encoding='utf-8'))
+            self.assertEqual(thumb_episode['artwork_kind'], 'thumbnail')
+
+            plain = self.make_job(root, 'job-plain-cover', '只有标题')
+            with patch('studio_artwork.download_image', return_value=None):
+                publish_job(plain, library)
+            plain_episode = json.loads((Path(library) / 'episodes' / 'job-plain-cover' / 'episode.json').read_text(encoding='utf-8'))
+            self.assertIn(plain_episode['artwork_kind'], ('title', 'placeholder'))
+            cover = Path(library) / 'episodes' / 'job-plain-cover' / plain_episode['artwork']
+            self.assertTrue(cover.read_bytes().startswith(b'\x89PNG'))
+            listing = json.loads((Path(library) / 'library.json').read_text(encoding='utf-8'))
+            listed = {item['id']: item for item in listing['episodes']}
+            self.assertEqual(listed['job-cover']['artwork'], 'cover.jpg')
 
 
 class EngineHookTests(unittest.TestCase):

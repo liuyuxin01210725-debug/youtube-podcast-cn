@@ -86,7 +86,16 @@ class ServerTests(unittest.TestCase):
             with self.assertRaises(ValueError): self.studio.create([{'kind':'youtube','value':value}],{})
         with self.assertRaises(ValueError): self.studio.create([{'kind':'local','value':'/etc/passwd'}],{})
         with self.assertRaises(ValueError): self.studio.create([{'kind':'youtube','value':'https://youtu.be/a'}],{'tts':'bad'})
+        with self.assertRaises(ValueError): self.studio.create([{'kind':'web','value':'http://example.com/a'}],{'action':'run'})
+        with self.assertRaises(ValueError): self.studio.create([{'kind':'web','value':'https://127.0.0.1/secret'}],{'action':'run'})
         self.assertEqual(self.studio.list(),[])
+        ident = self.studio.create([{'kind':'web','value':'https://example.com/p/hello-world?utm_source=share'}], {'action':'run','tts':'edge'})[0]
+        config = read(self.studio.job(ident) / 'config.json')
+        state = read(self.studio.job(ident) / 'state.json')
+        self.assertEqual(config['source'], {'kind':'web','value':'https://example.com/p/hello-world'})
+        self.assertEqual(config['tts'], 'edge')
+        self.assertEqual(state['action'], 'run')
+        self.assertNotIn('http', state['title'])
     def test_queue_cancel_recovery_and_edit(self):
         ident=self.create(); p=self.studio.job(ident)
         self.studio.action(ident,'cancel'); self.assertEqual(self.studio.info(p)['status'],'cancelled')
