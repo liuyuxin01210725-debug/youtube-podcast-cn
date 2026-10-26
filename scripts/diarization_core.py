@@ -175,7 +175,9 @@ def fill_unassigned_for_review(
     align_caption_pieces keeps the 1500 ms gate, so CLI can still reject a
     distant cue. The studio calls this after the 20% unassigned check: one
     outro caption must not discard a finished diarization. The cue stays
-    ambiguous, so synthesis will not mix it in until a person confirms it.
+    ambiguous. A bare render still refuses it. The workbench can batch-confirm
+    the current speakers, or pass accept_unreviewed ("带风险继续") and synthesize
+    the nearest-speaker guess without clearing the flag.
     """
     if len(pieces) != len(assignments):
         raise ValueError("字幕与说话人分配数量不一致")

@@ -18,6 +18,10 @@ from podcast_captions import CaptionPiece, SubtitleSegment
 SCHEMA_VERSION = 1
 ALIGNMENT_VERSION = 1
 VOICE_ORDER = ("female_1", "male_1", "female_2", "male_2", "male_3")
+# Studio listen jobs. Interviews usually open with a male host or guest, so the
+# first-seen speaker must not land on female_1. CLI speaker maps stay on
+# VOICE_ORDER above; do not retarget those historical defaults.
+STUDIO_VOICE_SLOTS = ("male_1", "male_2", "male_3", "female_1", "female_2")
 CHINESE_ORDINALS = ("甲", "乙", "丙", "丁", "戊", "己")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _VOICE_SUFFIX = {
@@ -251,6 +255,20 @@ class DiarizationCache:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
             _safe_unlink(self.assignments_path)
             return None
+
+
+def assign_studio_voices(speaker_ids) -> dict[str, str]:
+    """Map first-seen speakers to male-first system slots.
+
+    A sixth speaker reuses ``male_1``. The distinguishable pool stays at five
+    slots; this does not raise the diarization speaker cap.
+    """
+    assigned: dict[str, str] = {}
+    for speaker_id in speaker_ids:
+        if not isinstance(speaker_id, str) or not speaker_id or speaker_id in assigned:
+            continue
+        assigned[speaker_id] = STUDIO_VOICE_SLOTS[len(assigned) % len(STUDIO_VOICE_SLOTS)]
+    return assigned
 
 
 def default_speaker_record(index: int) -> dict[str, str]:
