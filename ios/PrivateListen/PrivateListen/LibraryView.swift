@@ -14,13 +14,13 @@ struct LibraryView: View {
                     prompt(
                         title: "选择资料库",
                         systemImage: "folder",
-                        detail: "在 iCloud 云盘里选中「中文播客私人库」。Mac 上完整生成的节目会出现在这里。只需选一次。"
+                        detail: "在 iCloud 云盘里选中「中文播客私人库」。只需选一次。分享进来的链接和完整生成的节目都在这个文件夹里。"
                     )
-                } else if library.episodes.isEmpty {
+                } else if library.episodes.isEmpty && library.inbox.isEmpty {
                     prompt(
                         title: "还没有节目",
                         systemImage: "music.note.list",
-                        detail: "等 Mac 上这一期完整生成结束后，下拉刷新。试听不会出现在这里。"
+                        detail: "从 Safari、YouTube 或播客 App 分享链接到「私人听」。Mac 转换完成后，下拉即可看到。试听不会出现在这里。"
                     )
                 } else {
                     list
@@ -61,26 +61,53 @@ struct LibraryView: View {
     }
 
     private var list: some View {
-        List(library.episodes) { episode in
-            NavigationLink(value: episode) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(episode.title)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                        if library.isUnplayed(episode.id) {
-                            Text("未听")
-                                .font(.caption2)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.accentColor.opacity(0.15), in: Capsule())
-                        }
-                    }
-                    Text(subtitle(episode))
-                        .font(.subheadline)
+        List {
+            if let message = library.message, !message.isEmpty {
+                Section {
+                    Text(message)
+                        .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                .padding(.vertical, 4)
+            }
+            if !library.inbox.isEmpty {
+                Section("收件箱") {
+                    ForEach(library.inbox) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.label)
+                                .font(.body)
+                            Text(item.line)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+                }
+            }
+            if !library.episodes.isEmpty {
+                Section {
+                    ForEach(library.episodes) { episode in
+                        NavigationLink(value: episode) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(episode.title)
+                                        .font(.body)
+                                        .foregroundStyle(.primary)
+                                    if library.isUnplayed(episode.id) {
+                                        Text("未听")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.accentColor.opacity(0.15), in: Capsule())
+                                    }
+                                }
+                                Text(subtitle(episode))
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
             }
         }
         .refreshable { library.reload() }

@@ -54,11 +54,13 @@ def write(p,data):
     t=p.with_suffix('.new'); t.write_text(json.dumps(data,ensure_ascii=False,indent=2)); t.replace(p)
 
 class Studio:
-    def __init__(self, root, engine=None):
+    def __init__(self, root, engine=None, recover=True):
         self.root=Path(root).expanduser().resolve(); self.root.mkdir(parents=True,exist_ok=True)
         self.token=secrets.token_urlsafe(32); self.lock=threading.RLock(); self.process=None; self.active=None
         self.engine=engine or [str(ROOT/'.venv/bin/python'),str(ROOT/'scripts/studio_engine.py')]
         self.stop=False; self.lock_fd=None
+        if not recover:
+            return
         for p in self.root.iterdir():
             if p.is_dir() and (p/'state.json').exists():
                 s=read(p/'state.json',{})
@@ -111,33 +113,48 @@ class Studio:
         if len({s.get('value') for s in sources})!=len(sources): raise ValueError('请移除重复来源')
         if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','edge') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
         for source in sources:
-            if source['kind']=='youtube':
-                u=urlparse(source['value'])
+            if not isinstance(source, dict): raise ValueError('不支持的来源')
+            if source.get('kind')=='youtube':
+                u=urlparse(source.get('value') or '')
                 if u.scheme!='https' or u.hostname not in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be'): raise ValueError('请输入有效的 HTTPS YouTube 链接')
-            elif source['kind']=='upload':
-                name=source['value']
-                if not re.fullmatch(r'[a-f0-9]{32}\.[a-z0-9]{1,8}',name): raise ValueError('上传文件无效')
+            elif source.get('kind')=='upload':
+                name=source.get('value')
+                if not isinstance(name, str) or not re.fullmatch(r'[a-f0-9]{32}\.[a-z0-9]{1,8}',name): raise ValueError('上传文件无效')
                 if not (self.root/'.uploads'/name).is_file(): raise ValueError('上传文件不存在')
+            elif source.get('kind')=='web':
+                from studio_urls import is_public_https
+                if not isinstance(source.get('value'), str) or not is_public_https(source['value']): raise ValueError('请输入公开的 HTTPS 链接')
             else: raise ValueError('不支持的来源')
         fetched=_youtube_metadata(sources)
         provider=options.get('provider','deepseek')
         with self.lock:
             for source in sources:
                 ident=uuid.uuid4().hex; p=self.root/ident; p.mkdir()
+                import studio_publish_icloud
                 if source['kind']=='upload':
                     dest=p/('source'+Path(source['value']).suffix); shutil.move(str(self.root/'.uploads'/source['value']),dest)
                     src={'kind':'local','value':str(dest)}
                     label=source.get('title') or dest.name
+                elif source['kind']=='web':
+                    from studio_urls import canonical_url, web_label
+                    canonical=canonical_url(source['value'])
+                    if not canonical: raise ValueError('请输入公开的 HTTPS 链接')
+                    if studio_publish_icloud.youtube_id_from_url(canonical):
+                        src={'kind':'youtube','value':canonical}
+                        label=studio_publish_icloud.youtube_id_from_url(canonical) or ident
+                    else:
+                        src={'kind':'web','value':canonical}
+                        label=web_label(canonical)
+                        if studio_publish_icloud.looks_like_url_title(label): label=ident
                 else:
                     src=source
-                    import studio_publish_icloud
                     label=studio_publish_icloud.youtube_id_from_url(source['value']) or ident
                 config={'source':src,'provider':provider,'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
-                if source['kind']=='youtube': config['diarization_threshold']=0.9
+                if src['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':label,'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()})
-                if source['kind']=='youtube':
-                    meta=fetched.get(source['value']) or {}
+                if src['kind']=='youtube':
+                    meta=fetched.get(source['value']) or fetched.get(src.get('value')) or {}
                     given=source.get('title')
                     if not isinstance(given, str) or studio_publish_icloud.looks_like_url_title(given):
                         given=None
@@ -145,9 +162,10 @@ class Studio:
                         studio_publish_icloud.remember_source_title(
                             p,
                             source_title=meta.get('source_title') or given,
-                            video_id=meta.get('video_id') or studio_publish_icloud.youtube_id_from_url(source['value']),
+                            video_id=meta.get('video_id') or studio_publish_icloud.youtube_id_from_url(src.get('value') or source['value']),
                             channel=meta.get('channel'),
-                            webpage_url=meta.get('webpage_url') or source['value'],
+                            webpage_url=meta.get('webpage_url') or src.get('value') or source['value'],
+                            thumbnail_url=meta.get('thumbnail_url'),
                             provider=provider,
                             translator=lambda topic, prov=provider: lookup_chinese_topic(topic, prov),
                         )

@@ -7,6 +7,13 @@ struct Episode: Identifiable, Hashable {
     var durationSec: Double?
     var audioURL: URL
     var downloading: Bool
+    var artworkFile: String?
+    var artworkKind: String?
+
+    var artworkURL: URL? {
+        guard let artworkFile, ["cover.jpg", "cover.png", "cover.webp"].contains(artworkFile) else { return nil }
+        return audioURL.deletingLastPathComponent().appendingPathComponent(artworkFile)
+    }
 
     static func == (lhs: Episode, rhs: Episode) -> Bool { lhs.id == rhs.id }
 

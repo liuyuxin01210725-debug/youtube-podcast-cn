@@ -276,11 +276,19 @@ class StudioEngine:
 
     def acquire(self, config):
         source = config['source']
-        if source['kind'] == 'youtube':
-            if not _is_exact_youtube_url(source['value']):
+        kind = source['kind']
+        if kind == 'web' and isinstance(source.get('value'), str) and _is_exact_youtube_url(source['value']):
+            kind = 'youtube'
+        if kind == 'youtube':
+            if not isinstance(source.get('value'), str) or not _is_exact_youtube_url(source['value']):
                 raise StudioInputError('请输入完整的 YouTube 视频链接')
             media = download_audio_only(source['value'], self.temp, runner=self.runner)
-        elif source['kind'] == 'local':
+        elif kind == 'web':
+            from studio_urls import is_public_https
+            if not isinstance(source.get('value'), str) or not is_public_https(source['value']):
+                raise StudioInputError('请输入公开的 HTTPS 链接')
+            media = download_audio_only(source['value'], self.temp, runner=self.runner)
+        elif kind == 'local':
             media = Path(source['value']).expanduser().resolve(strict=True)
             if not media.is_file():
                 raise StudioInputError('请选择本地音频或视频文件')
@@ -295,7 +303,10 @@ class StudioEngine:
             return round(audio.getnframes() / audio.getframerate() * 1000)
 
     def transcribe(self, wav, config):
-        if config['source']['kind'] == 'youtube':
+        kind = config['source']['kind']
+        if kind == 'web' and isinstance(config['source'].get('value'), str) and _is_exact_youtube_url(config['source']['value']):
+            kind = 'youtube'
+        if kind in ('youtube', 'web'):
             reason = None
             try:
                 info = fetch_video_info(config['source']['value'], runner=self.runner)
@@ -385,7 +396,11 @@ class StudioEngine:
         # - YouTube interviews: 0.9 (0.5 over-splits long talk shows into ghost IDs)
         # Soft closed-world stitch + <~20s ghost collapse handle residual oversplit
         # without needing a higher global threshold. Explicit config always wins.
-        default_threshold = 0.9 if config.get('source', {}).get('kind') == 'youtube' else 0.5
+        source = config.get('source') or {}
+        remote = source.get('kind')
+        if remote == 'web' and isinstance(source.get('value'), str) and _is_exact_youtube_url(source['value']):
+            remote = 'youtube'
+        default_threshold = 0.9 if remote == 'youtube' else 0.5
         self.diarization_threshold = float(config.get('diarization_threshold', default_threshold))
         if not 0 < self.diarization_threshold < 2:
             raise StudioInputError('声纹聚类阈值须介于 0 和 2 之间')
@@ -527,20 +542,36 @@ class StudioEngine:
         return target
 
     def remember_video_info(self, info, provider='deepseek'):
-        """Persist the YouTube title before subtitles or ASR can fail."""
-        try:
-            metadata = video_metadata_from_info(info)
-        except PodcastPipelineError:
-            return
+        """Persist the source title before subtitles or ASR can fail."""
         try:
             import studio_publish_icloud
+            thumb = info.get('thumbnail') if isinstance(info, dict) else None
+            provider_name = provider if provider in ('deepseek', 'qwen') else 'deepseek'
+            try:
+                metadata = video_metadata_from_info(info)
+            except PodcastPipelineError:
+                metadata = None
+            if metadata is None:
+                title = info.get('title') if isinstance(info, dict) else None
+                if not isinstance(title, str) or not title.strip():
+                    return
+                studio_publish_icloud.remember_source_title(
+                    self.job,
+                    source_title=title,
+                    channel=str(info.get('channel') or info.get('uploader') or ''),
+                    webpage_url=str(info.get('webpage_url') or ''),
+                    thumbnail_url=thumb if isinstance(thumb, str) else None,
+                    provider=provider_name,
+                )
+                return
             studio_publish_icloud.remember_source_title(
                 self.job,
                 source_title=metadata.source_title,
                 video_id=metadata.video_id,
                 channel=metadata.channel,
                 webpage_url=metadata.webpage_url,
-                provider=provider if provider in ('deepseek', 'qwen') else 'deepseek',
+                thumbnail_url=thumb if isinstance(thumb, str) else None,
+                provider=provider_name,
             )
         except Exception:
             return

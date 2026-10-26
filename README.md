@@ -23,10 +23,9 @@
 
 在 Mac 上打开 [ios/PrivateListen/PrivateListen.xcodeproj](ios/PrivateListen/PrivateListen.xcodeproj)：
 
-1. 选中 PrivateListen 目标，打开 Signing & Capabilities，Team 选你的个人开发团队。Bundle id 已是 `com.liuyuxin.privatelisten`。
-2. 确认有 iCloud → iCloud Documents，容器为 `iCloud.com.liuyuxin.privatelisten`。
-3. 运行目标选这台 iPhone「不取经的小刘」，然后 Run。模拟器只用来确认工程能编译；收听用这台手机。
-4. 第一次打开点「选择资料库」，在 iCloud Drive 里选中「中文播客私人库」。之后下拉或重新打开即可看到新节目。没有登录，也不访问互联网。
+1. PrivateListen 和 ShareExtension 两个目标都用同一个个人团队签名。不要加 iCloud 或 App Groups，个人团队签不上。
+2. 运行目标选这台 iPhone「不取经的小刘」，然后 Run。模拟器只用来确认工程能编译；收听和分享用这台手机。
+3. 第一次打开点「选择资料库」，在 iCloud Drive 里选中「中文播客私人库」。从 Safari / YouTube / Substack 分享到「私人听」时，再选一次同一个文件夹，之后分享会写入 `inbox/`。Mac 上跑 `python3 scripts/studio_inbox.py`，用默认可辨音色排队转换。锁屏封面和签名步骤见 [docs/private-listen.md](docs/private-listen.md)。
 
 已有成品（例如 Creatine，任务 `6d898d4192de495fafcec86b9c938430`）不用重跑合成，按文档里的命令补发一次即可。
 

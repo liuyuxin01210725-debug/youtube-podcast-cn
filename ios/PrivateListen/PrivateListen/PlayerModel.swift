@@ -53,6 +53,8 @@ final class PlayerModel: ObservableObject {
     private var itemWatchers = Set<AnyCancellable>()
     private var lastSaved: Double = -1
     private let speedKey = "PrivateListen.speed"
+    private var nowArtwork: MPMediaItemArtwork?
+    private var artist = "私人听"
 
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
@@ -81,6 +83,8 @@ final class PlayerModel: ObservableObject {
         }
         currentID = episode.id
         title = episode.title
+        artist = Self.showName(in: episode.title)
+        nowArtwork = ArtworkImage.nowPlayingItem(for: episode)
         errorText = nil
         current = 0
         duration = episode.durationSec ?? 0
@@ -273,14 +277,32 @@ final class PlayerModel: ObservableObject {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
+        let topic = Self.topicName(in: title)
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: title,
+            MPMediaItemPropertyTitle: topic,
+            MPMediaItemPropertyArtist: artist,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: current,
-            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? speed.rate : 0,
+            MPNowPlayingInfoPropertyPlaybackRate: isPlaying ? Double(speed.rate) : 0,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
         if duration > 0 {
             info[MPMediaItemPropertyPlaybackDuration] = duration
         }
+        if let nowArtwork {
+            info[MPMediaItemPropertyArtwork] = nowArtwork
+        }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private static func topicName(in title: String) -> String {
+        guard let range = title.range(of: " · ") else { return title }
+        let topic = title[..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
+        return topic.isEmpty ? title : String(topic)
+    }
+
+    private static func showName(in title: String) -> String {
+        guard let range = title.range(of: " · ") else { return "私人听" }
+        let show = title[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
+        return show.isEmpty ? "私人听" : String(show)
     }
 }
