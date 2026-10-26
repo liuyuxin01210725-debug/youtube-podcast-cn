@@ -166,6 +166,11 @@ final class LibraryStore: ObservableObject {
         }
         if let known = knownLibraryURL() {
             hold(known)
+            return
+        }
+        // Dev / push fallback: files copied into the app container Documents mirror.
+        if let documents = documentsLibraryURL() {
+            hold(documents)
         }
     }
 
@@ -175,6 +180,26 @@ final class LibraryStore: ObservableObject {
             .appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/\(folderName)", isDirectory: true)
         var directory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &directory), directory.boolValue else {
+            return nil
+        }
+        return candidate
+    }
+
+    /// Same folder name under Documents — used when a security-scoped bookmark is missing
+    /// but library.json / episodes were pushed into the app container.
+    private func documentsLibraryURL() -> URL? {
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let candidate = docs.appendingPathComponent(folderName, isDirectory: true)
+        var directory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &directory), directory.boolValue else {
+            return nil
+        }
+        let library = candidate.appendingPathComponent("library.json")
+        let episodes = candidate.appendingPathComponent("episodes", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: library.path)
+            || FileManager.default.fileExists(atPath: episodes.path) else {
             return nil
         }
         return candidate
