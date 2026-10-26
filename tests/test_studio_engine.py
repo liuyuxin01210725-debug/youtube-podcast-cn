@@ -330,6 +330,35 @@ class StudioTests(unittest.TestCase):
         self.assertIn('私享', str(error))
         self.assertNotIn('granted', str(error))
 
+    def test_transcribe_saves_chinese_title_before_subtitle_failure(self):
+        url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
+        info = {
+            'id': 'Jk7RAkFN4vk',
+            'title': 'Creatine Expert: Creatine Is The Secret To Weight Loss',
+            'channel': 'The Diary Of A CEO',
+            'webpage_url': url,
+        }
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            engine.temp.mkdir()
+            wav = engine.temp / 'source.wav'
+            with wave.open(str(wav), 'wb') as audio:
+                audio.setnchannels(1)
+                audio.setsampwidth(2)
+                audio.setframerate(16000)
+                audio.writeframes(b'\0\0' * 1600)
+            write = engine.job / 'state.json'
+            write.write_text(json.dumps({'title': url, 'status': 'running'}), encoding='utf-8')
+            with patch('studio_engine.fetch_video_info', return_value=info), patch('studio_engine.download_english_subtitles', side_effect=PodcastPipelineError('no captions')), patch('studio_publish_icloud.translate_episode_topic', return_value='肌酸专家：肌酸是减肥的秘密'), patch.object(engine, 'ffmpeg', side_effect=Cancelled('stop')):
+                with self.assertRaises(Cancelled):
+                    engine.transcribe(wav, {'source': {'kind': 'youtube', 'value': url}, 'provider': 'deepseek'})
+            metadata = json.loads((engine.job / 'metadata.json').read_text(encoding='utf-8'))
+            state = json.loads((engine.job / 'state.json').read_text(encoding='utf-8'))
+            self.assertEqual(metadata['source_title'], info['title'])
+            self.assertEqual(metadata['display_title'], '肌酸专家：肌酸是减肥的秘密 · The Diary Of A CEO')
+            self.assertEqual(state['title'], metadata['display_title'])
+            self.assertNotIn('http', state['title'])
+
     def test_valid_audio_does_not_hide_missing_ffmpeg(self):
         with tempfile.TemporaryDirectory() as root:
             engine = StudioEngine(root)
