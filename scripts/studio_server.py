@@ -8,6 +8,10 @@ ROOT=Path(__file__).resolve().parents[1]
 MAX_UPLOAD=2*1024**3
 
 from studio_preview import preview_limit, select_preview_segments
+from diarization_cache import assign_studio_voices
+
+def as_bool(value):
+    return value is True
 
 def read(p, default=None):
     try: return json.loads(p.read_text())
@@ -64,7 +68,7 @@ class Studio:
             fallback=read(p/'debug-subtitle-fallback.json') or {}
             reason=fallback.get('reason') if isinstance(fallback,dict) else None
             if reason: progress['subtitle_fallback_reason']=reason
-        return dict(id=p.name,title=s.get('title','合成英文测试对话' if p.name=='demo-dialogue' else p.name),status=s.get('status','complete' if (p/'output.mp3').exists() else 'interrupted'),action=s.get('action'),message=s.get('message'),progress=progress,document=read(p/'document.json'),config=read(p/'config.json',{}),files={n:(p/n).exists() for n in ('preview.mp3','output.mp3')},stale=any(asset_stale.values()),asset_stale=asset_stale,updated_at=s.get('updated_at',0))
+        return dict(id=p.name,title=s.get('title','合成英文测试对话' if p.name=='demo-dialogue' else p.name),status=s.get('status','complete' if (p/'output.mp3').exists() else 'interrupted'),action=s.get('action'),message=s.get('message'),progress=progress,document=read(p/'document.json'),config=read(p/'config.json',{}),files={n:(p/n).exists() for n in ('preview.mp3','output.mp3')},stale=any(asset_stale.values()),asset_stale=asset_stale,accept_unreviewed=bool(s.get('accept_unreviewed')),updated_at=s.get('updated_at',0))
     def list(self):
         with self.lock: return sorted([self.info(p) for p in self.root.iterdir() if p.is_dir() and not p.is_symlink() and (p/'config.json').exists()],key=lambda j:j['updated_at'],reverse=True)
     def create(self, sources, options):
@@ -100,7 +104,7 @@ class Studio:
             p=self.job(ident); self.migrate_assets(p); s=read(p/'state.json',{})
             if s.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后切换声音')
             config=read(p/'config.json',{}); config['tts']=backend; write(p/'config.json',config)
-    def action(self,ident,action,preview=False):
+    def action(self,ident,action,preview=False,accept_unreviewed=False):
         with self.lock:
             p=self.job(ident); s=read(p/'state.json',{})
             if action=='cancel':
@@ -115,14 +119,50 @@ class Studio:
                 if s.get('status') in ('running','queued','cancelling'): raise ValueError('任务已在队列中')
                 if action not in ('prepare','render','run'): raise ValueError('操作无效')
                 if action=='render' and not (p/'document.json').exists(): raise ValueError('请先准备译稿')
-                s.update(status='queued',action=action,preview=bool(preview),message=None)
+                s.update(status='queued',action=action,preview=bool(preview),accept_unreviewed=as_bool(accept_unreviewed) if action in ('render','run') else False,message=None)
             s['updated_at']=time.time(); write(p/'state.json',s)
+    def _editable(self, ident):
+        p=self.job(ident); state=read(p/'state.json',{})
+        if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+        doc=read(p/'document.json')
+        if not isinstance(doc, dict) or not isinstance(doc.get('segments'), list) or not isinstance(doc.get('speakers'), dict):
+            raise ValueError('请先准备译稿')
+        return p, state, doc
+    def confirm_speakers(self, ident):
+        """Clear every 待核对 flag without requiring a per-segment edit."""
+        with self.lock:
+            p, state, doc = self._editable(ident)
+            for segment in doc['segments']:
+                if isinstance(segment, dict):
+                    segment['ambiguous']=False
+            write(p/'document.json', doc)
+            state['updated_at']=time.time(); write(p/'state.json', state)
+    def reset_voice_slots(self, ident):
+        """Reapply the male-first studio default in first-appearance order."""
+        with self.lock:
+            p, state, doc = self._editable(ident)
+            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict)])
+            for speaker, slot in slots.items():
+                record=doc['speakers'].get(speaker)
+                if isinstance(record, dict):
+                    record['voice_slot']=slot
+            doc['voices_confirmed']=False
+            write(p/'document.json', doc)
+            state['stale']=True; state['updated_at']=time.time(); write(p/'state.json', state)
+    def confirm_voices(self, ident):
+        with self.lock:
+            p, state, doc = self._editable(ident)
+            doc['voices_confirmed']=True
+            write(p/'document.json', doc)
+            state['updated_at']=time.time(); write(p/'state.json', state)
     def engine_args(self, p, state):
         cmd=self.engine+['--job-dir',str(p),'--config',str(p/'config.json'),'--action',state.get('action','run')]
         if state.get('preview'):
             doc=read(p/'document.json',{}) or {}
             segments=doc.get('segments') if isinstance(doc, dict) else []
             cmd+=['--preview', str(preview_limit(segments or []))]
+        if state.get('accept_unreviewed'):
+            cmd.append('--accept-unreviewed')
         return cmd
     def worker(self):
         while not self.stop:
@@ -203,10 +243,15 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
             data=json.loads(self.rfile.read(length))
             if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
-            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice)',path)
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|confirm-speakers|voice-slots|confirm-voices)',path)
             if not m: raise ValueError('操作不存在')
-            if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False))
+            if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False),data.get('accept_unreviewed',False))
             elif m[2]=='voice': studio.voice(m[1],data['tts'])
+            elif m[2]=='confirm-speakers': studio.confirm_speakers(m[1])
+            elif m[2]=='voice-slots':
+                if not isinstance(data, dict) or data.get('scheme')!='male_first': raise ValueError('音色方案无效')
+                studio.reset_voice_slots(m[1])
+            elif m[2]=='confirm-voices': studio.confirm_voices(m[1])
             else:
                 with studio.lock:
                     p=studio.job(m[1]); studio.migrate_assets(p); state=read(p/'state.json',{})
@@ -215,9 +260,13 @@ class Handler(BaseHTTPRequestHandler):
                     if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
                     for original,new in zip(doc['segments'],updates):
                         if original['id']!=new['id'] or new.get('speaker_id') not in doc['speakers'] or not isinstance(new.get('chinese'),str) or len(new['chinese'])>20000: raise ValueError('译稿数据无效')
-                        original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False)
+                        # A text edit must not sign off every 待核对 row. Only the
+                        # row whose speaker actually changed is confirmed here.
+                        confirmed = original.get('speaker_id') != new.get('speaker_id')
+                        original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False if confirmed else bool(original.get('ambiguous')))
                     for ident,slot in data.get('voices',{}).items():
                         if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')
+                        if doc['speakers'][ident].get('voice_slot')!=slot: doc['voices_confirmed']=False
                         doc['speakers'][ident]['voice_slot']=slot
                     write(p/'document.json',doc); state['stale']=True; write(p/'state.json',state)
             self.send({'ok':True})

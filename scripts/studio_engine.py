@@ -23,7 +23,7 @@ from podcast_cn import (fetch_video_info, download_english_subtitles, create_tra
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
 from diarization_core import (SpeakerBounds, align_caption_pieces, fill_unassigned_for_review,
                               validate_diarization)
-from diarization_cache import VOICE_ORDER
+from diarization_cache import assign_studio_voices
 from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
 from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
@@ -110,6 +110,44 @@ def atomic_json(path, value):
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+# 0.12 s at 24 kHz. Edge rejects bare punctuation with NoAudioReceived and
+# aborts the whole job; a short silence keeps the timeline without a request.
+SILENCE_FRAMES = 2880
+SILENCE_RATE = 24000
+_SPEAKABLE_TTS = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]")
+_TTS_TURN_MARKER = re.compile(r"(?<!\S)>>+\s*")
+_TTS_STAGE = re.compile(
+    r"[\[【〔(（]"
+    r"(?:音乐|背景音乐|笑声?|掌声|叹气|清嗓子?|咳嗽|鼓掌|沉默|停顿|吸气|呼气|听不清|"
+    r"music|laughter|laughs?|applause|gasps?|sighs?|coughs?|snorts?|clears throat|inaudible|crosstalk|beat)"
+    r"[\]】〕)）]",
+    re.IGNORECASE,
+)
+
+
+def clean_tts_text(text):
+    """Drop YouTube ``>>`` turn markers and short stage directions before Edge."""
+    cleaned = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = _TTS_TURN_MARKER.sub("", cleaned)
+    cleaned = _TTS_STAGE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{2,}", "\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip()
+
+
+def speakable_tts(text):
+    return _SPEAKABLE_TTS.search(text or "") is not None
+
+
+def write_pcm_silence(path, frames=SILENCE_FRAMES, rate=SILENCE_RATE):
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"\0\0" * frames)
 
 
 def asr_pieces(records, offset_ms=0):
@@ -390,9 +428,10 @@ class StudioEngine:
             output = reference_dir / name
             self.ffmpeg('-ss', ref['start_ms'] / 1000, '-i', wav, '-t', (ref['end_ms'] - ref['start_ms']) / 1000, output)
             references[speaker] = {**ref, 'path': str(output.relative_to(self.job)), 'sha256': sha256_file(output)}
+        voice_slots = assign_studio_voices([s.speaker_id for s in segments])
         document = {'schema_version': 1, 'transcript_source': transcript_source,
                     'segments': [{**asdict(s), 'chinese': translated[s.id], 'speaker_id': s.speaker_id} for s in segments],
-                    'speakers': {speaker: {'voice_slot': VOICE_ORDER[index % len(VOICE_ORDER)]} for index, speaker in enumerate(dict.fromkeys(s.speaker_id for s in segments))}, 'references': references}
+                    'speakers': {speaker: {'voice_slot': slot} for speaker, slot in voice_slots.items()}, 'references': references}
         atomic_json(self.job / 'document.json', document)
         return document
 
@@ -419,7 +458,7 @@ class StudioEngine:
         except RuntimeError:
             return False
 
-    def render(self, config, document, preview=None):
+    def render(self, config, document, preview=None, accept_unreviewed=False):
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
             raise StudioInputError('段落为空或编号重复')
@@ -428,8 +467,8 @@ class StudioEngine:
             raise StudioInputError('试听段数必须大于零')
         backend_name = config.get('tts', 'edge')
         pending = [segment['id'] for segment in selected if segment.get('ambiguous')]
-        if pending:
-            raise StudioInputError(f'有 {len(pending)} 段说话人待核对，请先在译稿中改正每段的说话人后再试听或生成')
+        if pending and not accept_unreviewed:
+            raise StudioInputError(f'有 {len(pending)} 段说话人待核对。可全部按当前说话人确认，或带风险继续后再试听或生成')
         model = config.get('clone_model', CLONE_MODEL)
         backend = None
         if backend_name != 'clone':
@@ -442,10 +481,14 @@ class StudioEngine:
             text = segment['chinese'].strip()
             if not text:
                 raise StudioInputError(f"{segment['id']} 译文为空")
+            spoken = clean_tts_text(text) if backend_name == 'edge' else text
             speaker = segment['speaker_id']
             voice = document['speakers'][speaker]
             ref = document['references'].get(speaker)
             identity = {'text': text, 'voice': voice, 'backend': backend_name, 'style': config.get('style', 'conversation'), 'model': model if backend is None else backend.fingerprint(), 'version': 1, 'revision': '50f45ef0047cde7e84c2ef04326acb8ada2436a7' if model == CLONE_MODEL else model}
+            if spoken != text:
+                # Only changed lines pick up a new cache key, so unchanged Edge clips stay reusable.
+                identity['spoken'] = spoken
             if backend is None:
                 if ref is None:
                     raise StudioInputError(f'{speaker} 没有干净的参考声音，请换用系统音色或选择参考片段')
@@ -454,16 +497,21 @@ class StudioEngine:
             target = cache / (fingerprint(identity) + '.wav')
             self.progress('synthesis', index, len(selected), segment_id=segment['id'])
             if not self.valid_audio(target):
-                raw = self.temp / ('synthesis.wav' if backend is None else 'synthesis' + backend.file_suffix)
-                if backend is None:
-                    self.worker({'operation': 'tts', 'model': model, 'text': text, 'reference': str(reference), 'reference_text': ref['text'], 'output': str(raw)})
+                if backend is not None and backend_name == 'edge' and not speakable_tts(spoken):
+                    write_pcm_silence(target)
+                    if not self.valid_audio(target):
+                        raise StudioInputError(f"{segment['id']} 音频无效，请重试")
                 else:
-                    asyncio.run(backend.synthesize(SynthesisRequest(text, voice.get('voice_slot', 'male_1'), config.get('style', 'conversation')), raw))
-                staged = self.temp / 'normalized.wav'
-                self.ffmpeg('-i', raw, '-ac', 1, '-ar', 24000, '-c:a', 'pcm_s16le', staged)
-                if not self.valid_audio(staged):
-                    raise StudioInputError(f"{segment['id']} 音频无效，请重试")
-                staged.replace(target)
+                    raw = self.temp / ('synthesis.wav' if backend is None else 'synthesis' + backend.file_suffix)
+                    if backend is None:
+                        self.worker({'operation': 'tts', 'model': model, 'text': text, 'reference': str(reference), 'reference_text': ref['text'], 'output': str(raw)})
+                    else:
+                        asyncio.run(backend.synthesize(SynthesisRequest(spoken, voice.get('voice_slot', 'male_1'), config.get('style', 'conversation')), raw))
+                    staged = self.temp / 'normalized.wav'
+                    self.ffmpeg('-i', raw, '-ac', 1, '-ar', 24000, '-c:a', 'pcm_s16le', staged)
+                    if not self.valid_audio(staged):
+                        raise StudioInputError(f"{segment['id']} 音频无效，请重试")
+                    staged.replace(target)
             clips.append(target)
         listing = self.temp / 'concat.txt'
         # Cache paths consist only of hex names; concat manifest cannot inject directives.
@@ -477,7 +525,7 @@ class StudioEngine:
         staged.replace(target)
         return target
 
-    def run(self, config, action='run', preview=None):
+    def run(self, config, action='run', preview=None, accept_unreviewed=False):
         self.temp.mkdir(exist_ok=True)
         try:
             self.progress('source')
@@ -497,7 +545,7 @@ class StudioEngine:
                 document = json.loads(document_path.read_text())
             output = None
             if action != 'prepare':
-                output = self.render(config, document, preview)
+                output = self.render(config, document, preview, accept_unreviewed=accept_unreviewed)
             self.progress('complete', output=str(output) if output else None)
             return output
         except Cancelled:
@@ -528,6 +576,7 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--action', choices=['run', 'prepare', 'render'], default='run')
     parser.add_argument('--preview', type=int)
+    parser.add_argument('--accept-unreviewed', action='store_true')
     args = parser.parse_args()
     engine = StudioEngine(args.job_dir)
     def cancel(*_):
@@ -535,7 +584,7 @@ def main():
     signal.signal(signal.SIGTERM, cancel)
     signal.signal(signal.SIGINT, cancel)
     try:
-        engine.run(json.loads(Path(args.config).read_text()), args.action, args.preview)
+        engine.run(json.loads(Path(args.config).read_text()), args.action, args.preview, accept_unreviewed=args.accept_unreviewed)
         return 0
     except Cancelled:
         return 130

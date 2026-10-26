@@ -121,6 +121,57 @@ class ServerTests(unittest.TestCase):
         self.assertGreaterEqual(float((p2/'started').read_text()),float((p1/'finished').read_text()))
         self.assertEqual((p1/'output.mp3').read_bytes(),b'old')
         self.studio.stop=True;t.join(2)
+    def test_batch_confirm_and_risk_continue_leave_a_path_through_review(self):
+        ident = self.create()
+        self.studio.action(ident, 'cancel')
+        p = self.studio.job(ident)
+        segments = [
+            {'id': str(i), 'chinese': '你好', 'speaker_id': 's0' if i % 2 == 0 else 's1', 'ambiguous': True, 'text': 'Hi'}
+            for i in range(6)
+        ]
+        write(p / 'document.json', {
+            'segments': segments,
+            'speakers': {'s0': {'voice_slot': 'female_1'}, 's1': {'voice_slot': 'female_2'}},
+            'references': {},
+            'voices_confirmed': True,
+        })
+        edited = [{'id': s['id'], 'chinese': '你好呀' if s['id'] == '0' else s['chinese'], 'speaker_id': s['speaker_id']} for s in segments]
+        self.assertEqual(self.request(f'/api/jobs/{ident}/document', {'segments': edited, 'voices': {'s0': 'female_1', 's1': 'female_2'}})[0], 200)
+        kept = read(p / 'document.json')
+        self.assertTrue(all(segment['ambiguous'] for segment in kept['segments']))
+        self.assertEqual(kept['segments'][0]['chinese'], '你好呀')
+        moved = [dict(item) for item in edited]
+        moved[1]['speaker_id'] = 's0'
+        self.assertEqual(self.request(f'/api/jobs/{ident}/document', {'segments': moved, 'voices': {'s0': 'female_1', 's1': 'female_2'}})[0], 200)
+        after_move = read(p / 'document.json')['segments']
+        self.assertFalse(after_move[1]['ambiguous'])
+        self.assertTrue(after_move[0]['ambiguous'])
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-speakers', {})[0], 200)
+        self.assertTrue(all(not segment.get('ambiguous') for segment in read(p / 'document.json')['segments']))
+        doc = read(p / 'document.json')
+        for segment in doc['segments']:
+            segment['ambiguous'] = True
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/voice-slots', {'scheme': 'other'})[0], 400)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/voice-slots', {'scheme': 'male_first'})[0], 200)
+        voices = read(p / 'document.json')
+        self.assertEqual(voices['speakers']['s0']['voice_slot'], 'male_1')
+        self.assertEqual(voices['speakers']['s1']['voice_slot'], 'male_2')
+        self.assertFalse(voices['voices_confirmed'])
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 200)
+        self.assertTrue(read(p / 'document.json')['voices_confirmed'])
+        self.assertEqual(self.request(f'/api/jobs/{ident}/document', {'segments': [{'id': s['id'], 'chinese': s['chinese'], 'speaker_id': s['speaker_id']} for s in read(p / 'document.json')['segments']], 'voices': {'s0': 'female_1', 's1': 'male_2'}})[0], 200)
+        self.assertFalse(read(p / 'document.json')['voices_confirmed'])
+        self.assertEqual(self.request(f'/api/jobs/{ident}/action', {'action': 'render', 'preview': True, 'accept_unreviewed': True})[0], 200)
+        state = read(p / 'state.json')
+        self.assertTrue(state['accept_unreviewed'])
+        args = self.studio.engine_args(p, state)
+        self.assertIn('--accept-unreviewed', args)
+        self.assertTrue(self.studio.info(p)['accept_unreviewed'])
+        self.studio.action(ident, 'cancel')
+        self.assertEqual(self.request(f'/api/jobs/{ident}/action', {'action': 'render', 'preview': True, 'accept_unreviewed': 'true'})[0], 200)
+        self.assertFalse(read(p / 'state.json')['accept_unreviewed'])
+
     def test_info_surfaces_subtitle_fallback_reason(self):
         with tempfile.TemporaryDirectory() as root:
             studio = Studio(root, engine=['/bin/true'])

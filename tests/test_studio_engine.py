@@ -7,7 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from studio_engine import select_preview_segments, StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError, user_facing_message
+from studio_engine import (select_preview_segments, StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError, user_facing_message, clean_tts_text, speakable_tts, SILENCE_FRAMES, SILENCE_RATE)
+from diarization_cache import assign_studio_voices, VOICE_ORDER
 from studio_preview import preview_limit
 from podcast_cn import DeepSeekConfigurationError, PodcastPipelineError
 from tts_backends import TTSBackendError
@@ -166,6 +167,90 @@ class StudioTests(unittest.TestCase):
             }
             with self.assertRaisesRegex(ValueError, '说话人待核对'):
                 engine.render({'tts': 'edge'}, doc)
+
+    def test_studio_voices_start_with_male_slots(self):
+        slots = assign_studio_voices([
+            'SPEAKER_00', 'SPEAKER_00', 'SPEAKER_01', 'SPEAKER_02',
+            'SPEAKER_03', 'SPEAKER_04', 'SPEAKER_05',
+        ])
+        self.assertEqual(VOICE_ORDER[0], 'female_1')
+        self.assertEqual(list(slots.values()), [
+            'male_1', 'male_2', 'male_3', 'female_1', 'female_2', 'male_1',
+        ])
+
+    def test_clean_tts_text_drops_markers_and_bare_punctuation(self):
+        self.assertEqual(clean_tts_text('>> 你好。'), '你好。')
+        self.assertEqual(clean_tts_text('你好[音乐]世界'), '你好世界')
+        self.assertEqual(clean_tts_text('（笑）肌酸。'), '肌酸。')
+        self.assertEqual(clean_tts_text('>>'), '')
+        self.assertEqual(clean_tts_text('？'), '？')
+        self.assertFalse(speakable_tts(clean_tts_text('？')))
+        self.assertFalse(speakable_tts(clean_tts_text('。')))
+        self.assertFalse(speakable_tts(clean_tts_text('[Music]')))
+        self.assertTrue(speakable_tts(clean_tts_text('>> 肌酸。')))
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_accept_unreviewed_renders_many_ambiguous_segments(self):
+        class FakeBackend:
+            file_suffix = '.mp3'
+            def fingerprint(self):
+                return {'model': 'fake'}
+            async def synthesize(self, request, path):
+                with wave.open(str(path), 'wb') as out:
+                    out.setnchannels(1)
+                    out.setsampwidth(2)
+                    out.setframerate(24000)
+                    out.writeframes(b'\0\0' * 2400)
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            engine.temp.mkdir()
+            doc = {
+                'segments': [
+                    {'id': f's{i}', 'chinese': f'第{i}句', 'speaker_id': 'a' if i % 2 == 0 else 'b', 'ambiguous': True}
+                    for i in range(8)
+                ],
+                'speakers': {'a': {'voice_slot': 'male_1'}, 'b': {'voice_slot': 'male_2'}},
+                'references': {},
+            }
+            with patch('studio_engine.build_backend', return_value=FakeBackend()):
+                output = engine.render({'tts': 'edge'}, doc, accept_unreviewed=True)
+            self.assertTrue(output.is_file())
+            self.assertTrue(all(segment['ambiguous'] for segment in doc['segments']))
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_edge_writes_silence_instead_of_speaking_bare_punctuation(self):
+        calls = []
+        class FakeBackend:
+            file_suffix = '.mp3'
+            def fingerprint(self):
+                return {'model': 'fake'}
+            async def synthesize(self, request, path):
+                calls.append(request.text)
+                with wave.open(str(path), 'wb') as out:
+                    out.setnchannels(1)
+                    out.setsampwidth(2)
+                    out.setframerate(24000)
+                    out.writeframes(b'\0\0' * 2400)
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            engine.temp.mkdir()
+            doc = {
+                'segments': [
+                    {'id': 'punct', 'chinese': '？', 'speaker_id': 'a'},
+                    {'id': 'words', 'chinese': '>> 你好[音乐]', 'speaker_id': 'a'},
+                ],
+                'speakers': {'a': {'voice_slot': 'male_1'}},
+                'references': {},
+            }
+            with patch('studio_engine.build_backend', return_value=FakeBackend()):
+                engine.render({'tts': 'edge'}, doc)
+            self.assertEqual(calls, ['你好'])
+            frames = []
+            for path in (engine.job / 'audio-cache').glob('*.wav'):
+                with wave.open(str(path), 'rb') as clip:
+                    self.assertEqual(clip.getframerate(), SILENCE_RATE)
+                    frames.append(clip.getnframes())
+            self.assertIn(SILENCE_FRAMES, frames)
 
     def test_incomplete_export_keeps_previous(self):
         with tempfile.TemporaryDirectory() as root:
