@@ -19,13 +19,13 @@
 
 ## 私人听（只给自己的 iPhone）
 
-完整 MP3 生成成功后，工作台会把这一期复制到 iCloud Drive 的「中文播客私人库」。试听不会发布。复制失败只打日志，任务仍然算成功。路径、清单格式和补发命令见 [docs/private-listen.md](docs/private-listen.md)。
+完整 MP3 生成成功后，工作台会把这一期复制到 iCloud Drive 的「中文播客私人库」。试听不会发布。复制失败只打日志，任务仍然算成功。如果这时 iPhone 正连着 Mac（数据线，或已配对的同一网络），还会用 `xcrun devicectl` 顺手把这一期拷进 App 的 `Documents/中文播客私人库`，手机下拉就能看到，不用手动推。没连手机就跳过，不影响任务和 iCloud 发布。路径、清单格式和补发命令见 [docs/private-listen.md](docs/private-listen.md)。
 
 在 Mac 上打开 [ios/PrivateListen/PrivateListen.xcodeproj](ios/PrivateListen/PrivateListen.xcodeproj)：
 
 1. PrivateListen 和 ShareExtension 两个目标都用同一个个人团队签名。不要加 iCloud 或 App Groups，个人团队签不上。
 2. 运行目标选这台 iPhone「不取经的小刘」，然后 Run。模拟器只用来确认工程能编译；收听和分享用这台手机。
-3. 第一次打开点「选择资料库」，在 iCloud Drive 里选中「中文播客私人库」。从 Safari / YouTube / Substack 分享到「私人听」时，再选一次同一个文件夹，之后分享会写入 `inbox/`。Mac 上跑 `python3 scripts/studio_inbox.py`，用默认可辨音色排队转换。锁屏封面和签名步骤见 [docs/private-listen.md](docs/private-listen.md)。
+3. 第一次打开点「选择资料库」，在 iCloud Drive 里选中「中文播客私人库」。这一步决定能不能不插线收到新节目：列表顶上如果写着「现在只显示连 Mac 时拷进来的本机副本」，说明还没选，点那里选一次。从 Safari / YouTube / Substack 分享到「私人听」时，再选一次同一个文件夹，之后分享会写入 `inbox/`。Mac 上跑 `python3 scripts/studio_inbox.py`，用默认可辨音色排队转换。锁屏封面和签名步骤见 [docs/private-listen.md](docs/private-listen.md)。
 
 已有成品（例如 Creatine，任务 `6d898d4192de495fafcec86b9c938430`）不用重跑合成，按文档里的命令补发一次即可。
 

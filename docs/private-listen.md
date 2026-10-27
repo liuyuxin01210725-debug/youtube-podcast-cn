@@ -54,6 +54,46 @@
 
 试听只写 `preview.mp3`，不会进资料库。
 
+## 新节目怎么到手机上
+
+有两条路，都不用手动跑 `devicectl`。
+
+**1. iCloud（主路，不插线）。** 手机 App 用安全作用域书签记住 iCloud 云盘里的「中文播客私人库」。每次打开、切回前台、下拉，以及 App 开着时每 60 秒，都会重新读 `library.json` 和 `episodes/*/episode.json`，并请 iCloud 下载新版本的 `library.json`、新一期的文件夹和 `output.mp3`。还有东西在下载时改成每 8 秒查一次，下好后「正在从 iCloud 下载」自己消失。
+
+前提是 App 里选过 iCloud 的这个文件夹。没选过，或者授权失效了，列表顶上会写「现在只显示连 Mac 时拷进来的本机副本」，点那一行在 iCloud 云盘里选「中文播客私人库」即可。右上角按钮这时也叫「选择资料库」，选好后才变成「重新选择」。
+
+**2. 连着 Mac 时直接拷（备用）。** iCloud 发布成功后（引擎 `run` / `render`、工作台的补发、`studio_publish_icloud.py` 命令行都算），Mac 会用 `xcrun devicectl` 找已配对、当前能连上的真机 iPhone / iPad，把这一期拷进私人听 App 自己的容器：
+
+```text
+<App 容器>/Documents/中文播客私人库/
+  episodes/<任务编号>/output.mp3
+  episodes/<任务编号>/cover.jpg（有封面时）
+  episodes/<任务编号>/episode.json
+  library.json
+```
+
+顺序是音频先、`episode.json` 和 `library.json` 最后，所以手机不会把拷到一半的音频列出来。数据线连着最快；同一网络下已配对的手机也会试，只是慢些。
+
+这一步完全是软的：Mac 上没有 Xcode / `devicectl`、没连手机、手机没装私人听、手机锁着、拷贝失败，都只打一行日志，并在任务目录写 `private-listen-device.json`（`ok`、`reason`、每台设备的结果），不改 `private-listen.json`，不改任务状态和退出码。
+
+App 把这份本机副本当成**第二个来源**，按节目编号和 iCloud 合并，不会拿它替代 iCloud 文件夹：
+
+- 同一期两边都有时用 iCloud 的；iCloud 那份还在下载时先用本机副本播放。
+- 本机副本里没有音频的条目不显示（Mac 推的 `library.json` 会列出所有节目，没拷过来的不会变成永远在下载的空条目）。
+- 分享进来的链接只写进 iCloud 的 `inbox/`，不会写进本机副本，因为 Mac 只看 iCloud。
+
+只在资料库是默认 iCloud 位置时才会拷手机。设了 `PRIVATE_LISTEN_LIBRARY`（测试、临时盘）时不拷，免得测试节目跑到手机上。环境变量 `PRIVATE_LISTEN_DEVICE_PUSH=0` 完全关掉，`=1` 强制打开。`studio_publish_icloud.py --no-device` 只发 iCloud。
+
+手机后来才插上时，可以手动补拷：
+
+```bash
+python3 scripts/studio_push_iphone.py --job-dir "$HOME/Desktop/音频/中文播客工作台/jobs/<任务编号>"
+python3 scripts/studio_push_iphone.py --episode-id <任务编号>
+python3 scripts/studio_push_iphone.py --all
+```
+
+App 容器根目录 `Documents/library.json` 以前手动推过，但 App 从来不读那个位置，可以不管或删掉。
+
 ## 标题
 
 手机列表和播放器都用 `episode.json` 的 `title`。约定是：
@@ -195,7 +235,7 @@ python3 scripts/studio_inbox.py --no-run
 2. 选中 **PrivateListen** 和 **ShareExtension** 两个目标，Signing & Capabilities 里 Team 都选同一个个人团队，Automatically manage signing 打开。两个目标都不要加 iCloud，也不要加 App Groups。个人团队签不上这些能力。仓库里的 entitlements 是空的；如果 Xcode 里还留着以前的 iCloud 能力，删掉它再编。
 3. 运行目标选 iPhone「不取经的小刘」，scheme 用 PrivateListen，按 Run。扩展会嵌进 App 一起装上。免费描述文件大约 7 天过期，扩展算第二个 App ID（个人团队最多 10 个）。过期后重新 Run 一次。
 4. 手机上若提示不受信任的开发者：设置 → 通用 → VPN 与设备管理 → 信任你的开发者证书。装好后如果分享页没有「私人听」，在分享页拉到最下点「更多」（或「编辑」）打开它。分享页有缓存时，把来源 App 划掉重开一次。
-5. App 打开后点「选择资料库」，在「浏览」里进入 iCloud 云盘，选中「中文播客私人库」。系统会记住这个文件夹。选错了可点「重新选择」。这一步是播放和看收件箱用的。
+5. App 打开后点「选择资料库」，在「浏览」里进入 iCloud 云盘，选中「中文播客私人库」。系统会记住这个文件夹。选错了可点「重新选择」。这一步是不插线收到新节目、看收件箱用的。只靠连 Mac 拷进来的本机副本时，列表顶上会提示再选一次。
 6. 第一次从别的 App 分享到「私人听」时，扩展还没有自己的书签，页面上点「选择中文播客私人库」，再选同一个文件夹。选过这一次之后，再分享会直接写入 `inbox/`，不用打开主 App。若主 App 里已经选过文件夹、又不想在分享页再选，可以点「打开私人听写入」，链接会交给主 App 写进收件箱。
 7. 列表显示标题、时长、日期。没听过的有「未听」。上面的「收件箱」是还没发布的分享。下拉，或切回 App，会重新读清单。点进去即可播放、拖动、±15 秒、倍速 1 / 1.25 / 1.5 / 2。进度记在这台手机上（UserDefaults），不写回 iCloud。
 
@@ -228,3 +268,20 @@ python3 scripts/studio_publish_icloud.py \
 3. Mac 上 `inbox/` 出现一条 json；监听打印「已排队」。工作室任务是 `run` + `edge`。
 4. 同一条链接再分享一次，第二条 status 是 `duplicate`，不会再建任务。
 5. 转换成功后，手机下拉，节目和封面出现在列表里。转换失败时 status 是 `failed`，监听不退出。
+
+## 在 iPhone 上核对自动到达
+
+先用这个分支的代码重新 Run 一次 App（旧版本会一直读本机副本）。
+
+不插线（iCloud）：
+
+1. 手机打开私人听。列表顶上**不应**有「现在只显示连 Mac 时拷进来的本机副本」。有的话点它，选 iCloud 云盘里的「中文播客私人库」。
+2. 拔掉数据线。Mac 上完整生成一期（或对已有任务跑一次 `studio_publish_icloud.py --no-device --job-dir …` 补发）。
+3. Mac 上 `library.json` 更新后，手机下拉或切回前台。新一期先出现，可能写着「正在从 iCloud 下载」，下好后自动变成可播放，不用再下拉。
+
+连着 Mac：
+
+1. 手机用数据线连 Mac、解锁。
+2. Mac 上完整生成一期。工作台窗口（或引擎输出）会打印「私人听：已同步到 iPhone「…」」。任务目录里 `private-listen-device.json` 的 `ok` 是 `true`。
+3. 手机下拉，新一期马上能播，不用等 iCloud。
+4. 拔掉线再生成一期，日志写「跳过 iPhone 直连同步（没有连着的 iPhone）」，任务照常成功，节目走 iCloud 到达。
