@@ -10,7 +10,7 @@ struct LibraryView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if !library.hasFolder {
+                if !library.hasCloudFolder && library.episodes.isEmpty {
                     prompt(
                         title: "选择资料库",
                         systemImage: "folder",
@@ -29,7 +29,7 @@ struct LibraryView: View {
             .navigationTitle("私人听")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(library.hasFolder ? "重新选择" : "选择资料库") {
+                    Button(library.hasCloudFolder ? "重新选择" : "选择资料库") {
                         picking = true
                     }
                 }
@@ -44,6 +44,15 @@ struct LibraryView: View {
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active { library.reload() }
+            }
+            .task(id: scenePhase) {
+                // While open, keep picking up Mac publishes and finished iCloud downloads.
+                guard scenePhase == .active else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(for: .seconds(library.waitingOnCloud ? 8 : 60))
+                    if Task.isCancelled { break }
+                    library.reload()
+                }
             }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
                 switch result {
@@ -62,6 +71,18 @@ struct LibraryView: View {
 
     private var list: some View {
         List {
+            if library.readingLocalCopyOnly {
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("现在只显示连 Mac 时拷进来的本机副本。Mac 发布到 iCloud 的新节目要选好资料库才会自动出现。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Button("在 iCloud 云盘里选择「中文播客私人库」") { picking = true }
+                            .font(.footnote)
+                    }
+                    .padding(.vertical, 2)
+                }
+            }
             if let message = library.message, !message.isEmpty {
                 Section {
                     Text(message)
