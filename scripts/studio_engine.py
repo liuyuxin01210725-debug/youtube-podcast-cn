@@ -593,8 +593,19 @@ class StudioEngine:
                 studio_publish_icloud.record_status(self.job, ok=False, error=message)
             except Exception:
                 pass
-            return
+            return None
         print(f"私人听：已发布「{result.get('title', '')}」→ {result.get('episode_dir', '')}", flush=True)
+        return result
+
+    def push_private_device(self, published):
+        """Extra copy into the app on a plugged-in iPhone. Never changes the job result."""
+        if not published:
+            return
+        try:
+            import studio_push_iphone
+            studio_push_iphone.push_after_publish(published, self.job)
+        except Exception:
+            pass
 
     def run(self, config, action='run', preview=None, accept_unreviewed=False):
         self.temp.mkdir(exist_ok=True)
@@ -618,9 +629,11 @@ class StudioEngine:
             if action != 'prepare':
                 output = self.render(config, document, preview, accept_unreviewed=accept_unreviewed)
             # Preview stays on the Mac. Only a full output.mp3 is offered to the phone.
+            published = None
             if preview is None and output is not None and Path(output).name == 'output.mp3':
-                self.publish_private_library()
+                published = self.publish_private_library()
             self.progress('complete', output=str(output) if output else None)
+            self.push_private_device(published)
             return output
         except Cancelled:
             self.progress('cancelled', message='任务已取消；已完成片段可继续复用')

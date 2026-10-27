@@ -710,6 +710,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument('--job-dir', required=True, type=Path)
     parser.add_argument('--library', type=Path, default=None, help='覆盖资料库根目录，默认 iCloud Drive 里的「中文播客私人库」')
     parser.add_argument('--refresh-title', action='store_true', help='发布前拉取视频标题并译成「中文主题 · 节目名」，不重新合成音频')
+    parser.add_argument('--no-device', action='store_true', help='不往连着 Mac 的 iPhone 直接拷贝，只发布到 iCloud')
     args = parser.parse_args(argv)
     job = args.job_dir.expanduser()
     try:
@@ -729,6 +730,12 @@ def main(argv: list[str] | None = None) -> int:
                 pass
         return 1
     print(f"私人听：已发布「{result['title']}」→ {result['episode_dir']}")
+    if not args.no_device:
+        try:
+            from studio_push_iphone import push_after_publish
+            push_after_publish(result, job)
+        except Exception:
+            pass
     return 0
 
 

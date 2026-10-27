@@ -257,6 +257,11 @@ class Studio:
             print(f'私人听：iCloud 发布未成功（任务成品仍保留）：{type(error).__name__}: {error}', flush=True)
             return
         print(f"私人听：iCloud 资料库已更新 {result.get('episode_dir','')}", flush=True)
+        try:
+            import studio_push_iphone
+            studio_push_iphone.push_after_publish(result, p)
+        except Exception:
+            pass
     def worker(self):
         while not self.stop:
             with self.lock:

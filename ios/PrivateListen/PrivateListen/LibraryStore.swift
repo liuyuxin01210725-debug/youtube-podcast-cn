@@ -3,6 +3,11 @@ import Foundation
 /// Reads the iCloud Drive folder the Mac publisher fills: 「中文播客私人库」.
 /// The folder is chosen once and kept with a security-scoped bookmark. Playback
 /// progress stays on this phone.
+///
+/// Documents/中文播客私人库 inside the app container is a second, read-only
+/// source: the Mac copies episodes there over USB when the phone is plugged in.
+/// It is merged by episode id with the iCloud folder and never replaces it, so
+/// a stale USB copy cannot hide what the Mac publishes to iCloud.
 @MainActor
 final class LibraryStore: ObservableObject {
     struct ListenMark: Codable {
@@ -12,7 +17,12 @@ final class LibraryStore: ObservableObject {
 
     @Published private(set) var episodes: [Episode] = []
     @Published private(set) var inbox: [InboxEntry] = []
+    /// Something to show: the iCloud folder, or at least the USB copy.
     @Published private(set) var hasFolder = false
+    /// The chosen iCloud folder is in use. False means new Mac publishes only arrive over USB.
+    @Published private(set) var hasCloudFolder = false
+    /// iCloud is still bringing down library.json or audio; the list polls faster meanwhile.
+    @Published private(set) var waitingOnCloud = false
     @Published var message: String?
     @Published private var progress: [String: ListenMark] = [:]
 
@@ -20,9 +30,13 @@ final class LibraryStore: ObservableObject {
     private let progressKey = "PrivateListen.progress"
     private let pendingKey = "PrivateListen.pendingShares"
     private var pendingShares: [PendingShare] = []
+    /// Only ever the user-chosen iCloud folder, never the Documents copy.
     private var folderURL: URL?
     private var scopeHeld = false
     private let folderName = "中文播客私人库"
+    private let unreadableMessage = "打不开资料库，请重新选择「中文播客私人库」。"
+
+    var readingLocalCopyOnly: Bool { hasFolder && !hasCloudFolder }
 
     init() {
         if let data = UserDefaults.standard.data(forKey: progressKey),
@@ -91,6 +105,10 @@ final class LibraryStore: ObservableObject {
     }
 
     func adopt(_ url: URL) {
+        if Self.isInsideAppContainer(url) {
+            message = "这是 App 里的本机副本。请在 iCloud 云盘里选「中文播客私人库」。"
+            return
+        }
         let started = url.startAccessingSecurityScopedResource()
         do {
             let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
@@ -107,25 +125,44 @@ final class LibraryStore: ObservableObject {
     }
 
     func reload() {
-        guard let folderURL else {
-            hasFolder = false
-            episodes = []
-            inbox = []
-            return
+        var cloud = LoadedLibrary()
+        var cloudInbox: [InboxEntry] = []
+        if let folderURL {
+            let readable = FileManager.default.isReadableFile(atPath: folderURL.path)
+            if !readable && !scopeHeld {
+                message = unreadableMessage
+            } else {
+                flushPending()
+                cloud = loadEpisodes(from: folderURL, localCopy: false)
+                cloudInbox = InboxDrop.items(in: folderURL)
+                if message == unreadableMessage {
+                    message = nil
+                }
+            }
         }
-        hasFolder = true
-        let readable = FileManager.default.isReadableFile(atPath: folderURL.path)
-        if !readable && !scopeHeld {
-            episodes = []
-            inbox = []
-            message = "打不开资料库，请重新选择「中文播客私人库」。"
-            return
+        let mirrorURL = documentsLibraryURL()
+        let mirror = mirrorURL.map { loadEpisodes(from: $0, localCopy: true) } ?? LoadedLibrary()
+        episodes = merge(cloud: cloud.episodes, localCopy: mirror.episodes)
+        inbox = cloudInbox
+        hasCloudFolder = folderURL != nil
+        hasFolder = folderURL != nil || mirrorURL != nil
+        waitingOnCloud = cloud.waiting || episodes.contains { $0.downloading }
+    }
+
+    /// iCloud wins. The USB copy fills in episodes iCloud has not delivered yet,
+    /// or whose audio is still downloading from iCloud.
+    private func merge(cloud: [Episode], localCopy: [Episode]) -> [Episode] {
+        var byID: [String: Episode] = [:]
+        for episode in cloud {
+            byID[episode.id] = episode
         }
-        flushPending()
-        episodes = loadEpisodes(from: folderURL)
-        inbox = InboxDrop.items(in: folderURL)
-        if message == "打不开资料库，请重新选择「中文播客私人库」。" {
-            message = nil
+        for episode in localCopy {
+            if let existing = byID[episode.id], !existing.downloading { continue }
+            byID[episode.id] = episode
+        }
+        return byID.values.sorted { lhs, rhs in
+            if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
+            return lhs.id > rhs.id
         }
     }
 
@@ -153,25 +190,39 @@ final class LibraryStore: ObservableObject {
         }
     }
 
+    /// Picks the iCloud folder only. The Documents copy is read separately in
+    /// `reload`; holding it here used to make the app look set up while it never
+    /// saw an iCloud publish again.
     private func restore() {
         if let data = UserDefaults.standard.data(forKey: bookmarkKey) {
             var stale = false
-            if let url = try? URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale) {
-                if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                    UserDefaults.standard.set(fresh, forKey: bookmarkKey)
+            do {
+                let url = try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
+                if Self.isInsideAppContainer(url) {
+                    UserDefaults.standard.removeObject(forKey: bookmarkKey)
+                } else {
+                    hold(url)
+                    if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+                        UserDefaults.standard.set(fresh, forKey: bookmarkKey)
+                    }
+                    return
                 }
-                hold(url)
-                return
+            } catch {
+                message = "iCloud 资料库的授权失效了，请点「选择资料库」重新选中「中文播客私人库」。"
             }
         }
         if let known = knownLibraryURL() {
             hold(known)
             return
         }
-        // Dev / push fallback: files copied into the app container Documents mirror.
-        if let documents = documentsLibraryURL() {
-            hold(documents)
-        }
+        release()
+    }
+
+    private static func isInsideAppContainer(_ url: URL) -> Bool {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let path = url.resolvingSymlinksInPath().standardizedFileURL.path
+        return path == home || path.hasPrefix(home + "/")
     }
 
     /// Sandbox hides this path on iPhone. It works if the process can already see iCloud Drive.
@@ -185,8 +236,8 @@ final class LibraryStore: ObservableObject {
         return candidate
     }
 
-    /// Same folder name under Documents — used when a security-scoped bookmark is missing
-    /// but library.json / episodes were pushed into the app container.
+    /// Same folder name under Documents, filled by `studio_push_iphone.py` /
+    /// `devicectl device copy to` when the phone is plugged into the Mac.
     private func documentsLibraryURL() -> URL? {
         guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
@@ -206,20 +257,35 @@ final class LibraryStore: ObservableObject {
     }
 
     private func hold(_ url: URL) {
+        release()
+        folderURL = url
+        scopeHeld = url.startAccessingSecurityScopedResource()
+    }
+
+    private func release() {
         if scopeHeld, let current = folderURL {
             current.stopAccessingSecurityScopedResource()
         }
-        folderURL = url
-        scopeHeld = url.startAccessingSecurityScopedResource()
-        hasFolder = true
+        folderURL = nil
+        scopeHeld = false
     }
 
-    private func loadEpisodes(from root: URL) -> [Episode] {
+    /// `localCopy` is the USB copy in Documents: nothing to download there, and an
+    /// entry whose mp3 never arrived is skipped instead of shown as downloading.
+    private func loadEpisodes(from root: URL, localCopy: Bool) -> LoadedLibrary {
         let fileManager = FileManager.default
         let episodesRoot = root.appendingPathComponent("episodes", isDirectory: true)
-        try? fileManager.startDownloadingUbiquitousItem(at: episodesRoot)
+        let libraryURL = root.appendingPathComponent("library.json")
+        var waiting = false
+        if !localCopy {
+            // The Mac replaces library.json on every publish; ask iCloud for the new version.
+            try? fileManager.startDownloadingUbiquitousItem(at: libraryURL)
+            try? fileManager.startDownloadingUbiquitousItem(at: episodesRoot)
+            waiting = CloudFile.isWaiting(libraryURL)
+        }
+        var listed: Set<String> = []
         var records: [String: EpisodeRecord] = [:]
-        if let library = decode(EpisodeLibrary.self, from: root.appendingPathComponent("library.json")) {
+        if let library = decode(EpisodeLibrary.self, from: libraryURL) {
             for record in library.episodes {
                 guard let id = record.id, EpisodeID.isSafe(id) else { continue }
                 records[id] = record
@@ -238,15 +304,21 @@ final class LibraryStore: ObservableObject {
                     record.title = records[id]?.title
                 }
                 records[id] = record
+                listed.insert(id)
             }
         }
-        return records.compactMap { pair -> Episode? in
+        let episodes = records.compactMap { pair -> Episode? in
             let id = pair.key
             let record = pair.value
             let folder = episodesRoot.appendingPathComponent(id, isDirectory: true)
             let audioURL = folder.appendingPathComponent("output.mp3")
             let local = LocalAudio.isPlayable(audioURL)
+            if localCopy && !local { return nil }
             if !local {
+                if !listed.contains(id) {
+                    // Listed in library.json before iCloud has shown us the folder itself.
+                    try? fileManager.startDownloadingUbiquitousItem(at: folder)
+                }
                 try? fileManager.startDownloadingUbiquitousItem(at: audioURL)
             }
             let title = record.title?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -268,10 +340,7 @@ final class LibraryStore: ObservableObject {
                 artworkKind: record.artworkKind
             )
         }
-        .sorted { lhs, rhs in
-            if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
-            return lhs.id > rhs.id
-        }
+        return LoadedLibrary(episodes: episodes, waiting: waiting)
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
@@ -290,6 +359,22 @@ final class LibraryStore: ObservableObject {
             result = try? Data(contentsOf: url)
         }
         return result
+    }
+}
+
+private struct LoadedLibrary {
+    var episodes: [Episode] = []
+    var waiting = false
+}
+
+private enum CloudFile {
+    /// True only for an iCloud item that exists but is not the current local version.
+    static func isWaiting(_ url: URL) -> Bool {
+        guard let values = try? url.resourceValues(forKeys: [.ubiquitousItemDownloadingStatusKey]),
+              let status = values.ubiquitousItemDownloadingStatus else {
+            return false
+        }
+        return status != .current
     }
 }
 
