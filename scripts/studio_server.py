@@ -7,6 +7,9 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 ROOT=Path(__file__).resolve().parents[1]
 MAX_UPLOAD=2*1024**3
+AUDIO_UPLOAD_EXT=('.wav','.mp3','.mp4','.m4a','.mov','.flac','.ogg','.webm','.aac')
+TEXT_UPLOAD_EXT=('.txt','.md')
+MAX_BOOK_UPLOAD=8*1024*1024
 
 from studio_preview import preview_limit, select_preview_segments
 from diarization_cache import assign_studio_voices
@@ -114,18 +117,34 @@ class Studio:
         if options.get('action','prepare') not in ('prepare','run'): raise ValueError('操作无效')
         if len({s.get('value') for s in sources})!=len(sources): raise ValueError('请移除重复来源')
         if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','edge') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
-        if options.get('content_type', 'conversation') not in ('conversation', 'monologue'): raise ValueError('内容类型无效')
+        content_type=options.get('content_type', 'conversation')
+        if content_type not in ('conversation', 'monologue', 'book'): raise ValueError('内容类型无效')
+        if content_type=='book':
+            if len(sources)!=1: raise ValueError('书听一次只收一份你自己的文本')
+            if options.get('tts','edge')!='edge': raise ValueError('书听只用一位朗读者的系统音色')
+            if options.get('book_language','zh') not in ('zh','en'): raise ValueError('书的语言无效')
         counts=[]
         for source in sources:
             if not isinstance(source, dict): raise ValueError('不支持的来源')
             counts.append(expected_speakers({**options, **{k: source[k] for k in ('expected_speakers',) if k in source}}))
+            if content_type=='book' and source.get('kind')!='upload':
+                raise ValueError('书听只接受你放入的 txt 或 md，不会从网上抓书')
             if source.get('kind')=='youtube':
                 u=urlparse(source.get('value') or '')
                 if u.scheme!='https' or u.hostname not in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be'): raise ValueError('请输入有效的 HTTPS YouTube 链接')
             elif source.get('kind')=='upload':
                 name=source.get('value')
                 if not isinstance(name, str) or not re.fullmatch(r'[a-f0-9]{32}\.[a-z0-9]{1,8}',name): raise ValueError('上传文件无效')
-                if not (self.root/'.uploads'/name).is_file(): raise ValueError('上传文件不存在')
+                upload=self.root/'.uploads'/name
+                if not upload.is_file(): raise ValueError('上传文件不存在')
+                suffix=Path(name).suffix.lower()
+                if content_type=='book':
+                    if suffix not in TEXT_UPLOAD_EXT: raise ValueError('书听只接受 txt 或 md')
+                    if upload.stat().st_size>MAX_BOOK_UPLOAD: raise ValueError('书稿请小于 8 MB')
+                elif suffix in TEXT_UPLOAD_EXT:
+                    raise ValueError('文本请用内容类型「书」')
+                elif suffix not in AUDIO_UPLOAD_EXT:
+                    raise ValueError('请选择常见音频或视频文件')
             elif source.get('kind')=='web':
                 from studio_urls import is_public_https
                 if not isinstance(source.get('value'), str) or not is_public_https(source['value']): raise ValueError('请输入公开的 HTTPS 链接')
@@ -138,8 +157,12 @@ class Studio:
                 import studio_publish_icloud
                 if source['kind']=='upload':
                     dest=p/('source'+Path(source['value']).suffix); shutil.move(str(self.root/'.uploads'/source['value']),dest)
-                    src={'kind':'local','value':str(dest)}
-                    label=source.get('title') or dest.name
+                    if content_type=='book':
+                        src={'kind':'text','value':str(dest)}
+                        label=Path(str(source.get('title') or dest.name)).stem or dest.stem
+                    else:
+                        src={'kind':'local','value':str(dest)}
+                        label=source.get('title') or dest.name
                 elif source['kind']=='web':
                     from studio_urls import canonical_url, web_label
                     canonical=canonical_url(source['value'])
@@ -155,8 +178,11 @@ class Studio:
                     src=source
                     label=studio_publish_icloud.youtube_id_from_url(source['value']) or ident
                 config={'source':src,'provider':provider,'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
-                config.update(content_type=options.get('content_type','conversation'), expected_speakers=count)
-                if src['kind']=='youtube': config['diarization_threshold']=0.9
+                config.update(content_type=content_type, expected_speakers=count)
+                if content_type=='book':
+                    config['diarization']='skipped'
+                    config['book_language']=options.get('book_language','zh')
+                elif src['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':label,'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()})
                 if src['kind']=='youtube':
@@ -184,7 +210,9 @@ class Studio:
         with self.lock:
             p=self.job(ident); self.migrate_assets(p); s=read(p/'state.json',{})
             if s.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后切换声音')
-            config=read(p/'config.json',{}); config['tts']=backend; write(p/'config.json',config)
+            config=read(p/'config.json',{})
+            if config.get('content_type')=='book' and backend!='edge': raise ValueError('书听只用一位朗读者的系统音色')
+            config['tts']=backend; write(p/'config.json',config)
     def set_expected_speakers(self, ident, count):
         with self.lock:
             p=self.job(ident); state=read(p/'state.json',{})
@@ -352,7 +380,7 @@ class Handler(BaseHTTPRequestHandler):
             length=int(self.headers.get('Content-Length','0'))
             if path=='/api/uploads':
                 ext=Path(unquote(self.headers.get('X-Filename',''))).suffix.lower()
-                if ext not in ('.wav','.mp3','.mp4','.m4a','.mov','.flac','.ogg','.webm','.aac'): raise ValueError('请选择常见音频或视频文件')
+                if ext not in AUDIO_UPLOAD_EXT+TEXT_UPLOAD_EXT: raise ValueError('请选择常见音频、视频，或书稿 txt / md')
                 if not 0<length<=MAX_UPLOAD: raise ValueError('文件大小须在 2 GB 以内')
                 folder=studio.root/'.uploads'; folder.mkdir(exist_ok=True); ident=uuid.uuid4().hex+ext; target=folder/ident
                 try:

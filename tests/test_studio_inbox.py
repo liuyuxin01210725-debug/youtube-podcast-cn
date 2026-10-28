@@ -174,6 +174,16 @@ class InboxTests(unittest.TestCase):
                     engine.acquire({'source': {'kind': 'web', 'value': 'https://cdn.example.com/show.mp3'}})
                 download.assert_called_once()
 
+    def test_share_cannot_enqueue_a_book_url(self):
+        ident = '9' * 32
+        share(self.inbox, ident, 'https://example.com/some-book')
+        path = self.inbox / f'{ident}.json'
+        atomic_write_json(path, {**json.loads(path.read_text(encoding='utf-8')), 'content_type': 'book', 'expected_speakers': 1})
+        result = process_inbox(self.library, self.jobs, run=False)
+        self.assertEqual(result[0]['status'], 'failed')
+        self.assertEqual(result[0]['id'], ident)
+        self.assertEqual([p for p in self.jobs.iterdir() if p.is_dir()], [])
+
     def test_server_busy_follows_the_lock(self):
         self.jobs.mkdir()
         self.assertFalse(server_busy(self.jobs))

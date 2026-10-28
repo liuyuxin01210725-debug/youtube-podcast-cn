@@ -249,6 +249,76 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(self.request(f'/api/jobs/{ident}/action', {'action': 'render', 'preview': True, 'accept_unreviewed': 'true'})[0], 200)
         self.assertFalse(read(p / 'state.json')['accept_unreviewed'])
 
+    def test_book_job_is_one_narrator_and_not_a_scraped_url(self):
+        folder = self.studio.root / '.uploads'
+        folder.mkdir()
+        name = 'ab' * 16 + '.txt'
+        (folder / name).write_text('第一章\n\n你好。\n', encoding='utf-8')
+        ident = self.studio.create([{'kind': 'upload', 'value': name, 'title': '示例书.txt'}], {'content_type': 'book', 'action': 'prepare'})[0]
+        config = read(self.studio.job(ident) / 'config.json')
+        self.assertEqual(config['content_type'], 'book')
+        self.assertEqual(config['expected_speakers'], 1)
+        self.assertEqual(config['diarization'], 'skipped')
+        self.assertEqual(config['tts'], 'edge')
+        self.assertEqual(config['source']['kind'], 'text')
+        self.assertTrue(config['source']['value'].endswith('.txt'))
+        self.assertNotIn('diarization_threshold', config)
+        self.assertEqual(read(self.studio.job(ident) / 'state.json')['title'], '示例书')
+        jobs_before = {p.name for p in self.studio.root.iterdir() if p.is_dir() and p.name != '.uploads'}
+        with self.assertRaisesRegex(ValueError, '不会从网上抓书'):
+            self.studio.create([{'kind': 'youtube', 'value': 'https://youtu.be/abc'}], {'content_type': 'book'})
+        other = 'cd' * 16 + '.txt'
+        (folder / other).write_text('你好', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '书听只允许 1'):
+            self.studio.create([{'kind': 'upload', 'value': other}], {'content_type': 'book', 'expected_speakers': 2})
+        audio = 'ef' * 16 + '.mp3'
+        (folder / audio).write_bytes(b'not-audio')
+        with self.assertRaisesRegex(ValueError, 'txt'):
+            self.studio.create([{'kind': 'upload', 'value': audio}], {'content_type': 'book'})
+        prose = '12' * 16 + '.txt'
+        (folder / prose).write_text('不是播客', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '文本请用内容类型'):
+            self.studio.create([{'kind': 'upload', 'value': prose}], {})
+        self.assertEqual({p.name for p in self.studio.root.iterdir() if p.is_dir() and p.name != '.uploads'}, jobs_before)
+        self.studio.action(ident, 'cancel')
+        with self.assertRaisesRegex(ValueError, '书听只允许 1'):
+            self.studio.set_expected_speakers(ident, 2)
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 1)
+        with self.assertRaisesRegex(ValueError, '系统音色'):
+            self.studio.voice(ident, 'clone')
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
+        write(self.studio.job(ident) / 'document.json', {
+            'segments': [
+                {'id': 'a', 'speaker_id': 'narrator', 'chinese': '你好'},
+                {'id': 'b', 'speaker_id': 'other', 'chinese': '你好'},
+            ],
+            'speakers': {'narrator': {'voice_slot': 'male_1'}, 'other': {'voice_slot': 'male_2'}},
+        })
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        self.assertFalse(read(self.studio.job(ident) / 'document.json').get('voices_confirmed', False))
+
+    def test_upload_accepts_user_text_and_rejects_pdf(self):
+        import http.client
+
+        def upload(filename, body):
+            connection = http.client.HTTPConnection('127.0.0.1', self.port)
+            connection.request('POST', '/api/uploads', body, {
+                'X-CSRF-Token': self.studio.token,
+                'X-Filename': filename,
+            })
+            response = connection.getresponse()
+            payload = response.read()
+            status = response.status
+            connection.close()
+            return status, payload
+
+        status, payload = upload('notes.txt', '第一章\n你好'.encode())
+        self.assertEqual(status, 200)
+        self.assertIn(b'.txt', payload)
+        status, payload = upload('book.pdf', b'%PDF-1.4')
+        self.assertEqual(status, 400)
+        self.assertIn('txt', payload.decode())
+
     def test_info_surfaces_subtitle_fallback_reason(self):
         with tempfile.TemporaryDirectory() as root:
             studio = Studio(root, engine=['/bin/true'])

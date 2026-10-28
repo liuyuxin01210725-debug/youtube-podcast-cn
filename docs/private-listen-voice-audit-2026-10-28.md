@@ -1,5 +1,7 @@
 # 私人听多音色审计 · Mark Cuban / DOAC（2026-10-28 Asia/Shanghai）
 
+状态：`expected_speakers` 硬闸已接上入队、准备译稿和合成。`voices_confirmed` 不能绕过人数或共槽。Cuban / Creatine 已出片的成片不返工。验收是音色数等于真实人数且逐人可辨。
+
 ## 对象
 - Job：`/Users/liuyuxin/Desktop/音频/中文播客工作台/jobs/07c1dddbdc684968b69199ad4f32e86b`
 - 源：`6VTSAs4Rsck` · Mark Cuban · The Diary Of A CEO

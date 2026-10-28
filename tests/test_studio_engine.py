@@ -413,6 +413,77 @@ class StudioTests(unittest.TestCase):
             self.assertEqual(state['title'], metadata['display_title'])
             self.assertNotIn('http', state['title'])
 
+    def test_book_prepare_skips_diarization_and_refuses_one_whole_file(self):
+        paragraph = '这是用来填满一块听书的句子。' * 40
+        chunk = '\n\n'.join([paragraph] * 8)
+        text = '第一章 开端\n\n' + chunk + '\n\n第二章 后来\n\n' + chunk
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            path = engine.job / 'source.txt'
+            path.write_text(text, encoding='utf-8')
+            config = {
+                'content_type': 'book', 'expected_speakers': 1, 'tts': 'edge',
+                'diarization': 'skipped', 'book_language': 'zh',
+                'source': {'kind': 'text', 'value': str(path)},
+            }
+            with patch.object(engine, 'diarize_with_progress') as diarize, patch.object(engine, 'acquire') as acquire, patch('studio_engine.create_translation_client') as translate, patch('studio_engine.build_backend') as build, patch.object(engine, 'publish_private_library') as publish:
+                engine.run(config, 'prepare')
+                diarize.assert_not_called()
+                acquire.assert_not_called()
+                translate.assert_not_called()
+                build.assert_not_called()
+                publish.assert_not_called()
+            book = json.loads((engine.job / 'book.json').read_text())
+            blocks = [block for chapter in book['chapters'] for block in chapter['blocks']]
+            self.assertGreaterEqual(len(book['chapters']), 2)
+            self.assertGreaterEqual(len(blocks), 2)
+            self.assertEqual(book['narrator']['voice_slot'], 'male_1')
+            self.assertFalse(book['whole_book_file'])
+            document = json.loads((engine.job / 'document.json').read_text())
+            self.assertEqual({segment['speaker_id'] for segment in document['segments']}, {'narrator'})
+            self.assertEqual(len(document['segments']), len(blocks))
+            progress = json.loads((engine.job / 'progress.json').read_text())
+            self.assertEqual(progress['chapter_id'], book['progress']['chapter_id'])
+            self.assertEqual(progress['block_id'], book['progress']['block_id'])
+            self.assertEqual(progress['offset_chars'], 0)
+            self.assertFalse((engine.job / 'output.mp3').exists())
+            with patch.object(engine, 'diarize_with_progress') as diarize, patch('studio_engine.build_backend') as build, patch.object(engine, 'publish_private_library') as publish:
+                with self.assertRaisesRegex(ValueError, '整本一条'):
+                    engine.run(config, 'run')
+                diarize.assert_not_called()
+                build.assert_not_called()
+                publish.assert_not_called()
+            failed = json.loads((engine.job / 'progress.json').read_text())
+            self.assertEqual(failed['stage'], 'failed')
+            self.assertEqual(failed['chapter_id'], book['progress']['chapter_id'])
+            self.assertEqual(failed['offset_chars'], 0)
+            self.assertIn('整本一条', failed['message'])
+            self.assertFalse((engine.job / 'output.mp3').exists())
+
+    def test_book_gate_blocks_a_second_voice_and_never_fetches_a_url(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            path = engine.job / 'source.txt'
+            path.write_text('短。', encoding='utf-8')
+            with patch.object(engine, 'diarize_with_progress') as diarize, patch.object(engine, 'acquire') as acquire:
+                with self.assertRaisesRegex(ValueError, '禁止声纹'):
+                    engine.prepare({'content_type': 'book', 'expected_speakers': 1}, Path('unused.wav'))
+                with self.assertRaisesRegex(ValueError, '不会从链接抓书'):
+                    engine.run({'content_type': 'book', 'source': {'kind': 'text', 'value': 'https://example.com/book.txt'}}, 'prepare')
+                with self.assertRaisesRegex(ValueError, '书听只允许 1'):
+                    engine.run({'content_type': 'book', 'expected_speakers': 2, 'source': {'kind': 'text', 'value': str(path)}}, 'prepare')
+                diarize.assert_not_called()
+                acquire.assert_not_called()
+            self.assertFalse((engine.job / 'book.json').exists())
+            self.assertFalse((engine.job / 'output.mp3').exists())
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            with patch.object(engine, 'diarize_with_progress') as diarize, patch.object(engine, 'acquire') as acquire:
+                with self.assertRaisesRegex(ValueError, '不会下载或抓取'):
+                    engine.run({'content_type': 'book', 'source': {'kind': 'youtube', 'value': 'https://youtu.be/abcdefghijk'}}, 'prepare')
+                diarize.assert_not_called()
+                acquire.assert_not_called()
+
     def test_valid_audio_does_not_hide_missing_ffmpeg(self):
         with tempfile.TemporaryDirectory() as root:
             engine = StudioEngine(root)

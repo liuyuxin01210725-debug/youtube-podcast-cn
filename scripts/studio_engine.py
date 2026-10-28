@@ -391,9 +391,74 @@ class StudioEngine:
         finally:
             self.process = None
 
+    def owned_text(self, value):
+        """A user-supplied text file inside this job. Never a remote book URL."""
+        if not isinstance(value, str) or not value.strip():
+            raise StudioInputError('书听只读你放进任务的文本，不会下载或抓取书源')
+        if value.strip().lower().startswith(('http://', 'https://')):
+            raise StudioInputError('书听不会从链接抓书')
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.job / path
+        if path.is_symlink() or not path.is_file():
+            raise StudioInputError('书稿必须在任务目录内')
+        path = path.resolve()
+        if not path.is_relative_to(self.job.resolve()):
+            raise StudioInputError('书稿必须在任务目录内')
+        if path.suffix.lower() not in ('.txt', '.md'):
+            raise StudioInputError('书听只接受 txt 或 md')
+        return path
+
+    def _book_cursor(self):
+        try:
+            stored = json.loads((self.job / 'book.json').read_text())
+        except (OSError, ValueError):
+            return {}
+        cursor = stored.get('progress') if isinstance(stored, dict) else None
+        if not isinstance(cursor, dict):
+            return {}
+        return {key: cursor[key] for key in ('chapter_id', 'block_id', 'offset_chars') if key in cursor}
+
+    def finish_book(self, config, action):
+        """Write chapters/blocks and skip diarization. Do not render one whole-book file."""
+        from studio_books import build_book, narrator_document, read_user_text, resume_fields
+
+        source = config.get('source') or {}
+        if source.get('kind') != 'text':
+            raise StudioInputError('书听只读你放进任务的文本，不会下载或抓取书源')
+        path = self.owned_text(source.get('value'))
+        expected_speakers(config)
+        if config.get('diarization') not in (None, 'skipped', 'off'):
+            raise StudioInputError('书听不能开启声纹')
+        book_path = self.job / 'book.json'
+        document_path = self.job / 'document.json'
+        if action == 'prepare' or not book_path.is_file():
+            book = build_book(
+                read_user_text(path),
+                title=path.stem,
+                language=config.get('book_language') or 'zh',
+            )
+            document = narrator_document(book)
+            validate_speaker_voices(config, document)
+            atomic_json(book_path, book)
+            atomic_json(document_path, document)
+        else:
+            book = json.loads(book_path.read_text())
+            document = json.loads(document_path.read_text()) if document_path.is_file() else narrator_document(book)
+            validate_speaker_voices(config, document)
+        self.stage = 'book'
+        if action == 'prepare':
+            self.progress(
+                'complete',
+                **resume_fields(book),
+                message='书已按章和块切开。声纹已跳过。按章合成与手机目录留到下一版。',
+            )
+            return None
+        raise StudioInputError('书听不生成整本一条 MP3。章节已写入 book.json，按章合成留到下一版。')
+
     def prepare(self, config, wav):
         if config.get('content_type') == 'book':
-            raise StudioInputError('书听禁止声纹分析；请使用 studio_books 的章/块入口')
+            raise StudioInputError('书听禁止声纹分析')
         # Default cluster threshold strategy (do not raise to "fix" oversplit):
         # - local files: 0.5 (sherpa default; preserves real guest splits)
         # - YouTube interviews: 0.9 (0.5 over-splits long talk shows into ghost IDs)
@@ -619,12 +684,18 @@ class StudioEngine:
             self.progress('source')
             self.check_cancel()
             source_identity = dict(config['source'])
-            if source_identity.get('kind') == 'local':
+            if source_identity.get('kind') == 'text':
+                owned = self.owned_text(source_identity.get('value'))
+                source_identity['value'] = str(owned)
+                source_identity['sha256'] = sha256_file(owned)
+            elif source_identity.get('kind') == 'local':
                 source_identity['sha256'] = sha256_file(Path(source_identity['value']).expanduser())
             identity_path = self.job / 'source-identity.json'
             if identity_path.exists() and json.loads(identity_path.read_text()) != source_identity:
                 raise StudioInputError('来源已经改变，请为新来源创建新任务')
             atomic_json(identity_path, source_identity)
+            if config.get('content_type') == 'book':
+                return self.finish_book(config, action)
             document_path = self.job / 'document.json'
             if action == 'prepare' or not document_path.exists():
                 wav = self.acquire(config)
@@ -657,7 +728,7 @@ class StudioEngine:
                 pass
             visible = user_facing_message(error)
             # Never serialize arbitrary exception strings: SDKs may embed credentials.
-            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, (StudioError, SpeakerGateError)) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试')
+            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, (StudioError, SpeakerGateError)) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试', **self._book_cursor())
             raise
         finally:
             shutil.rmtree(self.temp, ignore_errors=False)
