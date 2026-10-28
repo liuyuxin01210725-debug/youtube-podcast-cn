@@ -6,6 +6,21 @@ class SpeakerGateError(ValueError):
     code = 'speaker_gate_failed'
 
 
+def use_male_slots(config):
+    """Default 1–3 person shows to male slots so an ad read cannot invent a female voice.
+
+    Four or five real speakers still use the full pool: there are only three
+    male slots, and the voice gate requires one distinct slot each. Set
+    ``prefer_male_slots`` false when a two-hander actually has a woman.
+    """
+    expected = expected_speakers(config)
+    if expected > 3:
+        return False
+    if 'prefer_male_slots' in config:
+        return config.get('prefer_male_slots') is True
+    return True
+
+
 def expected_speakers(config):
     # Legacy jobs get the same safe defaults; never infer N from a bad document.
     count = config.get('expected_speakers', config.get('speaker_count'))

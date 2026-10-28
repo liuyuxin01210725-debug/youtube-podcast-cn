@@ -13,7 +13,7 @@ MAX_BOOK_UPLOAD=8*1024*1024
 
 from studio_preview import preview_limit, select_preview_segments
 from diarization_cache import assign_studio_voices
-from studio_speakers import expected_speakers, validate_speaker_voices
+from studio_speakers import expected_speakers, use_male_slots, validate_speaker_voices
 
 def as_bool(value):
     return value is True
@@ -182,7 +182,12 @@ class Studio:
                 if content_type=='book':
                     config['diarization']='skipped'
                     config['book_language']=options.get('book_language','zh')
-                elif src['kind']=='youtube': config['diarization_threshold']=0.9
+                else:
+                    if 'prefer_male_slots' in options:
+                        config['prefer_male_slots']=options.get('prefer_male_slots') is True and count<=3
+                    else:
+                        config['prefer_male_slots']=count<=3
+                if src['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':label,'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()})
                 if src['kind']=='youtube':
@@ -262,7 +267,7 @@ class Studio:
         """Reapply the male-first studio default in first-appearance order."""
         with self.lock:
             p, state, doc = self._editable(ident)
-            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict)])
+            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict) and not segment.get('is_ad')], male_only=use_male_slots(read(p/'config.json',{})))
             for speaker, slot in slots.items():
                 record=doc['speakers'].get(speaker)
                 if isinstance(record, dict):

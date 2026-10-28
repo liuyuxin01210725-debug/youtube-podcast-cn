@@ -56,6 +56,7 @@ class ServerTests(unittest.TestCase):
         ident = self.create()
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 2)
+        self.assertTrue(read(self.studio.job(ident) / 'config.json')['prefer_male_slots'])
 
     def test_expected_speaker_defaults_overrides_and_atomic_validation(self):
         sources = [{'kind': 'web', 'value': 'https://example.com/solo'}]
@@ -63,6 +64,9 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 1)
         ident = self.studio.create(sources, {'expected_speakers': 3})[0]
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 3)
+        self.assertTrue(read(self.studio.job(ident) / 'config.json')['prefer_male_slots'])
+        ident = self.studio.create(sources, {'expected_speakers': 4})[0]
+        self.assertFalse(read(self.studio.job(ident) / 'config.json')['prefer_male_slots'])
         ident = self.studio.create([{**sources[0], 'expected_speakers': 4}], {'expected_speakers': 2})[0]
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 4)
         for invalid in (0, 6, True, 2.0, '2'):

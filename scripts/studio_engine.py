@@ -27,7 +27,8 @@ from diarization_cache import assign_studio_voices
 from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
 from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
-from studio_speakers import SpeakerGateError, expected_speakers, validate_speaker_ids, validate_speaker_voices
+from studio_ads import ad_only_speakers, fold_ad_speakers, group_key, mark_sponsor_windows, split_group_key
+from studio_speakers import SpeakerGateError, expected_speakers, use_male_slots, validate_speaker_ids, validate_speaker_voices
 from temporary_audio import download_audio_only, sha256_file
 from tts_backends import TTSBackendError, build_backend, SynthesisRequest
 
@@ -479,15 +480,53 @@ class StudioEngine:
         self.progress('diarization', 0, 100)
         bounds = SpeakerBounds(exact=expected_speakers(config))
         turns = self.diarize_with_progress(wav, bounds)
-        validate_speaker_ids(config, (turn.speaker_id for turn in turns))
         assignments = align_caption_pieces(pieces, turns)
-        validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=bounds, assignments=assignments)
         # One distant cue (outro, music) used to abort after diarization.
         # Keep the 20% unassigned gate above; attach the rest for review.
         assignments = fill_unassigned_for_review(pieces, turns, assignments)
-        segments = group_caption_pieces(pieces, {a.source_index: a.speaker_id for a in assignments}, {a.source_index for a in assignments if a.ambiguous}, max_chars=180)
-        validate_speaker_ids(config, (segment.speaker_id for segment in segments))
-        self.progress('translation', 0, len(segments))
+        speaker_of = {item.source_index: item.speaker_id for item in assignments}
+        ambiguous = {item.source_index for item in assignments if item.ambiguous}
+        # Mark sponsor cues on raw lines so grouping cannot glue an ad onto the next answer.
+        marked_pieces = mark_sponsor_windows([
+            {
+                'id': piece.source_index,
+                'start_ms': piece.start_ms,
+                'end_ms': piece.end_ms,
+                'text': piece.text,
+                'speaker_id': speaker_of[piece.source_index],
+            }
+            for piece in pieces
+        ])
+        grouped = group_caption_pieces(
+            pieces,
+            {row['id']: group_key(row.get('speaker_id'), row.get('is_ad')) for row in marked_pieces},
+            ambiguous,
+            max_chars=180,
+        )
+        records = []
+        for segment in grouped:
+            speaker, is_ad = split_group_key(segment.speaker_id)
+            row = asdict(segment)
+            row['speaker_id'] = speaker
+            row['is_ad'] = is_ad
+            records.append(row)
+        ad_only = ad_only_speakers(turns, records)
+        records = fold_ad_speakers(records, ad_only)
+        # The hard gate counts everyone except a short voice that only sits in the sponsor window.
+        validate_speaker_ids(config, (turn.speaker_id for turn in turns if turn.speaker_id not in ad_only))
+        validate_speaker_ids(config, (record.get('speaker_id') for record in records))
+        # Structural checks still run. Exact raw cluster count does not, because an ad read is an extra id.
+        validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=SpeakerBounds(minimum=1, maximum=6), assignments=assignments)
+        spoken = [
+            SubtitleSegment(
+                id=record['id'], start_ms=record['start_ms'], end_ms=record['end_ms'], text=record['text'],
+                speaker_id=record.get('speaker_id'), ambiguous=bool(record.get('ambiguous')),
+            )
+            for record in records if not record.get('is_ad')
+        ]
+        if not spoken:
+            raise StudioInputError('整段都被识别成口播广告，没有可朗读的对白')
+        self.progress('translation', 0, len(spoken))
         provider = config.get('provider', 'deepseek')
         client = create_translation_client(provider, api_key=self.credential(provider))
         translated_count = 0
@@ -496,15 +535,17 @@ class StudioEngine:
             self.check_cancel()
             result = client.translate(batch)
             translated_count += len(batch)
-            self.progress('translation', translated_count, len(segments))
+            self.progress('translation', translated_count, len(spoken))
             return result
-        translated = translate_with_resume(segments, self.job / 'translations', translate, translation_identity=client.translation_identity)
-        if translated_count < len(segments):
+        translated = translate_with_resume(spoken, self.job / 'translations', translate, translation_identity=client.translation_identity)
+        if translated_count < len(spoken):
             # Cache hits never call translate(); snap progress to done for ETA UI.
-            self.progress('translation', len(segments), len(segments))
+            self.progress('translation', len(spoken), len(spoken))
         reference_pieces = self.reference_pieces if self.reference_pieces is not None else pieces
         reference_assignments = align_caption_pieces(reference_pieces, turns) if self.reference_pieces is not None else assignments
         refs = select_references(reference_pieces, reference_assignments, turns)
+        kept = {record.get('speaker_id') for record in records}
+        refs = {speaker: ref for speaker, ref in refs.items() if speaker in kept}
         references = {}
         reference_dir = self.job / 'references'
         reference_dir.mkdir(exist_ok=True)
@@ -514,9 +555,16 @@ class StudioEngine:
             output = reference_dir / name
             self.ffmpeg('-ss', ref['start_ms'] / 1000, '-i', wav, '-t', (ref['end_ms'] - ref['start_ms']) / 1000, output)
             references[speaker] = {**ref, 'path': str(output.relative_to(self.job)), 'sha256': sha256_file(output)}
-        voice_slots = assign_studio_voices([s.speaker_id for s in segments])
+        voice_slots = assign_studio_voices(
+            [record.get('speaker_id') for record in records],
+            male_only=use_male_slots(config),
+        )
         document = {'schema_version': 1, 'transcript_source': transcript_source,
-                    'segments': [{**asdict(s), 'chinese': translated[s.id], 'speaker_id': s.speaker_id} for s in segments],
+                    'segments': [{
+                        **record,
+                        'chinese': '' if record.get('is_ad') else translated[record['id']],
+                        'speaker_id': record.get('speaker_id'),
+                    } for record in records],
                     'speakers': {speaker: {'voice_slot': slot} for speaker, slot in voice_slots.items()}, 'references': references}
         atomic_json(self.job / 'document.json', document)
         return document
@@ -549,6 +597,10 @@ class StudioEngine:
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
             raise StudioInputError('段落为空或编号重复')
+        # Drop sponsor windows. Do not insert silence; the surrounding lines join.
+        segments = [segment for segment in segments if not segment.get('is_ad')]
+        if not segments:
+            raise StudioInputError('没有可朗读的对白（口播广告已跳过）')
         selected = segments if preview is None else select_preview_segments(segments, int(preview))
         if not selected:
             raise StudioInputError('试听段数必须大于零')
