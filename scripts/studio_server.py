@@ -7,9 +7,13 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 ROOT=Path(__file__).resolve().parents[1]
 MAX_UPLOAD=2*1024**3
+AUDIO_UPLOAD_EXT=('.wav','.mp3','.mp4','.m4a','.mov','.flac','.ogg','.webm','.aac')
+TEXT_UPLOAD_EXT=('.txt','.md')
+MAX_BOOK_UPLOAD=8*1024*1024
 
 from studio_preview import preview_limit, select_preview_segments
 from diarization_cache import assign_studio_voices
+from studio_speakers import expected_speakers, use_male_slots, validate_speaker_voices
 
 def as_bool(value):
     return value is True
@@ -85,6 +89,7 @@ class Studio:
                 digest=hashlib.sha256(f.read_bytes()).hexdigest() if f.is_relative_to(p.resolve()) and f.is_file() else None
                 refs[sid]={'text':ref.get('text'),'sha256':digest}
         identity={'segments':[{k:s.get(k) for k in ('id','chinese','speaker_id')} for s in selected], 'voices':voices,'references':refs,'backend':backend,'clone_model':config.get('clone_model')}
+        if 'expected_speakers' in config: identity['expected_speakers']=config['expected_speakers']
         return hashlib.sha256(json.dumps(identity,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     def migrate_assets(self,p):
         s=read(p/'state.json',{}); assets=s.setdefault('asset_revisions',{})
@@ -112,15 +117,34 @@ class Studio:
         if options.get('action','prepare') not in ('prepare','run'): raise ValueError('操作无效')
         if len({s.get('value') for s in sources})!=len(sources): raise ValueError('请移除重复来源')
         if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','edge') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
+        content_type=options.get('content_type', 'conversation')
+        if content_type not in ('conversation', 'monologue', 'book'): raise ValueError('内容类型无效')
+        if content_type=='book':
+            if len(sources)!=1: raise ValueError('书听一次只收一份你自己的文本')
+            if options.get('tts','edge')!='edge': raise ValueError('书听只用一位朗读者的系统音色')
+            if options.get('book_language','zh') not in ('zh','en'): raise ValueError('书的语言无效')
+        counts=[]
         for source in sources:
             if not isinstance(source, dict): raise ValueError('不支持的来源')
+            counts.append(expected_speakers({**options, **{k: source[k] for k in ('expected_speakers',) if k in source}}))
+            if content_type=='book' and source.get('kind')!='upload':
+                raise ValueError('书听只接受你放入的 txt 或 md，不会从网上抓书')
             if source.get('kind')=='youtube':
                 u=urlparse(source.get('value') or '')
                 if u.scheme!='https' or u.hostname not in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be'): raise ValueError('请输入有效的 HTTPS YouTube 链接')
             elif source.get('kind')=='upload':
                 name=source.get('value')
                 if not isinstance(name, str) or not re.fullmatch(r'[a-f0-9]{32}\.[a-z0-9]{1,8}',name): raise ValueError('上传文件无效')
-                if not (self.root/'.uploads'/name).is_file(): raise ValueError('上传文件不存在')
+                upload=self.root/'.uploads'/name
+                if not upload.is_file(): raise ValueError('上传文件不存在')
+                suffix=Path(name).suffix.lower()
+                if content_type=='book':
+                    if suffix not in TEXT_UPLOAD_EXT: raise ValueError('书听只接受 txt 或 md')
+                    if upload.stat().st_size>MAX_BOOK_UPLOAD: raise ValueError('书稿请小于 8 MB')
+                elif suffix in TEXT_UPLOAD_EXT:
+                    raise ValueError('文本请用内容类型「书」')
+                elif suffix not in AUDIO_UPLOAD_EXT:
+                    raise ValueError('请选择常见音频或视频文件')
             elif source.get('kind')=='web':
                 from studio_urls import is_public_https
                 if not isinstance(source.get('value'), str) or not is_public_https(source['value']): raise ValueError('请输入公开的 HTTPS 链接')
@@ -128,13 +152,17 @@ class Studio:
         fetched=_youtube_metadata(sources)
         provider=options.get('provider','deepseek')
         with self.lock:
-            for source in sources:
+            for source, count in zip(sources, counts):
                 ident=uuid.uuid4().hex; p=self.root/ident; p.mkdir()
                 import studio_publish_icloud
                 if source['kind']=='upload':
                     dest=p/('source'+Path(source['value']).suffix); shutil.move(str(self.root/'.uploads'/source['value']),dest)
-                    src={'kind':'local','value':str(dest)}
-                    label=source.get('title') or dest.name
+                    if content_type=='book':
+                        src={'kind':'text','value':str(dest)}
+                        label=Path(str(source.get('title') or dest.name)).stem or dest.stem
+                    else:
+                        src={'kind':'local','value':str(dest)}
+                        label=source.get('title') or dest.name
                 elif source['kind']=='web':
                     from studio_urls import canonical_url, web_label
                     canonical=canonical_url(source['value'])
@@ -150,6 +178,15 @@ class Studio:
                     src=source
                     label=studio_publish_icloud.youtube_id_from_url(source['value']) or ident
                 config={'source':src,'provider':provider,'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
+                config.update(content_type=content_type, expected_speakers=count)
+                if content_type=='book':
+                    config['diarization']='skipped'
+                    config['book_language']=options.get('book_language','zh')
+                else:
+                    if 'prefer_male_slots' in options:
+                        config['prefer_male_slots']=options.get('prefer_male_slots') is True and count<=3
+                    else:
+                        config['prefer_male_slots']=count<=3
                 if src['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':label,'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()})
@@ -178,7 +215,21 @@ class Studio:
         with self.lock:
             p=self.job(ident); self.migrate_assets(p); s=read(p/'state.json',{})
             if s.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后切换声音')
-            config=read(p/'config.json',{}); config['tts']=backend; write(p/'config.json',config)
+            config=read(p/'config.json',{})
+            if config.get('content_type')=='book' and backend!='edge': raise ValueError('书听只用一位朗读者的系统音色')
+            config['tts']=backend; write(p/'config.json',config)
+    def set_expected_speakers(self, ident, count):
+        with self.lock:
+            p=self.job(ident); state=read(p/'state.json',{})
+            if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+            config=read(p/'config.json',{}); config['expected_speakers']=count
+            expected_speakers(config)
+            self.migrate_assets(p)
+            write(p/'config.json',config)
+            doc=read(p/'document.json')
+            if doc:
+                doc['voices_confirmed']=False; write(p/'document.json',doc)
+            state['stale']=True; state['updated_at']=time.time(); write(p/'state.json',state)
     def action(self,ident,action,preview=False,accept_unreviewed=False):
         with self.lock:
             p=self.job(ident); s=read(p/'state.json',{})
@@ -216,7 +267,7 @@ class Studio:
         """Reapply the male-first studio default in first-appearance order."""
         with self.lock:
             p, state, doc = self._editable(ident)
-            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict)])
+            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict) and not segment.get('is_ad')], male_only=use_male_slots(read(p/'config.json',{})))
             for speaker, slot in slots.items():
                 record=doc['speakers'].get(speaker)
                 if isinstance(record, dict):
@@ -227,6 +278,7 @@ class Studio:
     def confirm_voices(self, ident):
         with self.lock:
             p, state, doc = self._editable(ident)
+            validate_speaker_voices(read(p/'config.json',{}), doc)
             doc['voices_confirmed']=True
             write(p/'document.json', doc)
             state['updated_at']=time.time(); write(p/'state.json', state)
@@ -333,7 +385,7 @@ class Handler(BaseHTTPRequestHandler):
             length=int(self.headers.get('Content-Length','0'))
             if path=='/api/uploads':
                 ext=Path(unquote(self.headers.get('X-Filename',''))).suffix.lower()
-                if ext not in ('.wav','.mp3','.mp4','.m4a','.mov','.flac','.ogg','.webm','.aac'): raise ValueError('请选择常见音频或视频文件')
+                if ext not in AUDIO_UPLOAD_EXT+TEXT_UPLOAD_EXT: raise ValueError('请选择常见音频、视频，或书稿 txt / md')
                 if not 0<length<=MAX_UPLOAD: raise ValueError('文件大小须在 2 GB 以内')
                 folder=studio.root/'.uploads'; folder.mkdir(exist_ok=True); ident=uuid.uuid4().hex+ext; target=folder/ident
                 try:
@@ -349,10 +401,11 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
             data=json.loads(self.rfile.read(length))
             if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
-            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|confirm-speakers|voice-slots|confirm-voices)',path)
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|expected-speakers|confirm-speakers|voice-slots|confirm-voices)',path)
             if not m: raise ValueError('操作不存在')
             if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False),data.get('accept_unreviewed',False))
             elif m[2]=='voice': studio.voice(m[1],data['tts'])
+            elif m[2]=='expected-speakers': studio.set_expected_speakers(m[1],data['expected_speakers'])
             elif m[2]=='confirm-speakers': studio.confirm_speakers(m[1])
             elif m[2]=='voice-slots':
                 if not isinstance(data, dict) or data.get('scheme')!='male_first': raise ValueError('音色方案无效')
@@ -369,6 +422,7 @@ class Handler(BaseHTTPRequestHandler):
                         # A text edit must not sign off every 待核对 row. Only the
                         # row whose speaker actually changed is confirmed here.
                         confirmed = original.get('speaker_id') != new.get('speaker_id')
+                        if confirmed: doc['voices_confirmed']=False
                         original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False if confirmed else bool(original.get('ambiguous')))
                     for ident,slot in data.get('voices',{}).items():
                         if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')

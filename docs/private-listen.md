@@ -285,3 +285,7 @@ python3 scripts/studio_publish_icloud.py \
 2. Mac 上完整生成一期。工作台窗口（或引擎输出）会打印「私人听：已同步到 iPhone「…」」。任务目录里 `private-listen-device.json` 的 `ok` 是 `true`。
 3. 手机下拉，新一期马上能播，不用等 iCloud。
 4. 拔掉线再生成一期，日志写「跳过 iPhone 直连同步（没有连着的 iPhone）」，任务照常成功，节目走 iCloud 到达。
+
+## 书（尚未在手机上分章）
+
+工作台可以把一份用户自己的 txt / md 切成章和块，固定 1 位朗读者，并跳过声纹。进度记在任务的 `book.json`。手机 App 仍只播放播客单集，没有章目录。按章合成、epub/pdf 和手机续听见 [private-listen-books-direction-2026-10-28.md](private-listen-books-direction-2026-10-28.md)。不要把整本书合成一条节目再塞进现在的列表。

@@ -27,6 +27,8 @@ from diarization_cache import assign_studio_voices
 from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
 from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
+from studio_ads import ad_only_speakers, fold_ad_speakers, group_key, mark_sponsor_windows, split_group_key
+from studio_speakers import SpeakerGateError, expected_speakers, use_male_slots, validate_speaker_ids, validate_speaker_voices
 from temporary_audio import download_audio_only, sha256_file
 from tts_backends import TTSBackendError, build_backend, SynthesisRequest
 
@@ -73,7 +75,7 @@ def user_facing_message(error):
     Arbitrary SDK text can contain keys and signed URLs. Known pipeline and
     TTS errors are fixed Chinese (or an env-var name, not the secret).
     """
-    if isinstance(error, (StudioError, StudioInputError, PodcastPipelineError, TTSBackendError)):
+    if isinstance(error, (StudioError, StudioInputError, SpeakerGateError, PodcastPipelineError, TTSBackendError)):
         text = str(error)
     elif type(error).__name__.startswith('Diarization'):
         text = str(error)
@@ -390,7 +392,74 @@ class StudioEngine:
         finally:
             self.process = None
 
+    def owned_text(self, value):
+        """A user-supplied text file inside this job. Never a remote book URL."""
+        if not isinstance(value, str) or not value.strip():
+            raise StudioInputError('书听只读你放进任务的文本，不会下载或抓取书源')
+        if value.strip().lower().startswith(('http://', 'https://')):
+            raise StudioInputError('书听不会从链接抓书')
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.job / path
+        if path.is_symlink() or not path.is_file():
+            raise StudioInputError('书稿必须在任务目录内')
+        path = path.resolve()
+        if not path.is_relative_to(self.job.resolve()):
+            raise StudioInputError('书稿必须在任务目录内')
+        if path.suffix.lower() not in ('.txt', '.md'):
+            raise StudioInputError('书听只接受 txt 或 md')
+        return path
+
+    def _book_cursor(self):
+        try:
+            stored = json.loads((self.job / 'book.json').read_text())
+        except (OSError, ValueError):
+            return {}
+        cursor = stored.get('progress') if isinstance(stored, dict) else None
+        if not isinstance(cursor, dict):
+            return {}
+        return {key: cursor[key] for key in ('chapter_id', 'block_id', 'offset_chars') if key in cursor}
+
+    def finish_book(self, config, action):
+        """Write chapters/blocks and skip diarization. Do not render one whole-book file."""
+        from studio_books import build_book, narrator_document, read_user_text, resume_fields
+
+        source = config.get('source') or {}
+        if source.get('kind') != 'text':
+            raise StudioInputError('书听只读你放进任务的文本，不会下载或抓取书源')
+        path = self.owned_text(source.get('value'))
+        expected_speakers(config)
+        if config.get('diarization') not in (None, 'skipped', 'off'):
+            raise StudioInputError('书听不能开启声纹')
+        book_path = self.job / 'book.json'
+        document_path = self.job / 'document.json'
+        if action == 'prepare' or not book_path.is_file():
+            book = build_book(
+                read_user_text(path),
+                title=path.stem,
+                language=config.get('book_language') or 'zh',
+            )
+            document = narrator_document(book)
+            validate_speaker_voices(config, document)
+            atomic_json(book_path, book)
+            atomic_json(document_path, document)
+        else:
+            book = json.loads(book_path.read_text())
+            document = json.loads(document_path.read_text()) if document_path.is_file() else narrator_document(book)
+            validate_speaker_voices(config, document)
+        self.stage = 'book'
+        if action == 'prepare':
+            self.progress(
+                'complete',
+                **resume_fields(book),
+                message='书已按章和块切开。声纹已跳过。按章合成与手机目录留到下一版。',
+            )
+            return None
+        raise StudioInputError('书听不生成整本一条 MP3。章节已写入 book.json，按章合成留到下一版。')
+
     def prepare(self, config, wav):
+        if config.get('content_type') == 'book':
+            raise StudioInputError('书听禁止声纹分析')
         # Default cluster threshold strategy (do not raise to "fix" oversplit):
         # - local files: 0.5 (sherpa default; preserves real guest splits)
         # - YouTube interviews: 0.9 (0.5 over-splits long talk shows into ghost IDs)
@@ -409,15 +478,55 @@ class StudioEngine:
         if not pieces:
             raise StudioInputError('没有识别出英文对白，请检查文件或字幕')
         self.progress('diarization', 0, 100)
-        bounds = SpeakerBounds(exact=config.get('speaker_count'))
+        bounds = SpeakerBounds(exact=expected_speakers(config))
         turns = self.diarize_with_progress(wav, bounds)
         assignments = align_caption_pieces(pieces, turns)
-        validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=bounds, assignments=assignments)
         # One distant cue (outro, music) used to abort after diarization.
         # Keep the 20% unassigned gate above; attach the rest for review.
         assignments = fill_unassigned_for_review(pieces, turns, assignments)
-        segments = group_caption_pieces(pieces, {a.source_index: a.speaker_id for a in assignments}, {a.source_index for a in assignments if a.ambiguous}, max_chars=180)
-        self.progress('translation', 0, len(segments))
+        speaker_of = {item.source_index: item.speaker_id for item in assignments}
+        ambiguous = {item.source_index for item in assignments if item.ambiguous}
+        # Mark sponsor cues on raw lines so grouping cannot glue an ad onto the next answer.
+        marked_pieces = mark_sponsor_windows([
+            {
+                'id': piece.source_index,
+                'start_ms': piece.start_ms,
+                'end_ms': piece.end_ms,
+                'text': piece.text,
+                'speaker_id': speaker_of[piece.source_index],
+            }
+            for piece in pieces
+        ])
+        grouped = group_caption_pieces(
+            pieces,
+            {row['id']: group_key(row.get('speaker_id'), row.get('is_ad')) for row in marked_pieces},
+            ambiguous,
+            max_chars=180,
+        )
+        records = []
+        for segment in grouped:
+            speaker, is_ad = split_group_key(segment.speaker_id)
+            row = asdict(segment)
+            row['speaker_id'] = speaker
+            row['is_ad'] = is_ad
+            records.append(row)
+        ad_only = ad_only_speakers(turns, records)
+        records = fold_ad_speakers(records, ad_only)
+        # The hard gate counts everyone except a short voice that only sits in the sponsor window.
+        validate_speaker_ids(config, (turn.speaker_id for turn in turns if turn.speaker_id not in ad_only))
+        validate_speaker_ids(config, (record.get('speaker_id') for record in records))
+        # Structural checks still run. Exact raw cluster count does not, because an ad read is an extra id.
+        validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=SpeakerBounds(minimum=1, maximum=6), assignments=assignments)
+        spoken = [
+            SubtitleSegment(
+                id=record['id'], start_ms=record['start_ms'], end_ms=record['end_ms'], text=record['text'],
+                speaker_id=record.get('speaker_id'), ambiguous=bool(record.get('ambiguous')),
+            )
+            for record in records if not record.get('is_ad')
+        ]
+        if not spoken:
+            raise StudioInputError('整段都被识别成口播广告，没有可朗读的对白')
+        self.progress('translation', 0, len(spoken))
         provider = config.get('provider', 'deepseek')
         client = create_translation_client(provider, api_key=self.credential(provider))
         translated_count = 0
@@ -426,15 +535,17 @@ class StudioEngine:
             self.check_cancel()
             result = client.translate(batch)
             translated_count += len(batch)
-            self.progress('translation', translated_count, len(segments))
+            self.progress('translation', translated_count, len(spoken))
             return result
-        translated = translate_with_resume(segments, self.job / 'translations', translate, translation_identity=client.translation_identity)
-        if translated_count < len(segments):
+        translated = translate_with_resume(spoken, self.job / 'translations', translate, translation_identity=client.translation_identity)
+        if translated_count < len(spoken):
             # Cache hits never call translate(); snap progress to done for ETA UI.
-            self.progress('translation', len(segments), len(segments))
+            self.progress('translation', len(spoken), len(spoken))
         reference_pieces = self.reference_pieces if self.reference_pieces is not None else pieces
         reference_assignments = align_caption_pieces(reference_pieces, turns) if self.reference_pieces is not None else assignments
         refs = select_references(reference_pieces, reference_assignments, turns)
+        kept = {record.get('speaker_id') for record in records}
+        refs = {speaker: ref for speaker, ref in refs.items() if speaker in kept}
         references = {}
         reference_dir = self.job / 'references'
         reference_dir.mkdir(exist_ok=True)
@@ -444,9 +555,16 @@ class StudioEngine:
             output = reference_dir / name
             self.ffmpeg('-ss', ref['start_ms'] / 1000, '-i', wav, '-t', (ref['end_ms'] - ref['start_ms']) / 1000, output)
             references[speaker] = {**ref, 'path': str(output.relative_to(self.job)), 'sha256': sha256_file(output)}
-        voice_slots = assign_studio_voices([s.speaker_id for s in segments])
+        voice_slots = assign_studio_voices(
+            [record.get('speaker_id') for record in records],
+            male_only=use_male_slots(config),
+        )
         document = {'schema_version': 1, 'transcript_source': transcript_source,
-                    'segments': [{**asdict(s), 'chinese': translated[s.id], 'speaker_id': s.speaker_id} for s in segments],
+                    'segments': [{
+                        **record,
+                        'chinese': '' if record.get('is_ad') else translated[record['id']],
+                        'speaker_id': record.get('speaker_id'),
+                    } for record in records],
                     'speakers': {speaker: {'voice_slot': slot} for speaker, slot in voice_slots.items()}, 'references': references}
         atomic_json(self.job / 'document.json', document)
         return document
@@ -475,9 +593,14 @@ class StudioEngine:
             return False
 
     def render(self, config, document, preview=None, accept_unreviewed=False):
+        validate_speaker_voices(config, document)
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
             raise StudioInputError('段落为空或编号重复')
+        # Drop sponsor windows. Do not insert silence; the surrounding lines join.
+        segments = [segment for segment in segments if not segment.get('is_ad')]
+        if not segments:
+            raise StudioInputError('没有可朗读的对白（口播广告已跳过）')
         selected = segments if preview is None else select_preview_segments(segments, int(preview))
         if not selected:
             raise StudioInputError('试听段数必须大于零')
@@ -613,12 +736,18 @@ class StudioEngine:
             self.progress('source')
             self.check_cancel()
             source_identity = dict(config['source'])
-            if source_identity.get('kind') == 'local':
+            if source_identity.get('kind') == 'text':
+                owned = self.owned_text(source_identity.get('value'))
+                source_identity['value'] = str(owned)
+                source_identity['sha256'] = sha256_file(owned)
+            elif source_identity.get('kind') == 'local':
                 source_identity['sha256'] = sha256_file(Path(source_identity['value']).expanduser())
             identity_path = self.job / 'source-identity.json'
             if identity_path.exists() and json.loads(identity_path.read_text()) != source_identity:
                 raise StudioInputError('来源已经改变，请为新来源创建新任务')
             atomic_json(identity_path, source_identity)
+            if config.get('content_type') == 'book':
+                return self.finish_book(config, action)
             document_path = self.job / 'document.json'
             if action == 'prepare' or not document_path.exists():
                 wav = self.acquire(config)
@@ -651,7 +780,7 @@ class StudioEngine:
                 pass
             visible = user_facing_message(error)
             # Never serialize arbitrary exception strings: SDKs may embed credentials.
-            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, StudioError) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试')
+            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, (StudioError, SpeakerGateError)) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试', **self._book_cursor())
             raise
         finally:
             shutil.rmtree(self.temp, ignore_errors=False)

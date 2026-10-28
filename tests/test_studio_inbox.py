@@ -90,11 +90,22 @@ class InboxTests(unittest.TestCase):
         self.assertEqual(config['source']['kind'], 'youtube')
         self.assertEqual(config['source']['value'], 'https://www.youtube.com/watch?v=abcdefghijk')
         self.assertEqual(config['tts'], 'edge')
+        self.assertEqual(config['expected_speakers'], 2)
         self.assertEqual(state['action'], 'run')
         self.assertEqual(len([p for p in self.jobs.iterdir() if p.is_dir()]), 1)
         again = {item['id']: item['status'] for item in process_inbox(self.library, self.jobs, run=False)}
         self.assertEqual(again['b' * 32], 'queued')
         self.assertEqual(len([p for p in self.jobs.iterdir() if p.is_dir()]), 1)
+
+    def test_shared_monologue_defaults_to_one_and_explicit_count_is_preserved(self):
+        for index, options, expected in [(1, {'content_type': 'monologue'}, 1), (2, {'expected_speakers': 3}, 3)]:
+            ident = str(index) * 32
+            share(self.inbox, ident, f'https://example.com/episode-{index}')
+            path = self.inbox / f'{ident}.json'
+            atomic_write_json(path, {**json.loads(path.read_text()), **options})
+            result = next(item for item in process_inbox(self.library, self.jobs) if item['id'] == ident)
+            config = json.loads((self.jobs / result['job_id'] / 'config.json').read_text())
+            self.assertEqual(config['expected_speakers'], expected)
 
     def test_web_link_uses_edge_and_a_failed_job_can_be_shared_again(self):
         share(self.inbox, 'e' * 32, 'https://open.substack.com/pub/example/p/hello-there')
@@ -130,10 +141,10 @@ class InboxTests(unittest.TestCase):
         share(self.inbox, '3' * 32, 'https://example.com/two', '2026-10-26T02:00:00Z')
         real = enqueue
 
-        def flaky(jobs, url):
+        def flaky(jobs, url, **options):
             if url.endswith('/one'):
                 raise RuntimeError('boom')
-            return real(jobs, url)
+            return real(jobs, url, **options)
 
         with patch('studio_inbox.enqueue', side_effect=flaky):
             results = {item['id']: item['status'] for item in process_inbox(self.library, self.jobs, run=False)}
@@ -162,6 +173,16 @@ class InboxTests(unittest.TestCase):
                 with self.assertRaises(TemporaryAudioError):
                     engine.acquire({'source': {'kind': 'web', 'value': 'https://cdn.example.com/show.mp3'}})
                 download.assert_called_once()
+
+    def test_share_cannot_enqueue_a_book_url(self):
+        ident = '9' * 32
+        share(self.inbox, ident, 'https://example.com/some-book')
+        path = self.inbox / f'{ident}.json'
+        atomic_write_json(path, {**json.loads(path.read_text(encoding='utf-8')), 'content_type': 'book', 'expected_speakers': 1})
+        result = process_inbox(self.library, self.jobs, run=False)
+        self.assertEqual(result[0]['status'], 'failed')
+        self.assertEqual(result[0]['id'], ident)
+        self.assertEqual([p for p in self.jobs.iterdir() if p.is_dir()], [])
 
     def test_server_busy_follows_the_lock(self):
         self.jobs.mkdir()

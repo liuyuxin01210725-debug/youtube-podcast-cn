@@ -1,6 +1,8 @@
 # 对抗性审阅 · 中文播客工作台（2026-10-26）
 
-基线：`codex/podcast-studio-20261018` @ `0f8e35d`（`fix(studio): lock diarization ghosts + stage ETA progress`）。私人英→中流水线，验收是一期里大约 4–5 个声能分开，默认 Edge/系统声槽，克隆可选。
+**产品验收（2026-10-28 起）**：音色数必须等于真实说话人数，且逐人可辨。每人固定一个不同声槽。`voices_confirmed` 不能绕过。下文「大约 4–5 个声能分开」只描述这次审查当时的旧门槛，不再作为验收标准。已出片的 Cuban / Creatine 不返工。
+
+基线：`codex/podcast-studio-20261018` @ `0f8e35d`（`fix(studio): lock diarization ghosts + stage ETA progress`）。私人英→中流水线。审查当时的验收是一期里大约 4–5 个声能分开，默认 Edge/系统声槽，克隆可选。
 
 ## 实施状态
 
@@ -60,13 +62,13 @@ CLI 的 `SherpaDiarizationBackend.diarize` 调用同一个 `run_sherpa_backend`�
 - **现象。** 一块 sherpa 输出超过配置人数（默认 6）时，准备阶段失败，文案为 `声纹分块检测到的说话人数超出配置范围`。UI 没有说话人数旋钮。`--max-speakers` 看起来传了，worker 不用。重试同一链接会再炸。短于 20s 的鬼影本来可以被折掉，但折叠在这次抛错之后。
 - **证据。** `scripts/diarization_runtime.py`：`_validate_chunk_turns`；`_run_worker_chunk` 在读完 worker 输出后调用它，并在 `exact is None` 时附加 `--min-speakers` / `--max-speakers`（其中 `bounds.exact if bounds.exact is not None else bounds.maximum` 写在已经判定 `exact is None` 的分支里，是死代码）。`scripts/sherpa_diarization_worker.py`：`FastClusteringConfig(num_clusters=...)` 只用 `num_speakers`；`--min-speakers` / `--max-speakers` 无读取点。折叠只在 `run_sherpa_backend` 的 `return _collapse_minor_speakers(...)`。`scripts/studio_engine.py` 的 `prepare` 用 `SpeakerBounds(exact=config.get("speaker_count"))`。`scripts/studio_server.py` 创建任务时不写 `speaker_count`。测试：`RuntimeTests.test_rejects_more_local_speakers_than_configured_before_stitching`（本分支执行通过）。回归夹具 `tests/fixtures/diarization-regression.json` 直接调用映射和折叠，不经过 `_run_worker_chunk`。
 - **为何重要。** 这就是 DOAC Creatine 的报错字符串，而且是共享核心。长访谈第一块 15 分钟里，片头、广告、笑声、另一支麦克风都可能多出簇。阈值 0.9 已经是「更少簇」。再抬阈值会把真的客人并掉，代码注释已经反对这么做。
-- **建议改法。** 在 `_run_worker_chunk` 返回前，对**将要返回的** turns 做人数预算折叠，再 `_validate_chunk_turns`。预算是 `bounds.exact` 或 `bounds.maximum`，不要改成 8。人数仍超标时，反复把「当前最短的 ID」并进其余 ID 里余弦最近的一个（没有原型就并进累计时长最长的）。同步改写这块的 embedding 键。第一块因此带着折过的 ID 进入拼接，`_maximum_weight_mapping` 的 6 人上限才不会在第二块被踩中。全片结束处的 20s 折叠可以留着，当第二道清扫。最终 `validate_diarization` 继续当背书，不要删。用「7 个短 ID 折成 ≤6 且不抛错」替换现在这条先拒绝测试；再加一条「7 个都超过 20s 的 ID 仍折到上限」。`--min-speakers` / `--max-speakers` 要么删掉，要么不要再假装 sherpa 会遵守。已知代价：若第 7 个簇又长又远，它会并进最近的长簇，短嘉宾可能贴到主持人身上。这符合「4–5 个声能分开、整期要能做完」，不符合「永远不并错人」。
+- **建议改法。** 在 `_run_worker_chunk` 返回前，对**将要返回的** turns 做人数预算折叠，再 `_validate_chunk_turns`。预算是 `bounds.exact` 或 `bounds.maximum`，不要改成 8。人数仍超标时，反复把「当前最短的 ID」并进其余 ID 里余弦最近的一个（没有原型就并进累计时长最长的）。同步改写这块的 embedding 键。第一块因此带着折过的 ID 进入拼接，`_maximum_weight_mapping` 的 6 人上限才不会在第二块被踩中。全片结束处的 20s 折叠可以留着，当第二道清扫。最终 `validate_diarization` 继续当背书，不要删。用「7 个短 ID 折成 ≤6 且不抛错」替换现在这条先拒绝测试；再加一条「7 个都超过 20s 的 ID 仍折到上限」。`--min-speakers` / `--max-speakers` 要么删掉，要么不要再假装 sherpa 会遵守。已知代价：若第 7 个簇又长又远，它会并进最近的长簇，短嘉宾可能贴到主持人身上。这符合审查当时的「4–5 个声能分开、整期要能做完」，不符合「永远不并错人」。现行验收改为音色数等于真实人数且逐人可辨。
 
 ### P1 · 试听最多 3 个说话人，盖不住验收的 4–5 人
 
 - **现象。** 按钮文案是「试听不同说话人」。超过 3 个说话人时，试听只含文稿顺序里先出现的 3 个人，每人一句最长中文。第 4、第 5 人要等整期合成才听得到。第 6 人还会和第一槽同声。
 - **证据。** `scripts/studio_preview.py` 在 `len(ordered) >= limit` 时立刻返回。`scripts/studio_server.py` 固定 `--preview 3`。`docs/STUDIO-ENGINE.md` 仍写「`--preview N` 渲染前 N 段」，和现在的「每人最长一句」不一致。`scripts/diarization_cache.py` 的 `VOICE_ORDER` 长度为 5；`studio_engine` 用 `index % len(VOICE_ORDER)` 分配。
-- **为何重要。** 试听是合成前确认「谁是谁」的唯一步骤。3 人上限是上一轮修「试听总是谢谢」时留下的，没有对齐 4–5 人的验收。
+- **为何重要。** 试听是合成前确认「谁是谁」的唯一步骤。3 人上限是上一轮修「试听总是谢谢」时留下的，没有对齐审查当时 4–5 人的验收。现行验收是音色数等于真实人数且逐人可辨。
 - **建议改法。** 试听人数改为「文档里的说话人数，最多 5」（声槽数），不要无上限。继续用 `select_preview_segments` 这一处实现。第 6 人撞声不要靠加声槽解决；把它留在 P0 的预算里讨论即可。
 
 ### P1 · 已经写好的中文原因到不了界面
@@ -125,7 +127,7 @@ CLI 的 `SherpaDiarizationBackend.diarize` 调用同一个 `run_sherpa_backend`�
 
 ## 架构 / 流程优化
 
-用户要求用 Opus 5.5 做整体审查。那次调用没有返回正文（周用量额度不足）。下面是同一产品标准下的裁定：私人英→中收听，大约 4–5 个声能分开，默认低成本 Edge，不要求名人克隆，不为「跨国串门儿」加匹配层。不是另一模型的输出。
+用户要求用 Opus 5.5 做整体审查。那次调用没有返回正文（周用量额度不足）。下面是审查当时的产品标准：私人英→中收听，大约 4–5 个声能分开，默认低成本 Edge，不要求名人克隆，不为「跨国串门儿」加匹配层。不是另一模型的输出。2026-10-28 起，验收改为音色数等于真实人数且逐人可辨。
 
 流程仍是一条：取源 → 字幕或 60 秒 ASR → `run_sherpa_backend`（分块、预算折叠、拼接、短鬼影折叠）→ 对齐 → 20% 未对齐门 → 工作室补最近说话人并标待核对 → 翻译 → 试听或成片。CLI 与工作室共享声纹运行时。工作室不走 `prepare_episode`，因此不会在声纹失败时静默丢掉说话人。这是结构，不是债。
 
@@ -142,7 +144,7 @@ CLI 的 `SherpaDiarizationBackend.diarize` 调用同一个 `run_sherpa_backend`�
 
 ### 明确不做
 
-- 不把说话人上限从 6 改成 8，不加第 6 套声槽。第 6 人仍会循环到已有槽，试听也不覆盖第 6 人。验收是 4–5 个可辨声。
+- 不把说话人上限从 6 改成 8，不加第 6 套声槽。第 6 人仍会循环到已有槽，试听也不覆盖第 6 人。审查当时的验收是 4–5 个可辨声。现行验收是音色数等于真实人数且逐人可辨；人数不符或多人共槽都不能合成。
 - 不再把 YouTube 聚类阈值抬过 0.9。阈值越大簇越少，再抬会并掉真的客人。
 - 不把 CLI `diarize=auto` 的静默回退抄进工作室。声纹失败继续失败关闭。
 - 不为工作室新做一份声纹缓存，不把工作室的 0.9 写进 CLI 指纹里那个写死的 `cluster_threshold`。工作室不读 `DiarizationCache`。指纹里的 0.5 只描述 CLI 默认。

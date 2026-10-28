@@ -55,6 +55,48 @@ class ServerTests(unittest.TestCase):
     def test_new_jobs_default_to_system_voice(self):
         ident = self.create()
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 2)
+        self.assertTrue(read(self.studio.job(ident) / 'config.json')['prefer_male_slots'])
+
+    def test_expected_speaker_defaults_overrides_and_atomic_validation(self):
+        sources = [{'kind': 'web', 'value': 'https://example.com/solo'}]
+        ident = self.studio.create(sources, {'content_type': 'monologue'})[0]
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 1)
+        ident = self.studio.create(sources, {'expected_speakers': 3})[0]
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 3)
+        self.assertTrue(read(self.studio.job(ident) / 'config.json')['prefer_male_slots'])
+        ident = self.studio.create(sources, {'expected_speakers': 4})[0]
+        self.assertFalse(read(self.studio.job(ident) / 'config.json')['prefer_male_slots'])
+        ident = self.studio.create([{**sources[0], 'expected_speakers': 4}], {'expected_speakers': 2})[0]
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 4)
+        for invalid in (0, 6, True, 2.0, '2'):
+            before = set(self.studio.root.iterdir())
+            with self.assertRaises(ValueError):
+                self.studio.create([sources[0], {**sources[0], 'value': 'https://example.com/b', 'expected_speakers': invalid}], {})
+            self.assertEqual(set(self.studio.root.iterdir()), before)
+
+    def test_confirm_voices_cannot_bypass_count_or_slot_gate_and_count_can_be_fixed(self):
+        ident = self.create()
+        self.studio.action(ident, 'cancel')
+        p = self.studio.job(ident)
+        doc = {'segments': [{'id': str(i), 'speaker_id': f's{i}', 'chinese': '你好'} for i in range(6)],
+               'speakers': {f's{i}': {'voice_slot': 'male_1'} for i in range(6)}}
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        self.assertFalse(read(p / 'document.json').get('voices_confirmed', False))
+        doc['segments'] = doc['segments'][:2]
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        doc['speakers']['s1']['voice_slot'] = 'male_2'
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 200)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/expected-speakers', {'expected_speakers': 1})[0], 200)
+        self.assertEqual(read(p / 'config.json')['expected_speakers'], 1)
+        self.assertFalse(read(p / 'document.json')['voices_confirmed'])
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/expected-speakers', {'expected_speakers': 2})[0], 200)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 200)
+
 
     def test_youtube_create_stores_chinese_title_not_the_url(self):
         url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'
@@ -210,6 +252,76 @@ class ServerTests(unittest.TestCase):
         self.studio.action(ident, 'cancel')
         self.assertEqual(self.request(f'/api/jobs/{ident}/action', {'action': 'render', 'preview': True, 'accept_unreviewed': 'true'})[0], 200)
         self.assertFalse(read(p / 'state.json')['accept_unreviewed'])
+
+    def test_book_job_is_one_narrator_and_not_a_scraped_url(self):
+        folder = self.studio.root / '.uploads'
+        folder.mkdir()
+        name = 'ab' * 16 + '.txt'
+        (folder / name).write_text('第一章\n\n你好。\n', encoding='utf-8')
+        ident = self.studio.create([{'kind': 'upload', 'value': name, 'title': '示例书.txt'}], {'content_type': 'book', 'action': 'prepare'})[0]
+        config = read(self.studio.job(ident) / 'config.json')
+        self.assertEqual(config['content_type'], 'book')
+        self.assertEqual(config['expected_speakers'], 1)
+        self.assertEqual(config['diarization'], 'skipped')
+        self.assertEqual(config['tts'], 'edge')
+        self.assertEqual(config['source']['kind'], 'text')
+        self.assertTrue(config['source']['value'].endswith('.txt'))
+        self.assertNotIn('diarization_threshold', config)
+        self.assertEqual(read(self.studio.job(ident) / 'state.json')['title'], '示例书')
+        jobs_before = {p.name for p in self.studio.root.iterdir() if p.is_dir() and p.name != '.uploads'}
+        with self.assertRaisesRegex(ValueError, '不会从网上抓书'):
+            self.studio.create([{'kind': 'youtube', 'value': 'https://youtu.be/abc'}], {'content_type': 'book'})
+        other = 'cd' * 16 + '.txt'
+        (folder / other).write_text('你好', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '书听只允许 1'):
+            self.studio.create([{'kind': 'upload', 'value': other}], {'content_type': 'book', 'expected_speakers': 2})
+        audio = 'ef' * 16 + '.mp3'
+        (folder / audio).write_bytes(b'not-audio')
+        with self.assertRaisesRegex(ValueError, 'txt'):
+            self.studio.create([{'kind': 'upload', 'value': audio}], {'content_type': 'book'})
+        prose = '12' * 16 + '.txt'
+        (folder / prose).write_text('不是播客', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, '文本请用内容类型'):
+            self.studio.create([{'kind': 'upload', 'value': prose}], {})
+        self.assertEqual({p.name for p in self.studio.root.iterdir() if p.is_dir() and p.name != '.uploads'}, jobs_before)
+        self.studio.action(ident, 'cancel')
+        with self.assertRaisesRegex(ValueError, '书听只允许 1'):
+            self.studio.set_expected_speakers(ident, 2)
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 1)
+        with self.assertRaisesRegex(ValueError, '系统音色'):
+            self.studio.voice(ident, 'clone')
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
+        write(self.studio.job(ident) / 'document.json', {
+            'segments': [
+                {'id': 'a', 'speaker_id': 'narrator', 'chinese': '你好'},
+                {'id': 'b', 'speaker_id': 'other', 'chinese': '你好'},
+            ],
+            'speakers': {'narrator': {'voice_slot': 'male_1'}, 'other': {'voice_slot': 'male_2'}},
+        })
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        self.assertFalse(read(self.studio.job(ident) / 'document.json').get('voices_confirmed', False))
+
+    def test_upload_accepts_user_text_and_rejects_pdf(self):
+        import http.client
+
+        def upload(filename, body):
+            connection = http.client.HTTPConnection('127.0.0.1', self.port)
+            connection.request('POST', '/api/uploads', body, {
+                'X-CSRF-Token': self.studio.token,
+                'X-Filename': filename,
+            })
+            response = connection.getresponse()
+            payload = response.read()
+            status = response.status
+            connection.close()
+            return status, payload
+
+        status, payload = upload('notes.txt', '第一章\n你好'.encode())
+        self.assertEqual(status, 200)
+        self.assertIn(b'.txt', payload)
+        status, payload = upload('book.pdf', b'%PDF-1.4')
+        self.assertEqual(status, 400)
+        self.assertIn('txt', payload.decode())
 
     def test_info_surfaces_subtitle_fallback_reason(self):
         with tempfile.TemporaryDirectory() as root:

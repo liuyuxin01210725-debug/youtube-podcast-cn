@@ -49,15 +49,17 @@ enum InboxDrop {
         return url
     }
 
-    static func write(url: URL, sourceApp: String?, into folder: URL) throws {
-        guard accepts(url) else { throw InboxError.rejected }
+    static func write(url: URL, sourceApp: String?, into folder: URL, expectedSpeakers: Int = 2) throws {
+        guard accepts(url), (1...5).contains(expectedSpeakers) else { throw InboxError.rejected }
         let inbox = folder.appendingPathComponent("inbox", isDirectory: true)
         try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
         let ident = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        var object: [String: String] = [
+        var object: [String: Any] = [
             "id": ident,
             "url": url.absoluteString,
             "shared_at": timestamp(),
+            "expected_speakers": expectedSpeakers,
+            "content_type": expectedSpeakers == 1 ? "monologue" : "conversation",
         ]
         if let sourceApp {
             let trimmed = sourceApp.trimmingCharacters(in: .whitespacesAndNewlines)
