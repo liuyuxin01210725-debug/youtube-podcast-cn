@@ -1,0 +1,49 @@
+{
+  "version": 2,
+  "status": "locked",
+  "locked_at": "2026-10-28T10:58:00+08:00",
+  "locked_by": "HO鑫「你定」→ Javis confirm-v2 12源",
+  "rules": {
+    "max_daily_scan_shows": 12,
+    "hard_weekly_cap": false,
+    "no_auto_queue": true,
+    "convert_requires_explicit_zhuan": true,
+    "gev": "三问卡（价值—证据—可转性），非黑箱",
+    "no_interest_graph": true,
+    "local_listen_progress_not_signal": true,
+    "underlying_logic": "好内容有就推；没有就「无推荐」；扫失败标「未完成」；点「转」才入队",
+    "display": "聊天首选1+可展开；同频道同周期最多露1条"
+  },
+  "daily_scan": [
+    {"id": 1, "name": "Latent Space", "bucket": "Agent/工程", "urls": ["https://latent.space/", "https://www.youtube.com/@LatentSpacePod"], "x_follow": "@swyx", "role": "核心 AI 长谈"},
+    {"id": 2, "name": "Dwarkesh Podcast", "bucket": "Agent/工程", "urls": ["https://www.dwarkesh.com/", "https://www.youtube.com/@DwarkeshPatel"], "x_follow": null, "role": "超长深度"},
+    {"id": 3, "name": "How I AI", "bucket": "Agent/工程", "urls": ["https://www.chatprd.ai/how-i-ai", "https://www.youtube.com/@howiaipodcast"], "x_follow": null, "role": "产品×Agent 实操"},
+    {"id": 4, "name": "Lenny's Podcast", "bucket": "产品/创业", "urls": ["https://www.youtube.com/channel/UC6t1O76G0jYXOAoYCm153dA"], "x_follow": "@lennysan", "role": "产品 craft", "youtube_channel_id": "UC6t1O76G0jYXOAoYCm153dA"},
+    {"id": 5, "name": "YC Lightcone", "bucket": "产品/创业", "urls": ["https://lightconepod.com/", "https://open.spotify.com/show/0hCbmBt7bJVqtvg3aNUsgt"], "x_follow": "@ycombinator", "role": "技术创始人一线"},
+    {"id": 6, "name": "MAD Podcast", "bucket": "产品/创业", "urls": [], "host": "Matt Turck", "role": "AI/数据创业", "note": "频道 ID 待补；旧成片 Gs2styCcwro"},
+    {"id": 7, "name": "No Priors", "bucket": "具身", "urls": ["https://nopriors.com/", "https://www.youtube.com/@NoPriorsPodcast"], "x_follow": null, "role": "创业+机器人嘉宾"},
+    {"id": 8, "name": "RoboPapers", "bucket": "具身", "urls": ["https://robopapers100.com/", "https://www.youtube.com/@RoboPapers", "https://robopapers.substack.com/"], "x_follow": null, "role": "论文作者对谈"},
+    {"id": 9, "name": "Researcher's Guide to Physical AI", "bucket": "具身", "urls": ["https://physicalaipodcast.co/"], "x_follow": null, "role": "短周报雷达；成片门槛更高"},
+    {"id": 10, "name": "FoundMyFitness", "bucket": "SEEN/健康", "urls": ["https://www.youtube.com/channel/UCWF8SqJVNlx-ctXbLswcTcA"], "x_follow": true, "role": "营养/运动科学", "youtube_channel_id": "UCWF8SqJVNlx-ctXbLswcTcA"},
+    {"id": 11, "name": "The Drive / Peter Attia", "bucket": "SEEN/健康", "urls": ["https://peterattiamd.com/podcast/"], "x_follow": true, "role": "临床长寿深度"},
+    {"id": 12, "name": "Fermentation Cast", "bucket": "发酵", "urls": ["https://podcasts.apple.com/us/podcast/fermentation-cast/id1759753024"], "x_follow": null, "role": "发酵占位；近更差则四周后换"}
+  ],
+  "observe_only": [
+    "Huberman Lab",
+    "Live Longer World",
+    "Training Data",
+    "Pragmatic Engineer",
+    "Sourcery",
+    "Interconnects",
+    "Weekly Robotics",
+    "a16z Show",
+    "Unsupervised Learning"
+  ],
+  "excluded_from_monitor": [
+    {"name": "The Diary of a CEO", "reason": "超热访谈厂；未关注；单集分享仍可转"},
+    {"name": "My First Million", "reason": "删；创业闲聊偏噪"},
+    {"name": "Huberman Lab", "reason": "已出圈 → 仅观察池，不日扫"}
+  ],
+  "supersedes": "showlist-draft.json status awaiting_user_confirm；一切 DOAC+Huberman 两栏确认稿",
+  "next": "日扫公开 RSS/页 → 过三问卡才提案；无过关 → 无推荐；点「转」才入队"
+}
