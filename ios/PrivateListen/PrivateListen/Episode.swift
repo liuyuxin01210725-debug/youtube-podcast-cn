@@ -1,19 +1,35 @@
 import Foundation
 
+enum LibraryContentType: String, Hashable, Codable {
+    case podcast
+    case book
+
+    static func parse(_ raw: String?) -> LibraryContentType {
+        if raw == "book" { return .book }
+        return .podcast
+    }
+}
+
 struct Episode: Identifiable, Hashable {
     var id: String
     var title: String
     var createdAt: Date
     var durationSec: Double?
+    /// Podcast: episode `output.mp3`. Book: folder root used to resolve `chapters/<c>/<b>.mp3`.
     var audioURL: URL
     var downloading: Bool
     var artworkFile: String?
     var artworkKind: String?
+    var contentType: LibraryContentType
+    /// Episode directory under the private library (`…/episodes/<id>/`).
+    var folderURL: URL
 
     var artworkURL: URL? {
         guard let artworkFile, ["cover.jpg", "cover.png", "cover.webp"].contains(artworkFile) else { return nil }
-        return audioURL.deletingLastPathComponent().appendingPathComponent(artworkFile)
+        return folderURL.appendingPathComponent(artworkFile)
     }
+
+    var isBook: Bool { contentType == .book }
 
     static func == (lhs: Episode, rhs: Episode) -> Bool { lhs.id == rhs.id }
 
@@ -25,8 +41,16 @@ struct Episode: Identifiable, Hashable {
     }
 
     var durationLabel: String {
+        if isBook { return "书" }
         guard let durationSec, durationSec > 0 else { return "时长未知" }
         return listenClock(durationSec)
+    }
+
+    func blockAudioURL(chapterId: String, blockId: String) -> URL {
+        folderURL
+            .appendingPathComponent("chapters", isDirectory: true)
+            .appendingPathComponent(chapterId, isDirectory: true)
+            .appendingPathComponent("\(blockId).mp3")
     }
 }
 

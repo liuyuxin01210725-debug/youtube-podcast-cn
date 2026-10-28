@@ -51,13 +51,9 @@ HO鑫：私人听 ≠ 仅英文播客转写；要多种收听——英文书（�
 - 进度：`progress.chapter_id` / `block_id` / `offset_chars`，并写进当次 `progress.json`，供以后续听。
 - 合成整本一条 MP3 会拒绝。按章懒合成还没接。
 
-## 下一 PR（这次故意不做）
+## 下一 PR
 
-- iOS：书对象、章目录、播放列表、章 + 偏移书签。现在手机仍只有播客单集。
-- 按章调用 Edge TTS（一位朗读者），听到哪生成到哪；不要把整本合成一个 `output.mp3`。
-- epub / pdf 入库。英书译制（DeepSeek，点头才开长译）。
-- 合法来源只给购买 / 图书馆 / 公有领域链接，不抓正文。
-- 进度同步进 iCloud `episode.json`。字段先留在任务目录里。
+脚手架见 `docs/private-listen-book-ios-chapters-v0.md`（iOS 章目录 / 续听 + `studio_book_synth` 懒合成挂钩）。仍不做：真机长 TTS、epub/pdf、英书长译点头流、合法书源检索、iCloud `episode.json` 完整书字段。
 
 ## 未决（等 HO鑫 点头再定范围）
 

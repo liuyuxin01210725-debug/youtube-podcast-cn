@@ -13,10 +13,13 @@ from studio_artwork import solid_placeholder_png
 from studio_publish_icloud import (
     PublishError,
     compose_display_title,
+    copy_chapters_tree,
     fetch_youtube_metadata,
+    is_book_package,
     looks_like_url_title,
     main,
     probe_duration_sec,
+    publish_book_job,
     publish_job,
     remember_source_title,
     translate_episode_topic,
@@ -378,6 +381,52 @@ class ServerHookTests(unittest.TestCase):
             before = read(job / 'state.json')
             studio.retry_private_listen(link)
             self.assertEqual(read(job / 'state.json'), before)
+
+
+
+class BookPublishTests(unittest.TestCase):
+    def test_publish_book_copies_chapters_tree_not_output_mp3(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = Path(root) / 'en-pilot-demo'
+            job.mkdir()
+            book = {
+                'schema_version': 1,
+                'title': 'EN Pilot Open Field',
+                'language': 'en',
+                'content_type': 'book',
+                'whole_book_file': False,
+                'chapters': [{'id': 'c001', 'title': 'Chapter 1', 'blocks': [{'id': 'c001b001', 'text': 'hi', 'chars': 2}]}],
+            }
+            write(job / 'book.json', book)
+            write(job / 'episode.json', {
+                'id': 'en-pilot-demo',
+                'title': 'EN Pilot Open Field',
+                'created_at': '2026-10-28T00:00:00+00:00',
+                'content_type': 'book',
+                'file': None,
+                'whole_book_file': False,
+                'listen_unit': 'chapter_block',
+            })
+            chapter = job / 'chapters' / 'c001'
+            chapter.mkdir(parents=True)
+            (chapter / 'c001b001.mp3').write_bytes(b'ID3' + b'\0' * 80)
+            self.assertTrue(is_book_package(job))
+            result = publish_job(job, library)
+            episode_dir = Path(result['episode_dir'])
+            self.assertEqual(result['content_type'], 'book')
+            self.assertIsNone(result['file'])
+            self.assertTrue((episode_dir / 'book.json').is_file())
+            self.assertTrue((episode_dir / 'chapters' / 'c001' / 'c001b001.mp3').is_file())
+            self.assertFalse((episode_dir / 'output.mp3').exists())
+            self.assertEqual(result['chapters_copied'], 1)
+            listing = json.loads((Path(library) / 'library.json').read_text(encoding='utf-8'))
+            self.assertEqual(listing['episodes'][0]['content_type'], 'book')
+            self.assertIsNone(listing['episodes'][0]['file'])
+            # Dispatch path: publish_book_job equivalent
+            again = publish_book_job(job, library)
+            self.assertEqual(again['chapters_copied'], 1)
+            copied = copy_chapters_tree(job, episode_dir)
+            self.assertEqual(copied['copied'], 1)
 
 
 if __name__ == '__main__':

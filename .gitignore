@@ -16,6 +16,7 @@ __pycache__/
 .podcast-jobs/
 .tts-cache/
 *.mp3
+!fixtures/book-en-pilot/tiny-silence.mp3
 *.wav
 !tests/fixtures/diarization-silence.wav
 *.segments.txt

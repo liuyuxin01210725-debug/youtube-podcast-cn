@@ -302,19 +302,65 @@ final class LibraryStore: ObservableObject {
                 guard EpisodeID.isSafe(id) else { continue }
                 let isDirectory = (try? child.resourceValues(forKeys: keys).isDirectory) ?? false
                 guard isDirectory else { continue }
-                guard var record = decode(EpisodeRecord.self, from: child.appendingPathComponent("episode.json")) else { continue }
-                record.id = id
-                if record.title?.isEmpty != false {
-                    record.title = records[id]?.title
+                if var record = decode(EpisodeRecord.self, from: child.appendingPathComponent("episode.json")) {
+                    record.id = id
+                    if record.title?.isEmpty != false {
+                        record.title = records[id]?.title
+                    }
+                    if record.contentType == nil,
+                       fileManager.fileExists(atPath: child.appendingPathComponent("book.json").path) {
+                        record.contentType = "book"
+                    }
+                    records[id] = record
+                    listed.insert(id)
+                    continue
                 }
-                records[id] = record
-                listed.insert(id)
+                // True Book folders may ship book.json before episode.json.
+                let bookSide = child.appendingPathComponent("book.json")
+                if fileManager.fileExists(atPath: bookSide.path),
+                   let data = readData(bookSide),
+                   let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    let title = (root["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let record = EpisodeRecord(
+                        id: id,
+                        title: (title?.isEmpty == false ? title : records[id]?.title) ?? id,
+                        createdAt: records[id]?.createdAt,
+                        durationSec: nil,
+                        file: nil,
+                        youtubeId: nil,
+                        artwork: nil,
+                        artworkKind: nil,
+                        contentType: "book"
+                    )
+                    records[id] = record
+                    listed.insert(id)
+                }
             }
         }
         let episodes = records.compactMap { pair -> Episode? in
             let id = pair.key
-            let record = pair.value
+            var record = pair.value
             let folder = episodesRoot.appendingPathComponent(id, isDirectory: true)
+            let bookURL = folder.appendingPathComponent("book.json")
+            if !localCopy {
+                try? fileManager.startDownloadingUbiquitousItem(at: bookURL)
+            }
+            let hasBookJSON = fileManager.fileExists(atPath: bookURL.path)
+            if record.contentType == nil, hasBookJSON {
+                record.contentType = "book"
+            }
+            let contentType = LibraryContentType.parse(record.contentType)
+            if contentType == .book {
+                return Self.makeBookEpisode(
+                    id: id,
+                    record: record,
+                    folder: folder,
+                    bookURL: bookURL,
+                    localCopy: localCopy,
+                    listed: listed,
+                    waitingHint: &waiting
+                )
+            }
             let audioURL = folder.appendingPathComponent("output.mp3")
             let local = LocalAudio.isPlayable(audioURL)
             if localCopy && !local { return nil }
@@ -341,10 +387,68 @@ final class LibraryStore: ObservableObject {
                 audioURL: audioURL,
                 downloading: !local,
                 artworkFile: artworkFile,
-                artworkKind: record.artworkKind
+                artworkKind: record.artworkKind,
+                contentType: .podcast,
+                folderURL: folder
             )
         }
         return LoadedLibrary(episodes: episodes, waiting: waiting)
+    }
+
+    /// True Book type: listed from `book.json` / `content_type=book`, not one fake podcast per chapter.
+    private static func makeBookEpisode(
+        id: String,
+        record: EpisodeRecord,
+        folder: URL,
+        bookURL: URL,
+        localCopy: Bool,
+        listed: Set<String>,
+        waitingHint: inout Bool
+    ) -> Episode? {
+        let fileManager = FileManager.default
+        let bookPresent = fileManager.fileExists(atPath: bookURL.path)
+        if localCopy && !bookPresent { return nil }
+        if !bookPresent {
+            if !listed.contains(id) {
+                try? fileManager.startDownloadingUbiquitousItem(at: folder)
+            }
+            try? fileManager.startDownloadingUbiquitousItem(at: bookURL)
+            waitingHint = true
+        }
+        let title = record.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artworkFile = EpisodeArtwork.file(record.artwork, kind: record.artworkKind)
+        if let artworkFile, record.artworkKind != "placeholder" {
+            let artworkURL = folder.appendingPathComponent(artworkFile)
+            if !LocalAudio.isPlayable(artworkURL) {
+                try? fileManager.startDownloadingUbiquitousItem(at: artworkURL)
+            }
+        }
+        // Podcasts use output.mp3; books use chapters/<c>/<b>.mp3 — keep audioURL as folder marker.
+        return Episode(
+            id: id,
+            title: (title?.isEmpty == false ? title! : id),
+            createdAt: EpisodeDate.parse(record.createdAt) ?? Date(timeIntervalSince1970: 0),
+            durationSec: record.durationSec,
+            audioURL: bookURL,
+            downloading: !bookPresent,
+            artworkFile: artworkFile,
+            artworkKind: record.artworkKind,
+            contentType: .book,
+            folderURL: folder
+        )
+    }
+
+    /// Load and parse `book.json` for a library book entry. Merges on-disk chapter audio status.
+    func loadBookTOC(for episode: Episode) -> BookTOC? {
+        guard episode.isBook else { return nil }
+        let bookURL = episode.folderURL.appendingPathComponent("book.json")
+        guard let data = readData(bookURL) else {
+            try? FileManager.default.startDownloadingUbiquitousItem(at: bookURL)
+            return nil
+        }
+        guard var toc = BookChapterIndex.parse(bookJSON: data, bookId: episode.id) else { return nil }
+        toc = BookChapterIndex.enrichAudioStatus(toc, folderURL: episode.folderURL)
+        return toc
     }
 
     private func decode<T: Decodable>(_ type: T.Type, from url: URL) -> T? {
@@ -395,6 +499,7 @@ private struct EpisodeRecord: Decodable {
     var youtubeId: String?
     var artwork: String?
     var artworkKind: String?
+    var contentType: String?
 }
 
 private struct PendingShare: Codable {

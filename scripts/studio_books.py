@@ -144,6 +144,113 @@ def seek(book: dict, *, chapter_id: str, block_id: str, offset_chars: int) -> di
     raise ValueError('找不到这一章或这一块')
 
 
+def chapter_index(book: dict) -> dict:
+    """Flatten chapters/blocks into a TOC list for App / API consumers.
+
+    Does not invent audio. Callers merge synth_queue / on-disk mp3 separately.
+    """
+    if not isinstance(book, dict):
+        raise ValueError('书结构无效')
+    chapters_out = []
+    for chapter_index_, chapter in enumerate(book.get('chapters') or []):
+        if not isinstance(chapter, dict):
+            continue
+        chapter_id = chapter.get('id')
+        if not isinstance(chapter_id, str) or not chapter_id:
+            continue
+        title = chapter.get('title')
+        if not isinstance(title, str) or not title.strip():
+            title = f'第{chapter_index_ + 1}章'
+        blocks_out = []
+        for block_index, block in enumerate(chapter.get('blocks') or []):
+            if not isinstance(block, dict):
+                continue
+            block_id = block.get('id')
+            if not isinstance(block_id, str) or not block_id:
+                continue
+            text_body = block.get('text') if isinstance(block.get('text'), str) else ''
+            chars = block.get('chars')
+            if type(chars) is not int or chars < 0:
+                chars = len(text_body)
+            measure = block.get('measure')
+            if type(measure) is not int or measure < 0:
+                measure = chars
+            blocks_out.append({
+                'id': block_id,
+                'index': block_index,
+                'chars': chars,
+                'measure': measure,
+                'audio_status': 'missing',
+                'audio_file': None,
+            })
+        if not blocks_out:
+            continue
+        chapters_out.append({
+            'id': chapter_id,
+            'title': title.strip()[:120],
+            'index': chapter_index_,
+            'blocks': blocks_out,
+        })
+    if not chapters_out:
+        raise ValueError('书里没有可听的章节')
+    progress = clamp_resume(book, book.get('progress') or {})
+    return {
+        'schema_version': 1,
+        'content_type': 'book',
+        'title': (book.get('title') or '未命名'),
+        'language': book.get('language') or 'zh',
+        'chapters': chapters_out,
+        'progress': progress,
+    }
+
+
+def clamp_resume(book: dict, cursor: dict | None) -> dict:
+    """Soft-clamp a resume cursor into a valid chapter/block/offset.
+
+    Unlike seek(), missing ids fall back to the first chapter/block instead of raising.
+    audio_seconds is kept only when provided as a non-negative number; callers must
+    still verify the block audio is ready before treating seconds as authoritative.
+    """
+    chapters = [c for c in (book.get('chapters') or []) if isinstance(c, dict) and c.get('blocks')]
+    if not chapters:
+        raise ValueError('书里没有可听的章节')
+    cursor = cursor if isinstance(cursor, dict) else {}
+    first = chapters[0]
+    first_block = first['blocks'][0]
+    chapter = next((c for c in chapters if c.get('id') == cursor.get('chapter_id')), first)
+    blocks = [b for b in (chapter.get('blocks') or []) if isinstance(b, dict) and b.get('id')]
+    if not blocks:
+        chapter = first
+        blocks = [b for b in (first.get('blocks') or []) if isinstance(b, dict) and b.get('id')]
+        if not blocks:
+            raise ValueError('书里没有可听的章节')
+    block = next((b for b in blocks if b.get('id') == cursor.get('block_id')), blocks[0])
+    text_body = block.get('text') if isinstance(block.get('text'), str) else ''
+    chars = block.get('chars') if type(block.get('chars')) is int and block.get('chars') >= 0 else len(text_body)
+    raw_offset = cursor.get('offset_chars', 0)
+    if type(raw_offset) is not int:
+        raw_offset = 0
+    offset = min(max(0, raw_offset), chars)
+    result = {
+        'chapter_id': chapter.get('id') or first.get('id'),
+        'block_id': block.get('id') or first_block.get('id'),
+        'offset_chars': offset,
+    }
+    seconds = cursor.get('audio_seconds')
+    if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) and seconds >= 0 and seconds == seconds:
+        result['audio_seconds'] = float(seconds)
+    done = cursor.get('completed_block_ids')
+    if isinstance(done, list):
+        result['completed_block_ids'] = [item for item in done if isinstance(item, str)]
+    elif isinstance((book.get('progress') or {}).get('completed_block_ids'), list):
+        result['completed_block_ids'] = [
+            item for item in book['progress']['completed_block_ids'] if isinstance(item, str)
+        ]
+    else:
+        result['completed_block_ids'] = []
+    return result
+
+
 def _measure(text: str, language: str) -> int:
     if language == 'en':
         return len(text.split())
