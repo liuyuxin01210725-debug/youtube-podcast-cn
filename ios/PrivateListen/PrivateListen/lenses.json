@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "ia": "theme-primary",
+  "updated_at": "2026-10-28T14:22:00+08:00",
+  "notes": "Primary nav = theme lenses. People/shows nest under a lens. confirm-v2 12 sources mapped; empty lenses reserved for later ingest (AI教育 / 小众品牌) and article URL pipeline.",
+  "lenses": [
+    {
+      "id": "frontier-tech",
+      "label_zh": "前沿科技",
+      "order": 1,
+      "shows": [
+        {"show_id": 1, "name": "Latent Space", "role": "核心 AI 长谈", "people": ["swyx"]},
+        {"show_id": 2, "name": "Dwarkesh Podcast", "role": "超长深度", "people": ["Dwarkesh Patel"]},
+        {"show_id": 3, "name": "How I AI", "role": "产品×Agent 实操", "people": []}
+      ],
+      "observe": ["Training Data", "Interconnects", "Pragmatic Engineer", "Sourcery"]
+    },
+    {
+      "id": "embodied-robotics",
+      "label_zh": "具身与机器人",
+      "order": 2,
+      "shows": [
+        {"show_id": 7, "name": "No Priors", "role": "创业+机器人嘉宾", "people": []},
+        {"show_id": 8, "name": "RoboPapers", "role": "论文作者对谈", "people": []},
+        {"show_id": 9, "name": "Researcher's Guide to Physical AI", "role": "短周报雷达", "people": []}
+      ],
+      "observe": ["Weekly Robotics"]
+    },
+    {
+      "id": "health-longevity",
+      "label_zh": "健康长寿",
+      "order": 3,
+      "shows": [
+        {"show_id": 10, "name": "FoundMyFitness", "role": "营养/运动科学", "people": ["Rhonda Patrick"]},
+        {"show_id": 11, "name": "The Drive / Peter Attia", "role": "临床长寿深度", "people": ["Peter Attia"]}
+      ],
+      "observe": ["Huberman Lab", "Live Longer World"]
+    },
+    {
+      "id": "ferment-food",
+      "label_zh": "发芽发酵 / 食品",
+      "order": 4,
+      "shows": [
+        {"show_id": 12, "name": "Fermentation Cast", "role": "发酵占位", "people": []}
+      ],
+      "observe": []
+    },
+    {
+      "id": "ai-education",
+      "label_zh": "AI 时代教育",
+      "order": 5,
+      "shows": [],
+      "observe": [],
+      "placeholder": "留空；文章 URL / 后续教育类 show 可挂入"
+    },
+    {
+      "id": "business-investing",
+      "label_zh": "商业与投资",
+      "order": 6,
+      "shows": [
+        {"show_id": 4, "name": "Lenny's Podcast", "role": "产品 craft", "people": ["Lenny Rachitsky"]},
+        {"show_id": 5, "name": "YC Lightcone", "role": "技术创始人一线", "people": []},
+        {"show_id": 6, "name": "MAD Podcast", "role": "AI/数据创业", "people": ["Matt Turck"]}
+      ],
+      "observe": ["a16z Show", "Unsupervised Learning"]
+    },
+    {
+      "id": "niche-life-brands",
+      "label_zh": "小众生活与品牌",
+      "order": 7,
+      "shows": [],
+      "observe": [],
+      "placeholder": "Norda/Aranet/Chilipad 等小众发现官卡；非日扫 show"
+    }
+  ],
+  "article_ingest": {
+    "enabled": true,
+    "inbox_content_type": "article",
+    "defaults": {"provider": "deepseek", "tts": "edge", "expected_speakers": 1},
+    "execute_default": false
+  }
+}

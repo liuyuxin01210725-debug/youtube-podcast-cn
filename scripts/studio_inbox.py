@@ -317,6 +317,18 @@ def process_inbox(library: Path, jobs: Path, *, run: bool = False) -> list[dict]
                     runnable.append((ident, bound))
                 results.append({'id': ident, 'status': status, 'job_id': bound})
                 continue
+            if record.get('content_type') == 'article':
+                from studio_articles import enqueue_article, normalize_article_url
+                if not normalize_article_url(canonical):
+                    write_status(inbox, ident, 'failed', error='文章链接无效（或是 YouTube，请当播客分享）')
+                    results.append({'id': ident, 'status': 'failed'})
+                    continue
+                # execute=False: ledger only; full article TTS stays stub until explicitly enabled.
+                info = enqueue_article(jobs, canonical, execute=False)
+                write_status(inbox, ident, 'queued', job_id=info['job_id'])
+                print(f'收件箱：文章已入账 {ident} → {info["job_id"]}（TTS stub）', flush=True)
+                results.append({'id': ident, 'status': 'queued', 'job_id': info['job_id'], 'article': True, 'stub_tts': True})
+                continue
             job_id = enqueue(jobs, canonical, content_type=record['content_type'], expected_speakers=record['expected_speakers'])
             write_status(inbox, ident, 'queued', job_id=job_id)
             runnable.append((ident, job_id))

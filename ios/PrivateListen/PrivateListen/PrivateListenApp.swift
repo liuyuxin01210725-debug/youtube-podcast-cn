@@ -7,12 +7,17 @@ struct PrivateListenApp: App {
 
     var body: some Scene {
         WindowGroup {
-            LibraryView()
-                .environmentObject(library)
-                .environmentObject(player)
-                .onOpenURL { url in
-                    library.acceptIncoming(url)
-                }
+            TabView {
+                DiscoverView()
+                    .tabItem { Label("发现", systemImage: "circle.grid.cross") }
+                LibraryView()
+                    .tabItem { Label("资料库", systemImage: "books.vertical") }
+            }
+            .environmentObject(library)
+            .environmentObject(player)
+            .onOpenURL { url in
+                library.acceptIncoming(url)
+            }
         }
     }
 }

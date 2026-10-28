@@ -51,7 +51,7 @@ final class LibraryStore: ObservableObject {
         reload()
     }
 
-    func acceptShare(url: URL, sourceApp: String?) {
+    func acceptShare(url: URL, sourceApp: String?, contentType: String? = nil, expectedSpeakers: Int = 2) {
         guard InboxDrop.accepts(url) else {
             message = "这条不是公开的 HTTPS 链接。"
             return
@@ -63,8 +63,12 @@ final class LibraryStore: ObservableObject {
             return
         }
         do {
-            try InboxDrop.write(url: url, sourceApp: sourceApp, into: folderURL)
-            message = "已放入收件箱。Mac 上的监听会开始转换。"
+            try InboxDrop.write(url: url, sourceApp: sourceApp, into: folderURL, expectedSpeakers: expectedSpeakers, contentType: contentType)
+            if contentType == "article" {
+                message = "文章链接已放入收件箱。Mac 会抽正文入队（默认不立刻整篇 TTS）。"
+            } else {
+                message = "已放入收件箱。Mac 上的监听会开始转换。"
+            }
             reload()
         } catch {
             message = "没能写入收件箱，请重新选择资料库。"
