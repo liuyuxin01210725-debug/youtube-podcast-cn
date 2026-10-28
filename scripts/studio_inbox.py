@@ -138,12 +138,14 @@ def iter_requests(inbox: Path) -> list[dict]:
             'url': url.strip(),
             'shared_at': data.get('shared_at') if isinstance(data.get('shared_at'), str) else '',
             'source_app': source_app,
+            'content_type': data.get('content_type', 'conversation'),
+            'expected_speakers': data.get('expected_speakers'),
         })
     found.sort(key=lambda item: (item['shared_at'], item['id']))
     return found
 
 
-def enqueue(jobs: Path, url: str) -> str:
+def enqueue(jobs: Path, url: str, *, content_type: str = 'conversation', expected_speakers: int | None = None) -> str:
     """Create one queued studio job. YouTube keeps captions; other https uses the same Edge path."""
     canonical = canonical_url(url)
     if not canonical:
@@ -155,7 +157,8 @@ def enqueue(jobs: Path, url: str) -> str:
     studio = Studio(jobs, recover=False)
     return studio.create(
         [{'kind': kind, 'value': canonical}],
-        {'action': 'run', 'tts': 'edge', 'provider': 'deepseek', 'style': 'conversation'},
+        {'action': 'run', 'tts': 'edge', 'provider': 'deepseek', 'style': 'conversation',
+         'content_type': content_type, 'expected_speakers': expected_speakers},
     )[0]
 
 
@@ -314,7 +317,7 @@ def process_inbox(library: Path, jobs: Path, *, run: bool = False) -> list[dict]
                     runnable.append((ident, bound))
                 results.append({'id': ident, 'status': status, 'job_id': bound})
                 continue
-            job_id = enqueue(jobs, canonical)
+            job_id = enqueue(jobs, canonical, content_type=record['content_type'], expected_speakers=record['expected_speakers'])
             write_status(inbox, ident, 'queued', job_id=job_id)
             runnable.append((ident, job_id))
             print(f'收件箱：已排队 {ident} → {job_id}', flush=True)

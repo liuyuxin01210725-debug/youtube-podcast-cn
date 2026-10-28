@@ -16,6 +16,60 @@ from podcast_captions import CaptionPiece
 from diarization_core import SpeakerAssignment, DiarizationTurn
 
 class StudioTests(unittest.TestCase):
+    @staticmethod
+    def speaker_document(count):
+        return {'segments': [{'id': str(i), 'chinese': '你好', 'speaker_id': f's{i}'} for i in range(count)],
+                'speakers': {speaker: {'voice_slot': slot} for speaker, slot in assign_studio_voices([f's{i}' for i in range(count)]).items()},
+                'references': {}, 'voices_confirmed': True}
+
+    def test_expected_two_rejects_six_before_any_tts_even_when_confirmed(self):
+        for backend in ('edge', 'clone'):
+            for preview in (None, 1, 2):
+                with self.subTest(backend=backend, preview=preview), tempfile.TemporaryDirectory() as root:
+                    engine = StudioEngine(root)
+                    doc = self.speaker_document(6)
+                    with patch('studio_engine.build_backend') as build, patch.object(engine, 'worker') as worker:
+                        with self.assertRaisesRegex(ValueError, '声明 2 人，实际 6 人'):
+                            engine.render({'tts': backend, 'expected_speakers': 2}, doc, preview, accept_unreviewed=True)
+                        build.assert_not_called()
+                        worker.assert_not_called()
+                        self.assertFalse((engine.job / 'audio-cache').exists())
+
+    def test_two_people_cannot_share_a_voice_even_when_confirmed(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            doc = self.speaker_document(2)
+            doc['speakers']['s1']['voice_slot'] = 'male_1'
+            with patch('studio_engine.build_backend') as build:
+                with self.assertRaisesRegex(ValueError, '音色硬闸'):
+                    engine.render({'expected_speakers': 2}, doc, accept_unreviewed=True)
+                build.assert_not_called()
+
+    def test_diarization_count_gate_precedes_translation(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            pieces = [CaptionPiece(0, 1000, 'Hello', 0)]
+            turns = [DiarizationTurn(i * 1000, (i + 1) * 1000, f's{i}') for i in range(6)]
+            with patch.object(engine, 'transcribe', return_value=(pieces, 'subtitles')), patch.object(engine, 'diarize_with_progress', return_value=turns) as diarize, patch('studio_engine.create_translation_client') as translate:
+                with self.assertRaisesRegex(ValueError, '声明 2 人，实际 6 人'):
+                    engine.prepare({'expected_speakers': 2}, Path('unused.wav'))
+                self.assertEqual(diarize.call_args.args[1].exact, 2)
+                translate.assert_not_called()
+
+    def test_count_failure_is_recoverable_and_keeps_existing_output(self):
+        with tempfile.TemporaryDirectory() as root:
+            engine = StudioEngine(root)
+            (engine.job / 'document.json').write_text(json.dumps(self.speaker_document(6)))
+            (engine.job / 'output.mp3').write_bytes(b'previous')
+            with patch.object(engine, 'publish_private_library') as publish:
+                with self.assertRaisesRegex(ValueError, '人数硬闸'):
+                    engine.run({'source': {}, 'expected_speakers': 2}, 'render', accept_unreviewed=True)
+                publish.assert_not_called()
+            progress = json.loads((engine.job / 'progress.json').read_text())
+            self.assertEqual(progress['error_code'], 'speaker_gate_failed')
+            self.assertIn('修正说话人分配后重试', progress['message'])
+            self.assertEqual((engine.job / 'output.mp3').read_bytes(), b'previous')
+
     def test_job_threshold_only_applies_to_diarization_worker(self):
         with tempfile.TemporaryDirectory() as root:
             engine = StudioEngine(root)
@@ -79,7 +133,7 @@ class StudioTests(unittest.TestCase):
             audio(ref)
             doc = {'segments':[{'id':'s1','chinese':'你好','speaker_id':'a'}, {'id':'s2','chinese':'再见','speaker_id':'a'}], 'speakers':{'a':{'voice_slot':'male_1'}}, 'references':{'a':{'path':'ref.wav','text':'Hello'}}}
             with patch.object(engine, 'worker', side_effect=lambda payload: audio(payload['output'])) as worker:
-                clone = {'tts': 'clone'}
+                clone = {'tts': 'clone', 'expected_speakers': 1}
                 output = engine.render(clone, doc)
                 self.assertTrue(output.is_file())
                 self.assertEqual(worker.call_count, 2)
@@ -145,9 +199,9 @@ class StudioTests(unittest.TestCase):
             engine.temp.mkdir()
             doc = {'segments':[{'id':'s1','chinese':'你好','speaker_id':'a'}], 'speakers':{'a':{'voice_slot':'male_1'}}, 'references':{}}
             with patch('studio_engine.build_backend', return_value=FakeBackend()):
-                engine.render({'tts':'edge','style':'conversation'}, doc)
+                engine.render({'tts':'edge','expected_speakers':1,'style':'conversation'}, doc)
                 self.assertEqual(len(list((engine.job / 'audio-cache').glob('*.wav'))),1)
-                engine.render({'tts':'edge','style':'documentary'}, doc)
+                engine.render({'tts':'edge','expected_speakers':1,'style':'documentary'}, doc)
                 self.assertEqual(len(list((engine.job / 'audio-cache').glob('*.wav'))),2)
 
     def test_owned_paths(self):
@@ -166,7 +220,7 @@ class StudioTests(unittest.TestCase):
                 'references': {},
             }
             with self.assertRaisesRegex(ValueError, '说话人待核对'):
-                engine.render({'tts': 'edge'}, doc)
+                engine.render({'tts': 'edge', 'expected_speakers': 1}, doc)
 
     def test_studio_voices_start_with_male_slots(self):
         slots = assign_studio_voices([
@@ -190,7 +244,7 @@ class StudioTests(unittest.TestCase):
         self.assertTrue(speakable_tts(clean_tts_text('>> 肌酸。')))
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
-    def test_accept_unreviewed_renders_many_ambiguous_segments(self):
+    def test_expected_two_with_two_slots_renders_even_with_review_override(self):
         class FakeBackend:
             file_suffix = '.mp3'
             def fingerprint(self):
@@ -213,7 +267,7 @@ class StudioTests(unittest.TestCase):
                 'references': {},
             }
             with patch('studio_engine.build_backend', return_value=FakeBackend()):
-                output = engine.render({'tts': 'edge'}, doc, accept_unreviewed=True)
+                output = engine.render({'tts': 'edge', 'expected_speakers': 2}, doc, accept_unreviewed=True)
             self.assertTrue(output.is_file())
             self.assertTrue(all(segment['ambiguous'] for segment in doc['segments']))
 
@@ -243,7 +297,7 @@ class StudioTests(unittest.TestCase):
                 'references': {},
             }
             with patch('studio_engine.build_backend', return_value=FakeBackend()):
-                engine.render({'tts': 'edge'}, doc)
+                engine.render({'tts': 'edge', 'expected_speakers': 1}, doc)
             self.assertEqual(calls, ['你好'])
             frames = []
             for path in (engine.job / 'audio-cache').glob('*.wav'):

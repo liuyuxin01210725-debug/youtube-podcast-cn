@@ -55,6 +55,44 @@ class ServerTests(unittest.TestCase):
     def test_new_jobs_default_to_system_voice(self):
         ident = self.create()
         self.assertEqual(read(self.studio.job(ident) / 'config.json')['tts'], 'edge')
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 2)
+
+    def test_expected_speaker_defaults_overrides_and_atomic_validation(self):
+        sources = [{'kind': 'web', 'value': 'https://example.com/solo'}]
+        ident = self.studio.create(sources, {'content_type': 'monologue'})[0]
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 1)
+        ident = self.studio.create(sources, {'expected_speakers': 3})[0]
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 3)
+        ident = self.studio.create([{**sources[0], 'expected_speakers': 4}], {'expected_speakers': 2})[0]
+        self.assertEqual(read(self.studio.job(ident) / 'config.json')['expected_speakers'], 4)
+        for invalid in (0, 6, True, 2.0, '2'):
+            before = set(self.studio.root.iterdir())
+            with self.assertRaises(ValueError):
+                self.studio.create([sources[0], {**sources[0], 'value': 'https://example.com/b', 'expected_speakers': invalid}], {})
+            self.assertEqual(set(self.studio.root.iterdir()), before)
+
+    def test_confirm_voices_cannot_bypass_count_or_slot_gate_and_count_can_be_fixed(self):
+        ident = self.create()
+        self.studio.action(ident, 'cancel')
+        p = self.studio.job(ident)
+        doc = {'segments': [{'id': str(i), 'speaker_id': f's{i}', 'chinese': '你好'} for i in range(6)],
+               'speakers': {f's{i}': {'voice_slot': 'male_1'} for i in range(6)}}
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        self.assertFalse(read(p / 'document.json').get('voices_confirmed', False))
+        doc['segments'] = doc['segments'][:2]
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        doc['speakers']['s1']['voice_slot'] = 'male_2'
+        write(p / 'document.json', doc)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 200)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/expected-speakers', {'expected_speakers': 1})[0], 200)
+        self.assertEqual(read(p / 'config.json')['expected_speakers'], 1)
+        self.assertFalse(read(p / 'document.json')['voices_confirmed'])
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 400)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/expected-speakers', {'expected_speakers': 2})[0], 200)
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-voices', {})[0], 200)
+
 
     def test_youtube_create_stores_chinese_title_not_the_url(self):
         url = 'https://www.youtube.com/watch?v=Jk7RAkFN4vk'

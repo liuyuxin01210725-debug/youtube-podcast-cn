@@ -10,6 +10,7 @@ MAX_UPLOAD=2*1024**3
 
 from studio_preview import preview_limit, select_preview_segments
 from diarization_cache import assign_studio_voices
+from studio_speakers import expected_speakers, validate_speaker_voices
 
 def as_bool(value):
     return value is True
@@ -85,6 +86,7 @@ class Studio:
                 digest=hashlib.sha256(f.read_bytes()).hexdigest() if f.is_relative_to(p.resolve()) and f.is_file() else None
                 refs[sid]={'text':ref.get('text'),'sha256':digest}
         identity={'segments':[{k:s.get(k) for k in ('id','chinese','speaker_id')} for s in selected], 'voices':voices,'references':refs,'backend':backend,'clone_model':config.get('clone_model')}
+        if 'expected_speakers' in config: identity['expected_speakers']=config['expected_speakers']
         return hashlib.sha256(json.dumps(identity,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
     def migrate_assets(self,p):
         s=read(p/'state.json',{}); assets=s.setdefault('asset_revisions',{})
@@ -112,8 +114,11 @@ class Studio:
         if options.get('action','prepare') not in ('prepare','run'): raise ValueError('操作无效')
         if len({s.get('value') for s in sources})!=len(sources): raise ValueError('请移除重复来源')
         if options.get('provider','deepseek') not in ('deepseek','qwen') or options.get('tts','edge') not in ('clone','edge') or options.get('style','conversation') not in ('conversation','documentary'): raise ValueError('设置无效')
+        if options.get('content_type', 'conversation') not in ('conversation', 'monologue'): raise ValueError('内容类型无效')
+        counts=[]
         for source in sources:
             if not isinstance(source, dict): raise ValueError('不支持的来源')
+            counts.append(expected_speakers({**options, **{k: source[k] for k in ('expected_speakers',) if k in source}}))
             if source.get('kind')=='youtube':
                 u=urlparse(source.get('value') or '')
                 if u.scheme!='https' or u.hostname not in ('youtube.com','www.youtube.com','m.youtube.com','youtu.be'): raise ValueError('请输入有效的 HTTPS YouTube 链接')
@@ -128,7 +133,7 @@ class Studio:
         fetched=_youtube_metadata(sources)
         provider=options.get('provider','deepseek')
         with self.lock:
-            for source in sources:
+            for source, count in zip(sources, counts):
                 ident=uuid.uuid4().hex; p=self.root/ident; p.mkdir()
                 import studio_publish_icloud
                 if source['kind']=='upload':
@@ -150,6 +155,7 @@ class Studio:
                     src=source
                     label=studio_publish_icloud.youtube_id_from_url(source['value']) or ident
                 config={'source':src,'provider':provider,'tts':options.get('tts','edge'),'style':options.get('style','conversation')}
+                config.update(content_type=options.get('content_type','conversation'), expected_speakers=count)
                 if src['kind']=='youtube': config['diarization_threshold']=0.9
                 if config['provider'] not in ('deepseek','qwen') or config['tts'] not in ('clone','edge') or config['style'] not in ('conversation','documentary'): raise ValueError('设置无效')
                 write(p/'config.json',config); write(p/'state.json',{'title':label,'status':'queued','action':options.get('action','prepare'),'updated_at':time.time()})
@@ -179,6 +185,18 @@ class Studio:
             p=self.job(ident); self.migrate_assets(p); s=read(p/'state.json',{})
             if s.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后切换声音')
             config=read(p/'config.json',{}); config['tts']=backend; write(p/'config.json',config)
+    def set_expected_speakers(self, ident, count):
+        with self.lock:
+            p=self.job(ident); state=read(p/'state.json',{})
+            if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+            config=read(p/'config.json',{}); config['expected_speakers']=count
+            expected_speakers(config)
+            self.migrate_assets(p)
+            write(p/'config.json',config)
+            doc=read(p/'document.json')
+            if doc:
+                doc['voices_confirmed']=False; write(p/'document.json',doc)
+            state['stale']=True; state['updated_at']=time.time(); write(p/'state.json',state)
     def action(self,ident,action,preview=False,accept_unreviewed=False):
         with self.lock:
             p=self.job(ident); s=read(p/'state.json',{})
@@ -227,6 +245,7 @@ class Studio:
     def confirm_voices(self, ident):
         with self.lock:
             p, state, doc = self._editable(ident)
+            validate_speaker_voices(read(p/'config.json',{}), doc)
             doc['voices_confirmed']=True
             write(p/'document.json', doc)
             state['updated_at']=time.time(); write(p/'state.json', state)
@@ -349,10 +368,11 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
             data=json.loads(self.rfile.read(length))
             if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
-            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|confirm-speakers|voice-slots|confirm-voices)',path)
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|expected-speakers|confirm-speakers|voice-slots|confirm-voices)',path)
             if not m: raise ValueError('操作不存在')
             if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False),data.get('accept_unreviewed',False))
             elif m[2]=='voice': studio.voice(m[1],data['tts'])
+            elif m[2]=='expected-speakers': studio.set_expected_speakers(m[1],data['expected_speakers'])
             elif m[2]=='confirm-speakers': studio.confirm_speakers(m[1])
             elif m[2]=='voice-slots':
                 if not isinstance(data, dict) or data.get('scheme')!='male_first': raise ValueError('音色方案无效')
@@ -369,6 +389,7 @@ class Handler(BaseHTTPRequestHandler):
                         # A text edit must not sign off every 待核对 row. Only the
                         # row whose speaker actually changed is confirmed here.
                         confirmed = original.get('speaker_id') != new.get('speaker_id')
+                        if confirmed: doc['voices_confirmed']=False
                         original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False if confirmed else bool(original.get('ambiguous')))
                     for ident,slot in data.get('voices',{}).items():
                         if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')

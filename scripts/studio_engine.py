@@ -27,6 +27,7 @@ from diarization_cache import assign_studio_voices
 from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
 from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
+from studio_speakers import SpeakerGateError, expected_speakers, validate_speaker_ids, validate_speaker_voices
 from temporary_audio import download_audio_only, sha256_file
 from tts_backends import TTSBackendError, build_backend, SynthesisRequest
 
@@ -73,7 +74,7 @@ def user_facing_message(error):
     Arbitrary SDK text can contain keys and signed URLs. Known pipeline and
     TTS errors are fixed Chinese (or an env-var name, not the secret).
     """
-    if isinstance(error, (StudioError, StudioInputError, PodcastPipelineError, TTSBackendError)):
+    if isinstance(error, (StudioError, StudioInputError, SpeakerGateError, PodcastPipelineError, TTSBackendError)):
         text = str(error)
     elif type(error).__name__.startswith('Diarization'):
         text = str(error)
@@ -391,6 +392,8 @@ class StudioEngine:
             self.process = None
 
     def prepare(self, config, wav):
+        if config.get('content_type') == 'book':
+            raise StudioInputError('书听禁止声纹分析；请使用 studio_books 的章/块入口')
         # Default cluster threshold strategy (do not raise to "fix" oversplit):
         # - local files: 0.5 (sherpa default; preserves real guest splits)
         # - YouTube interviews: 0.9 (0.5 over-splits long talk shows into ghost IDs)
@@ -409,14 +412,16 @@ class StudioEngine:
         if not pieces:
             raise StudioInputError('没有识别出英文对白，请检查文件或字幕')
         self.progress('diarization', 0, 100)
-        bounds = SpeakerBounds(exact=config.get('speaker_count'))
+        bounds = SpeakerBounds(exact=expected_speakers(config))
         turns = self.diarize_with_progress(wav, bounds)
+        validate_speaker_ids(config, (turn.speaker_id for turn in turns))
         assignments = align_caption_pieces(pieces, turns)
         validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=bounds, assignments=assignments)
         # One distant cue (outro, music) used to abort after diarization.
         # Keep the 20% unassigned gate above; attach the rest for review.
         assignments = fill_unassigned_for_review(pieces, turns, assignments)
         segments = group_caption_pieces(pieces, {a.source_index: a.speaker_id for a in assignments}, {a.source_index for a in assignments if a.ambiguous}, max_chars=180)
+        validate_speaker_ids(config, (segment.speaker_id for segment in segments))
         self.progress('translation', 0, len(segments))
         provider = config.get('provider', 'deepseek')
         client = create_translation_client(provider, api_key=self.credential(provider))
@@ -475,6 +480,7 @@ class StudioEngine:
             return False
 
     def render(self, config, document, preview=None, accept_unreviewed=False):
+        validate_speaker_voices(config, document)
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
             raise StudioInputError('段落为空或编号重复')
@@ -651,7 +657,7 @@ class StudioEngine:
                 pass
             visible = user_facing_message(error)
             # Never serialize arbitrary exception strings: SDKs may embed credentials.
-            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, StudioError) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试')
+            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, (StudioError, SpeakerGateError)) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试')
             raise
         finally:
             shutil.rmtree(self.temp, ignore_errors=False)
