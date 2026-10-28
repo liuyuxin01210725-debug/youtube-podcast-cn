@@ -452,10 +452,30 @@ class StudioEngine:
             self.progress(
                 'complete',
                 **resume_fields(book),
-                message='书已按章和块切开。声纹已跳过。按章合成与手机目录留到下一版。',
+                message='书已按章和块切开。声纹已跳过。按章懒合成见 studio_book_synth（enqueue 不跑长 TTS）。',
             )
             return None
-        raise StudioInputError('书听不生成整本一条 MP3。章节已写入 book.json，按章合成留到下一版。')
+        raise StudioInputError('书听不生成整本一条 MP3。章节已写入 book.json；请用 studio_book_synth.enqueue_chapter / enqueue_block 排队按章合成（默认不执行长 TTS）。')
+
+    def book_lazy_synth_summary(self):
+        """Queue + TOC snapshot. Does not run TTS."""
+        from studio_book_synth import summarize
+
+        book_path = self.job / 'book.json'
+        if not book_path.is_file():
+            raise StudioInputError('还没有 book.json')
+        book = json.loads(book_path.read_text())
+        return summarize(self.job, book)
+
+    def book_enqueue_chapter(self, chapter_id: str):
+        """Enqueue one chapter for lazy synth. Does not burn TTS."""
+        from studio_book_synth import enqueue_chapter
+
+        book_path = self.job / 'book.json'
+        if not book_path.is_file():
+            raise StudioInputError('还没有 book.json')
+        book = json.loads(book_path.read_text())
+        return enqueue_chapter(self.job, book, chapter_id)
 
     def prepare(self, config, wav):
         if config.get('content_type') == 'book':

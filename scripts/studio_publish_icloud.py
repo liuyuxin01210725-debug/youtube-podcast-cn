@@ -2,8 +2,10 @@
 """Copy a finished studio episode into the personal iCloud Drive library.
 
 The iPhone app reads the same folder. Preview renders are not published.
-Failures are the caller's problem to swallow: this module raises PublishError
-and does not know about studio exit codes.
+Book packages (``content_type=book`` / ``book.json``) publish ``book.json`` plus
+the ``chapters/<chapter_id>/<block_id>.mp3`` tree — never a whole-book
+``output.mp3``. Failures are the caller's problem to swallow: this module
+raises PublishError and does not know about studio exit codes.
 """
 from __future__ import annotations
 
@@ -590,7 +592,12 @@ def _episode_record(episode_dir: Path) -> dict | None:
     ident = episode_dir.name
     if not _JOB_ID.fullmatch(ident):
         return None
-    if data.get('file') not in (None, AUDIO_NAME):
+    content_type = data.get('content_type')
+    is_book = content_type == 'book' or (episode_dir / 'book.json').is_file()
+    if is_book:
+        if data.get('file') not in (None, AUDIO_NAME):
+            return None
+    elif data.get('file') not in (None, AUDIO_NAME):
         return None
     title = data.get('title')
     created = data.get('created_at')
@@ -605,8 +612,14 @@ def _episode_record(episode_dir: Path) -> dict | None:
         'created_at': created,
         'duration_sec': duration,
         'source_job_id': ident,
-        'file': AUDIO_NAME,
+        'file': None if is_book else AUDIO_NAME,
     }
+    if is_book:
+        record['content_type'] = 'book'
+        if data.get('listen_unit') == 'chapter_block':
+            record['listen_unit'] = 'chapter_block'
+        if data.get('whole_book_file') is False:
+            record['whole_book_file'] = False
     youtube_id = _valid_youtube_id(data.get('youtube_id'))
     if youtube_id:
         record['youtube_id'] = youtube_id
@@ -652,14 +665,154 @@ def _copy_audio(src: Path, dest_dir: Path) -> None:
         raise PublishError(f'复制音频失败：{error}') from error
 
 
-def publish_job(job_dir, library_root=None) -> dict:
-    """Copy output.mp3 and rewrite library.json. Raises PublishError on failure."""
+def is_book_package(job: Path) -> bool:
+    """True when the job is a real Book (book.json / content_type=book), not a podcast."""
+    job = Path(job)
+    if (job / 'book.json').is_file():
+        return True
+    episode = read_json(job / 'episode.json')
+    return isinstance(episode, dict) and episode.get('content_type') == 'book'
+
+
+def _safe_chapter_rel(path: Path, root: Path) -> Path | None:
+    try:
+        rel = path.relative_to(root)
+    except ValueError:
+        return None
+    parts = rel.parts
+    if len(parts) != 2:
+        return None
+    chapter_id, name = parts
+    if not _JOB_ID.fullmatch(chapter_id):
+        return None
+    if not name.endswith('.mp3') or name.startswith('.'):
+        return None
+    block_id = name[:-4]
+    if not _JOB_ID.fullmatch(block_id):
+        return None
+    return rel
+
+
+def _copy_file_atomic(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    temporary = dest.with_name(f'.{dest.name}.{os.getpid()}.partial')
+    try:
+        with src.open('rb') as incoming, temporary.open('wb') as outgoing:
+            shutil.copyfileobj(incoming, outgoing, 1024 * 1024)
+            outgoing.flush()
+            os.fsync(outgoing.fileno())
+        os.replace(temporary, dest)
+    except OSError as error:
+        temporary.unlink(missing_ok=True)
+        raise PublishError(f'复制失败：{error}') from error
+
+
+def copy_chapters_tree(job: Path, episode_dir: Path) -> dict:
+    """Copy ``chapters/<chapter_id>/<block_id>.mp3`` into the iCloud episode folder.
+
+    Path contract (same on Mac job and phone library):
+      episodes/<id>/chapters/<chapter_id>/<block_id>.mp3
+    Skips symlinks and rejects unexpected relative paths. Does not invent
+    a whole-book ``output.mp3``.
+    """
+    src_root = Path(job) / 'chapters'
+    copied = []
+    if not src_root.is_dir():
+        return {'copied': 0, 'files': copied}
+    for mp3 in sorted(src_root.rglob('*.mp3')):
+        if not mp3.is_file() or mp3.is_symlink():
+            continue
+        rel = _safe_chapter_rel(mp3, src_root)
+        if rel is None:
+            continue
+        target = Path(episode_dir) / 'chapters' / rel
+        _copy_file_atomic(mp3, target)
+        copied.append(f'chapters/{rel.as_posix()}')
+    return {'copied': len(copied), 'files': copied}
+
+
+def publish_book_job(job_dir, library_root=None) -> dict:
+    """Publish a Book package: book.json + chapters/ tree, never whole-book output.mp3."""
     job = Path(job_dir).expanduser().resolve()
     if not job.is_dir() or job.is_symlink():
         raise PublishError('任务目录不存在')
     job_id = job.name
     if not _JOB_ID.fullmatch(job_id):
         raise PublishError('任务编号无效')
+    book_path = job / 'book.json'
+    if not book_path.is_file() or book_path.is_symlink():
+        raise PublishError('书听任务缺少 book.json')
+    library = Path(library_root).expanduser().resolve() if library_root else default_library_root()
+    try:
+        library.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        raise PublishError(f'无法创建 iCloud 资料库：{error}') from error
+
+    book = read_json(book_path)
+    title = None
+    if isinstance(book, dict):
+        title = human_title(book.get('title'))
+    if not title:
+        episode_side = read_json(job / 'episode.json')
+        if isinstance(episode_side, dict):
+            title = human_title(episode_side.get('title'))
+    if not title:
+        title = job_id
+    if looks_like_url_title(title):
+        title = job_id
+
+    created_at = datetime.fromtimestamp(book_path.stat().st_mtime, timezone.utc).isoformat(timespec='seconds')
+    episode_dir = library / 'episodes' / job_id
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    _copy_file_atomic(book_path, episode_dir / 'book.json')
+    chapters = copy_chapters_tree(job, episode_dir)
+    # Drop stale whole-book audio if a previous podcast publish left one.
+    stale = episode_dir / AUDIO_NAME
+    if stale.is_file() and not stale.is_symlink():
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+    record = {
+        'id': job_id,
+        'title': title,
+        'created_at': created_at,
+        'duration_sec': None,
+        'source_job_id': job_id,
+        'file': None,
+        'content_type': 'book',
+        'listen_unit': 'chapter_block',
+        'whole_book_file': False,
+        'chapters_copied': chapters['copied'],
+    }
+    try:
+        atomic_write_json(episode_dir / 'episode.json', record)
+        rebuild_library(library)
+    except OSError as error:
+        raise PublishError(f'写入节目清单失败：{error}') from error
+    try:
+        record_status(job, ok=True, episode_dir=str(episode_dir), episode_id=job_id)
+    except OSError:
+        pass
+    return {
+        **record,
+        'episode_dir': str(episode_dir),
+        'library': str(library),
+        'chapters_files': chapters['files'],
+    }
+
+
+def publish_job(job_dir, library_root=None) -> dict:
+    """Copy output.mp3 (podcast) or book chapters/ tree. Raises PublishError on failure."""
+    job = Path(job_dir).expanduser().resolve()
+    if not job.is_dir() or job.is_symlink():
+        raise PublishError('任务目录不存在')
+    job_id = job.name
+    if not _JOB_ID.fullmatch(job_id):
+        raise PublishError('任务编号无效')
+    if is_book_package(job):
+        return publish_book_job(job, library_root=library_root)
     src = job / AUDIO_NAME
     if not src.is_file() or src.is_symlink():
         raise PublishError('任务目录里没有完整的 output.mp3')

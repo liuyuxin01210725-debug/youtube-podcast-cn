@@ -64,7 +64,11 @@ struct LibraryView: View {
                 }
             }
             .navigationDestination(for: Episode.self) { episode in
-                PlayerView(episode: episode)
+                if episode.isBook {
+                    BookPlayerView(episode: episode)
+                } else {
+                    PlayerView(episode: episode)
+                }
             }
         }
     }
@@ -113,6 +117,13 @@ struct LibraryView: View {
                                     Text(episode.title)
                                         .font(.body)
                                         .foregroundStyle(.primary)
+                                    if episode.isBook {
+                                        Text("书")
+                                            .font(.caption2)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Color.orange.opacity(0.18), in: Capsule())
+                                    }
                                     if library.isUnplayed(episode.id) {
                                         Text("未听")
                                             .font(.caption2)
@@ -135,8 +146,16 @@ struct LibraryView: View {
     }
 
     private func subtitle(_ episode: Episode) -> String {
-        var parts = [episode.durationLabel, episode.dateLabel]
-        if episode.downloading { parts.append("正在从 iCloud 下载") }
+        var parts: [String] = []
+        if episode.isBook {
+            parts.append("书 · 章目录")
+        } else {
+            parts.append(episode.durationLabel)
+        }
+        parts.append(episode.dateLabel)
+        if episode.downloading {
+            parts.append(episode.isBook ? "目录下载中" : "正在从 iCloud 下载")
+        }
         return parts.joined(separator: " · ")
     }
 
