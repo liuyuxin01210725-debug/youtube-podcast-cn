@@ -95,6 +95,12 @@ final class LibraryStore: ObservableObject {
         progress[id]?.finished == true
     }
 
+    /// In progress: started (≥5s) and not finished.
+    func isInProgress(_ id: String) -> Bool {
+        guard let entry = progress[id], !entry.finished else { return false }
+        return entry.seconds >= 5
+    }
+
     /// Partial listen only. Finished episodes start over next time; the row says 已听完.
     func continuePointLabel(for id: String) -> String? {
         guard let entry = progress[id], !entry.finished, entry.seconds >= 5 else { return nil }
@@ -367,9 +373,15 @@ final class LibraryStore: ObservableObject {
                     try? fileManager.startDownloadingUbiquitousItem(at: artworkURL)
                 }
             }
+            let show = record.show?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let guests = (record.guests ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            let lensIds = (record.lensIds ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             return Episode(
                 id: id,
                 title: (title?.isEmpty == false ? title! : id),
+                show: (show?.isEmpty == false ? show : nil),
+                guests: guests,
+                lensIds: lensIds,
                 createdAt: EpisodeDate.parse(record.createdAt) ?? Date(timeIntervalSince1970: 0),
                 durationSec: record.durationSec,
                 audioURL: audioURL,
@@ -423,6 +435,9 @@ private struct EpisodeLibrary: Decodable {
 private struct EpisodeRecord: Decodable {
     var id: String?
     var title: String?
+    var show: String?
+    var guests: [String]?
+    var lensIds: [String]?
     var createdAt: String?
     var durationSec: Double?
     var file: String?

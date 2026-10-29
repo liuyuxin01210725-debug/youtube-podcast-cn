@@ -168,7 +168,7 @@ struct DiscoverView: View {
             return
         }
         if let host = url.host?.lowercased(), host.contains("youtube.com") || host == "youtu.be" {
-            articleNote = "YouTube 请用分享到「私人听」，不要走文章入口。"
+            articleNote = "YouTube 请用分享到「声间」，不要走文章入口。"
             return
         }
         library.acceptShare(url: url, sourceApp: "article-paste", contentType: "article", expectedSpeakers: 1)

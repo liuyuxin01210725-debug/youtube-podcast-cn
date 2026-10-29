@@ -63,7 +63,7 @@ final class PlayerModel: ObservableObject {
     private var resumeSeekInFlight = false
     private let speedKey = "PrivateListen.speed"
     private var nowArtwork: MPMediaItemArtwork?
-    private var artist = "私人听"
+    private var artist = "声间"
 
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
@@ -407,8 +407,8 @@ final class PlayerModel: ObservableObject {
     }
 
     private static func showName(in title: String) -> String {
-        guard let range = title.range(of: " · ") else { return "私人听" }
+        guard let range = title.range(of: " · ") else { return "声间" }
         let show = title[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-        return show.isEmpty ? "私人听" : String(show)
+        return show.isEmpty ? "声间" : String(show)
     }
 }
