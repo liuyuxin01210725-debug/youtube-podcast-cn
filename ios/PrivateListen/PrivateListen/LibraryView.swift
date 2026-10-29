@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var player: PlayerModel
+    @EnvironmentObject private var extracts: ExtractStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var picking = false
 
@@ -38,20 +39,27 @@ struct LibraryView: View {
                 player.onProgress = { id, seconds, duration in
                     Task { @MainActor in
                         library.remember(id: id, seconds: seconds, duration: duration)
+                        if let episode = library.episodes.first(where: { $0.id == id }) {
+                            extracts.maybeLightOnFinished(episode: episode, seconds: seconds, duration: duration)
+                        }
                     }
                 }
                 library.reload()
+                extracts.reloadAll(episodes: library.episodes)
             }
             .onChange(of: scenePhase) { _, phase in
-                if phase == .active { library.reload() }
+                if phase == .active {
+                    library.reload()
+                    extracts.reloadAll(episodes: library.episodes)
+                }
             }
             .task(id: scenePhase) {
-                // While open, keep picking up Mac publishes and finished iCloud downloads.
                 guard scenePhase == .active else { return }
                 while !Task.isCancelled {
                     try? await Task.sleep(for: .seconds(library.waitingOnCloud ? 8 : 60))
                     if Task.isCancelled { break }
                     library.reload()
+                    extracts.reloadAll(episodes: library.episodes)
                 }
             }
             .fileImporter(isPresented: $picking, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
@@ -90,6 +98,13 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            if let banner = extracts.banner, !banner.isEmpty {
+                Section {
+                    Text(banner)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
             if !library.inbox.isEmpty {
                 Section("收件箱") {
                     ForEach(library.inbox) { item in
@@ -106,38 +121,65 @@ struct LibraryView: View {
             }
             if !library.episodes.isEmpty {
                 Section {
-                    ForEach(library.episodes) { episode in
-                        NavigationLink(value: episode) {
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                    Text(episode.title)
-                                        .font(.body)
-                                        .foregroundStyle(.primary)
-                                    if library.isUnplayed(episode.id) {
-                                        Text("未听")
-                                            .font(.caption2)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.accentColor.opacity(0.15), in: Capsule())
-                                    }
-                                }
-                                Text(subtitle(episode))
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.vertical, 4)
-                        }
-                    }
+                    episodeRows
                 }
             }
         }
-        .refreshable { library.reload() }
+        .refreshable {
+            library.reload()
+            extracts.reloadAll(episodes: library.episodes)
+        }
+    }
+
+    private var episodeRows: some View {
+        var density = 0
+        return ForEach(library.episodes) { episode in
+            let badge = extracts.badge(for: episode.id, densityUsed: &density)
+            NavigationLink(value: episode) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(episode.title)
+                            .font(.body)
+                            .foregroundStyle(.primary)
+                        if library.isUnplayed(episode.id) {
+                            listenBadge("未听", emphasized: true)
+                        } else if library.isFinished(episode.id) {
+                            listenBadge("已听完", emphasized: false)
+                        }
+                        if extracts.isStarred(episode.id) {
+                            Image(systemName: "star.fill")
+                                .font(.caption2)
+                                .foregroundStyle(.yellow)
+                        }
+                        if let badge {
+                            listenBadge(badge, emphasized: badge.contains("待确认"))
+                        }
+                    }
+                    Text(subtitle(episode))
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.vertical, 4)
+            }
+        }
     }
 
     private func subtitle(_ episode: Episode) -> String {
         var parts = [episode.durationLabel, episode.dateLabel]
         if episode.downloading { parts.append("正在从 iCloud 下载") }
         return parts.joined(separator: " · ")
+    }
+
+    private func listenBadge(_ title: String, emphasized: Bool) -> some View {
+        Text(title)
+            .font(.caption2)
+            .foregroundStyle(emphasized ? Color.accentColor : Color.secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                (emphasized ? Color.accentColor : Color.primary).opacity(emphasized ? 0.15 : 0.08),
+                in: Capsule()
+            )
     }
 
     private func prompt(title: String, systemImage: String, detail: String) -> some View {
@@ -164,6 +206,9 @@ struct LibraryView: View {
             .padding(24)
             .frame(maxWidth: .infinity, minHeight: 360)
         }
-        .refreshable { library.reload() }
+        .refreshable {
+            library.reload()
+            extracts.reloadAll(episodes: library.episodes)
+        }
     }
 }

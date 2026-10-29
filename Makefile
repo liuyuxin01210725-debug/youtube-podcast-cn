@@ -3,7 +3,7 @@ PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else e
 .PHONY: test test-public test-podcast test-tts
 
 test: test-public test-podcast test-tts
-	@$(PYTHON) -m unittest tests.test_studio_engine tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles
+	@$(PYTHON) -m unittest tests.test_studio_engine tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
 	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh bin/setup-studio.sh bin/中文播客工作台.command
 	@echo "All tests passed."
 

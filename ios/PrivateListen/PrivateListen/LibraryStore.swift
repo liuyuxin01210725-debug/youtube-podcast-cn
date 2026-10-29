@@ -92,6 +92,10 @@ final class LibraryStore: ObservableObject {
         return entry.seconds < 5 && !entry.finished
     }
 
+    func isFinished(_ id: String) -> Bool {
+        progress[id]?.finished == true
+    }
+
     func resumeSeconds(for id: String) -> Double {
         guard let entry = progress[id], !entry.finished else { return 0 }
         return max(0, entry.seconds)

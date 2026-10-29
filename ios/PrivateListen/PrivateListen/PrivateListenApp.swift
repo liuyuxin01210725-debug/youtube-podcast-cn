@@ -4,6 +4,7 @@ import SwiftUI
 struct PrivateListenApp: App {
     @StateObject private var library = LibraryStore()
     @StateObject private var player = PlayerModel()
+    @StateObject private var extracts = ExtractStore()
 
     var body: some Scene {
         WindowGroup {
@@ -15,6 +16,7 @@ struct PrivateListenApp: App {
             }
             .environmentObject(library)
             .environmentObject(player)
+            .environmentObject(extracts)
             .onOpenURL { url in
                 library.acceptIncoming(url)
             }
