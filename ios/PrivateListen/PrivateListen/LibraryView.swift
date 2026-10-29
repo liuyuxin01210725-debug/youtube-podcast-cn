@@ -7,6 +7,7 @@ struct LibraryView: View {
     @EnvironmentObject private var extracts: ExtractStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var picking = false
+    @State private var showExtractDesign = false
 
     var body: some View {
         NavigationStack {
@@ -29,7 +30,20 @@ struct LibraryView: View {
             }
             .navigationTitle("私人听")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            Task { @MainActor in
+                                showExtractDesign = true
+                            }
+                        } label: {
+                            Label("收藏≠拥有 · 设计", systemImage: "doc.plaintext")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("更多")
+
                     Button(library.hasCloudFolder ? "重新选择" : "选择资料库") {
                         picking = true
                     }
@@ -51,6 +65,8 @@ struct LibraryView: View {
                 if phase == .active {
                     library.reload()
                     extracts.reloadAll(episodes: library.episodes)
+                } else {
+                    player.checkpoint()
                 }
             }
             .task(id: scenePhase) {
@@ -73,6 +89,9 @@ struct LibraryView: View {
             }
             .navigationDestination(for: Episode.self) { episode in
                 PlayerView(episode: episode)
+            }
+            .navigationDestination(isPresented: $showExtractDesign) {
+                ExtractDesignView()
             }
         }
     }
@@ -158,6 +177,9 @@ struct LibraryView: View {
                     Text(subtitle(episode))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    if let fraction = library.playedFraction(for: episode) {
+                        listenBar(fraction)
+                    }
                 }
                 .padding(.vertical, 4)
             }
@@ -166,6 +188,9 @@ struct LibraryView: View {
 
     private func subtitle(_ episode: Episode) -> String {
         var parts = [episode.durationLabel, episode.dateLabel]
+        if let heard = library.continuePointLabel(for: episode.id) {
+            parts.append(heard)
+        }
         if episode.downloading { parts.append("正在从 iCloud 下载") }
         return parts.joined(separator: " · ")
     }
@@ -180,6 +205,14 @@ struct LibraryView: View {
                 (emphasized ? Color.accentColor : Color.primary).opacity(emphasized ? 0.15 : 0.08),
                 in: Capsule()
             )
+    }
+
+    private func listenBar(_ fraction: Double) -> some View {
+        ProgressView(value: min(1, max(0, fraction)))
+            .progressViewStyle(.linear)
+            .tint(Color.primary.opacity(0.55))
+            .accessibilityLabel("上次听到")
+            .accessibilityValue("\(Int((fraction * 100).rounded()))%")
     }
 
     private func prompt(title: String, systemImage: String, detail: String) -> some View {
