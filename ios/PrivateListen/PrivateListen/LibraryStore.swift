@@ -108,10 +108,6 @@ final class LibraryStore: ObservableObject {
         return min(1, max(0, entry.seconds / duration))
     }
 
-    func isFinished(_ id: String) -> Bool {
-        progress[id]?.finished == true
-    }
-
     func resumeSeconds(for id: String) -> Double {
         Self.resumeSeconds(in: progress, id: id)
     }
