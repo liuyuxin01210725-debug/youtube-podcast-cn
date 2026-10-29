@@ -44,6 +44,11 @@ struct PlayerView: View {
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
             }
+            if let continueCaption {
+                Text(continueCaption)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 36) {
                 Button { player.skip(-15) } label: {
                     Image(systemName: "gobackward.15")
@@ -54,7 +59,7 @@ struct PlayerView: View {
                     Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
                         .font(.system(size: 68))
                 }
-                .accessibilityLabel(player.isPlaying ? "暂停" : "播放")
+                .accessibilityLabel(player.isPlaying ? "暂停" : (continueCaption == nil ? "播放" : "继续听"))
                 Button { player.skip(15) } label: {
                     Image(systemName: "goforward.15")
                         .font(.title)
@@ -101,5 +106,14 @@ struct PlayerView: View {
     private var sliderUpper: Double {
         let value = player.duration > 1 ? player.duration : max(episode.durationSec ?? 0, 1)
         return value
+    }
+
+    /// Paused in the middle of an episode. Playback still starts at `player.current`.
+    private var continueCaption: String? {
+        guard player.errorText == nil, !player.isPlaying else { return nil }
+        let position = player.current
+        guard position > 5 else { return nil }
+        if player.duration > 1, position >= player.duration - 15 { return nil }
+        return "继续听 · \(listenClock(position))"
     }
 }
