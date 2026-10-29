@@ -6,6 +6,7 @@ struct LibraryView: View {
     @EnvironmentObject private var player: PlayerModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var picking = false
+    @State private var showExtractDesign = false
 
     var body: some View {
         NavigationStack {
@@ -28,7 +29,20 @@ struct LibraryView: View {
             }
             .navigationTitle("私人听")
             .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            Task { @MainActor in
+                                showExtractDesign = true
+                            }
+                        } label: {
+                            Label("收藏≠拥有 · 设计", systemImage: "doc.plaintext")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("更多")
+
                     Button(library.hasCloudFolder ? "重新选择" : "选择资料库") {
                         picking = true
                     }
@@ -65,6 +79,9 @@ struct LibraryView: View {
             }
             .navigationDestination(for: Episode.self) { episode in
                 PlayerView(episode: episode)
+            }
+            .navigationDestination(isPresented: $showExtractDesign) {
+                ExtractDesignView()
             }
         }
     }
