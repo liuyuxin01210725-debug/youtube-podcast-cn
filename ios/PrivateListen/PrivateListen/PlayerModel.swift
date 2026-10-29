@@ -52,6 +52,15 @@ final class PlayerModel: ObservableObject {
     private var interruptionObserver: NSObjectProtocol?
     private var itemWatchers = Set<AnyCancellable>()
     private var lastSaved: Double = -1
+    /// Ignore playhead ticks until a resume seek has landed. Otherwise the observer
+    /// writes 0 over the saved episode and the next launch starts over.
+    private var positionTrusted = false
+    private var pendingResume: Double?
+    private var playWhenReady = false
+    private var dropPrematureZero = false
+    private var openGeneration = 0
+    private var resumeSeekID = 0
+    private var resumeSeekInFlight = false
     private let speedKey = "PrivateListen.speed"
     private var nowArtwork: MPMediaItemArtwork?
     private var artist = "私人听"
@@ -85,12 +94,22 @@ final class PlayerModel: ObservableObject {
             updateNowPlaying()
             return
         }
+        if positionTrusted { checkpoint() }
+        openGeneration += 1
+        let generation = openGeneration
+        pendingResume = nil
+        playWhenReady = false
+        dropPrematureZero = false
+        positionTrusted = false
+        resumeSeekInFlight = false
+        resumeSeekID += 1
         currentID = episode.id
         title = episode.title
         artist = Self.showName(in: episode.title)
         nowArtwork = ArtworkImage.nowPlayingItem(for: episode)
         errorText = nil
-        current = 0
+        let start = max(0, resumeAt)
+        current = start
         duration = episode.durationSec ?? 0
         lastSaved = -1
         guard LocalAudio.isPlayable(episode.audioURL) else {
@@ -103,13 +122,25 @@ final class PlayerModel: ObservableObject {
         }
         let item = AVPlayerItem(url: episode.audioURL)
         itemWatchers.removeAll()
+        if start > 1 {
+            pendingResume = start
+            playWhenReady = true
+        } else {
+            positionTrusted = true
+            playWhenReady = true
+        }
         item.publisher(for: \.status)
             .receive(on: RunLoop.main)
             .sink { [weak self] status in
+                guard let self, self.openGeneration == generation else { return }
                 if status == .failed {
-                    self?.errorText = "这段音频打不开。"
-                    self?.isPlaying = false
-                    self?.updateNowPlaying()
+                    self.pendingResume = nil
+                    self.playWhenReady = false
+                    self.errorText = "这段音频打不开。"
+                    self.isPlaying = false
+                    self.updateNowPlaying()
+                } else if status == .readyToPlay {
+                    self.applyPendingResume(generation: generation)
                 }
             }
             .store(in: &itemWatchers)
@@ -117,7 +148,7 @@ final class PlayerModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] time in
                 let seconds = time.seconds
-                guard let self, seconds.isFinite, seconds > 0 else { return }
+                guard let self, self.openGeneration == generation, seconds.isFinite, seconds > 0 else { return }
                 self.duration = seconds
                 self.updateNowPlaying()
             }
@@ -130,20 +161,59 @@ final class PlayerModel: ObservableObject {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            self?.handleEnded()
+            guard let self, self.openGeneration == generation else { return }
+            self.handleEnded()
         }
         player.replaceCurrentItem(with: item)
-        let start = max(0, resumeAt)
-        if start > 1 {
+        if item.status == .readyToPlay {
+            applyPendingResume(generation: generation)
+        }
+        if start <= 1 {
+            resume()
+        } else {
+            isPlaying = false
+            updateNowPlaying()
+        }
+    }
+
+    private func applyPendingResume(generation: Int) {
+        guard openGeneration == generation, let start = pendingResume else { return }
+        pendingResume = nil
+        resumeSeekID += 1
+        resumeSeekInFlight = true
+        let seekID = resumeSeekID
+        let target = CMTime(seconds: start, preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.finishResumeSeek(start: start, generation: generation, seekID: seekID, allowRetry: true)
+            }
+        }
+    }
+
+    private func finishResumeSeek(start: Double, generation: Int, seekID: Int, allowRetry: Bool) {
+        guard openGeneration == generation, resumeSeekID == seekID else { return }
+        let landed = player.currentTime().seconds
+        if allowRetry, start > 1, !landed.isFinite || landed < 1 {
             let target = CMTime(seconds: start, preferredTimescale: 600)
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.current = start
-                    self?.resume()
+                    self?.finishResumeSeek(start: start, generation: generation, seekID: seekID, allowRetry: false)
                 }
             }
+            return
+        }
+        resumeSeekInFlight = false
+        if landed.isFinite, landed >= 1 {
+            current = landed
         } else {
+            current = start
+        }
+        dropPrematureZero = true
+        positionTrusted = true
+        if playWhenReady {
             resume()
+        } else {
+            updateNowPlaying()
         }
     }
 
@@ -156,7 +226,12 @@ final class PlayerModel: ObservableObject {
     }
 
     func resume() {
-        guard errorText == nil, player.currentItem != nil else { return }
+        guard errorText == nil else { return }
+        if pendingResume != nil || resumeSeekInFlight {
+            playWhenReady = true
+            return
+        }
+        guard player.currentItem != nil else { return }
         if duration > 1, current >= duration - 0.5 {
             seek(to: 0, autoplay: true)
             return
@@ -168,6 +243,7 @@ final class PlayerModel: ObservableObject {
     }
 
     func pause() {
+        playWhenReady = false
         player.pause()
         isPlaying = false
         checkpoint()
@@ -182,6 +258,9 @@ final class PlayerModel: ObservableObject {
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
         let shouldPlay = autoplay ?? isPlaying
+        pendingResume = nil
+        resumeSeekID += 1
+        resumeSeekInFlight = false
         player.seek(
             to: CMTime(seconds: targetSeconds, preferredTimescale: 600),
             toleranceBefore: .zero,
@@ -189,6 +268,8 @@ final class PlayerModel: ObservableObject {
         ) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.dropPrematureZero = false
+                self.positionTrusted = true
                 self.current = targetSeconds
                 self.checkpoint()
                 if shouldPlay {
@@ -210,13 +291,15 @@ final class PlayerModel: ObservableObject {
     }
 
     func checkpoint() {
-        guard let currentID else { return }
+        guard positionTrusted, let currentID else { return }
         lastSaved = current
         onProgress?(currentID, current, duration)
     }
 
     private func handle(time seconds: Double) {
-        guard seconds.isFinite, seconds >= 0 else { return }
+        guard positionTrusted, seconds.isFinite, seconds >= 0 else { return }
+        if dropPrematureZero, seconds < 1 { return }
+        dropPrematureZero = false
         current = seconds
         if let itemDuration = player.currentItem?.duration.seconds, itemDuration.isFinite, itemDuration > 0 {
             duration = itemDuration
