@@ -254,7 +254,7 @@ struct LibraryView: View {
                                 .foregroundStyle(.yellow)
                         }
                         if let badge {
-                            listenBadge(badge, emphasized: badge.contains("待确认"))
+                            listenBadge(badge, emphasized: badge.contains("要点") || badge == "已提炼")
                         }
                     }
                     Text(subtitle(episode))

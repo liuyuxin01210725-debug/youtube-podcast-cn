@@ -34,11 +34,11 @@ final class ExtractStore: ObservableObject {
             return "提炼失败"
         case .ready:
             if packet.mode == .light { return nil }
-            let n = packet.pendingConfirmCount ?? packet.computedPendingCount
+            let n = packet.visiblePointCount
             if n <= 0 { return "已提炼" }
-            if densityUsed >= listBadgeDensityCap { return "有待确认" }
+            if densityUsed >= listBadgeDensityCap { return "已提炼" }
             densityUsed += 1
-            return "\(n)待确认"
+            return "\(n)要点"
         }
     }
 
@@ -132,7 +132,7 @@ final class ExtractStore: ObservableObject {
         }
     }
 
-    /// 听完近结尾（沿用 duration-15s）→ light；不进待确认。
+    /// 听完近结尾（沿用 duration-15s）→ light；轻摘一览，点星可深抽。
     func maybeLightOnFinished(episode: Episode, seconds: Double, duration: Double) {
         guard duration > 1, seconds >= max(0, duration - 15) else { return }
         if let existing = packets[episode.id], existing.mode == .deep, existing.status == .ready || existing.status == .queued || existing.status == .running {

@@ -1,12 +1,12 @@
 import SwiftUI
 
-/// 详情提炼区：默认只展待确认；health「仅记录」+免责；跳回原句只 seek。
+/// 详情提炼区：点星深抽后直接展示要点结果（方法/观点/实体/金句/开放问题）。
+/// status 字段仍保留在模型里；UI 不做「待确认→确认/丢掉」主交互。
 struct ExtractDetailSection: View {
     let episode: Episode
     @ObservedObject var extracts: ExtractStore
     @EnvironmentObject private var player: PlayerModel
     @State private var showSchemaPicker = false
-    @State private var showConfirmed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -17,20 +17,32 @@ struct ExtractDetailSection: View {
                     Text(packet.summaryLine ?? "听完轻摘")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("轻摘不进待确认")
+                    Text("轻摘一览；点星可深抽更多要点")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    resultBlocks(packet)
                 } else {
-                    pendingBlocks(packet)
-                    if showConfirmed {
-                        confirmedBlocks(packet)
-                    } else if hasConfirmed(packet) {
-                        Button("显示已确认 / 低置信") { showConfirmed = true }
+                    switch packet.status {
+                    case .queued, .running:
+                        Text(packet.summaryLine ?? "正在提炼本集要点…")
                             .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    case .failed:
+                        Text(packet.summaryLine ?? packet.failureReason ?? "提炼失败，可改主题重抽")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    case .ready, .stale:
+                        if resultIsEmpty(packet) {
+                            Text("暂无要点。可从菜单改主题重抽。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            resultBlocks(packet)
+                        }
                     }
                 }
             } else {
-                Text("星标本集以启动深抽，或听完后自动轻摘。")
+                Text("点星开始提炼")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -94,51 +106,50 @@ struct ExtractDetailSection: View {
         switch packet.status {
         case .queued: return "排队中"
         case .running: return "抽取中"
-        case .ready: return packet.mode == .light ? "轻摘就绪" : "待确认 \(packet.pendingConfirmCount ?? packet.computedPendingCount)"
+        case .ready:
+            if packet.mode == .light { return "轻摘就绪" }
+            let n = packet.visiblePointCount
+            return n > 0 ? "已提炼 · 要点 \(n)" : "已提炼"
         case .failed:
             return packet.summaryLine ?? "失败"
         case .stale: return "已过期"
         }
     }
 
-    private func pendingBlocks(_ packet: ExtractionPacket) -> some View {
+    private func resultIsEmpty(_ packet: ExtractionPacket) -> Bool {
+        packet.visiblePointCount == 0
+    }
+
+    /// 直接列出 schema 有的槽；丢弃项不展；低置信仍展（便于查漏）。
+    private func resultBlocks(_ packet: ExtractionPacket) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(packet.methods.filter { $0.status == .candidate && !($0.lowConfidence ?? false) }, id: \.id) { method in
+            ForEach(packet.methods.filter { $0.status != .discarded }, id: \.id) { method in
                 methodCard(method, packet: packet)
             }
-            ForEach(packet.claims.filter { $0.status == .candidate && !($0.lowConfidence ?? false) }, id: \.id) { claim in
+            ForEach(packet.claims.filter { $0.status != .discarded }, id: \.id) { claim in
                 claimCard(claim, packet: packet)
             }
-            ForEach(packet.entities.filter { $0.status == .candidate && !($0.lowConfidence ?? false) }, id: \.id) { entity in
+            ForEach(packet.entities.filter { $0.status != .discarded }, id: \.id) { entity in
                 entityCard(entity)
             }
-            ForEach(packet.openQuestions.filter { $0.status == .candidate }, id: \.id) { q in
+            ForEach(packet.quotes.filter { $0.status != .discarded }, id: \.id) { quote in
+                quoteCard(quote)
+            }
+            ForEach(packet.openQuestions.filter { $0.status != .discarded }, id: \.id) { q in
                 openCard(q)
             }
         }
     }
 
-    private func confirmedBlocks(_ packet: ExtractionPacket) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("已确认 / 其它")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            ForEach(packet.methods.filter { $0.status != .candidate || ($0.lowConfidence ?? false) }, id: \.id) { method in
-                methodCard(method, packet: packet)
-            }
-            ForEach(packet.claims.filter { $0.status != .candidate || ($0.lowConfidence ?? false) }, id: \.id) { claim in
-                claimCard(claim, packet: packet)
-            }
-        }
-    }
-
-    private func hasConfirmed(_ packet: ExtractionPacket) -> Bool {
-        packet.methods.contains { $0.status != .candidate || ($0.lowConfidence ?? false) }
-            || packet.claims.contains { $0.status != .candidate || ($0.lowConfidence ?? false) }
-    }
-
     private func methodCard(_ method: ExtractMethod, packet: ExtractionPacket) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("方法")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                seekButton(tStart: method.tStart)
+            }
             Text(method.title)
                 .font(.subheadline.weight(.semibold))
             if let steps = method.steps, !steps.isEmpty {
@@ -152,28 +163,19 @@ struct ExtractDetailSection: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            HStack(spacing: 12) {
-                let label = method.uiPrimaryLabel
-                    ?? (packet.schemaId == .health && method.pointType == "method_dose" ? "仅记录" : primaryLabel(method.defaultAction))
-                Button(label) {
-                    extracts.setItemStatus(episode: episode, itemId: method.id, status: .confirmed)
-                }
-                .buttonStyle(.borderedProminent)
-                if let disclaimer = method.disclaimer, !disclaimer.isEmpty {
-                    Text(disclaimer)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else if packet.schemaId == .health && method.pointType == "method_dose" {
-                    Text("非诊断、非处方，可丢弃")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                seekButton(tStart: method.tStart)
-                Button("丢弃", role: .destructive) {
-                    extracts.setItemStatus(episode: episode, itemId: method.id, status: .discarded)
-                }
-                .font(.caption)
+            if let disclaimer = method.disclaimer, !disclaimer.isEmpty {
+                Text(disclaimer)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else if packet.schemaId == .health && method.pointType == "method_dose" {
+                Text("非诊断、非处方，仅作记录")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if method.lowConfidence == true {
+                Text("低置信 · 可改主题重抽")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
             }
         }
         .padding(10)
@@ -182,6 +184,13 @@ struct ExtractDetailSection: View {
 
     private func claimCard(_ claim: ExtractClaim, packet: ExtractionPacket) -> some View {
         VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("观点")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                seekButton(tStart: claim.tStart)
+            }
             Text(claim.text)
                 .font(.subheadline)
             // §13.5 biz_invest：主视觉不展示看多/看空
@@ -190,17 +199,10 @@ struct ExtractDetailSection: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            HStack {
-                Button("确认") {
-                    extracts.setItemStatus(episode: episode, itemId: claim.id, status: .confirmed)
-                }
-                .buttonStyle(.bordered)
-                Spacer()
-                seekButton(tStart: claim.tStart)
-                Button("丢弃", role: .destructive) {
-                    extracts.setItemStatus(episode: episode, itemId: claim.id, status: .discarded)
-                }
-                .font(.caption)
+            if claim.lowConfidence == true {
+                Text("低置信 · 可改主题重抽")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
             }
         }
         .padding(10)
@@ -208,20 +210,42 @@ struct ExtractDetailSection: View {
     }
 
     private func entityCard(_ entity: ExtractEntity) -> some View {
-        HStack {
+        HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(entity.type) · \(entity.nameZh ?? entity.nameSrc)")
-                    .font(.subheadline)
-                Text("默认候选，确认后才关注")
+                Text("实体")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                Text("\(entity.type) · \(entity.nameZh ?? entity.nameSrc)")
+                    .font(.subheadline)
+                if entity.lowConfidence == true {
+                    Text("低置信")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
             }
             Spacer()
-            Button("确认") {
-                extracts.setItemStatus(episode: episode, itemId: entity.id, status: .confirmed)
-            }
-            .buttonStyle(.bordered)
             seekButton(tStart: entity.tStart)
+        }
+        .padding(10)
+        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func quoteCard(_ quote: ExtractQuote) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("金句")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                seekButton(tStart: quote.tStart)
+            }
+            Text(quote.text)
+                .font(.subheadline)
+            if quote.lowConfidence == true {
+                Text("低置信")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+            }
         }
         .padding(10)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
@@ -229,16 +253,15 @@ struct ExtractDetailSection: View {
 
     private func openCard(_ q: ExtractOpenQuestion) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(q.text)
-                .font(.subheadline)
-            HStack {
-                Button("确认") {
-                    extracts.setItemStatus(episode: episode, itemId: q.id, status: .confirmed)
-                }
-                .buttonStyle(.bordered)
+            HStack(alignment: .firstTextBaseline) {
+                Text("开放问题")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 seekButton(tStart: q.tStart)
             }
+            Text(q.text)
+                .font(.subheadline)
         }
         .padding(10)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
@@ -254,15 +277,5 @@ struct ExtractDetailSection: View {
         }
         .accessibilityLabel("跳回原句")
         .disabled(tStart == nil)
-    }
-
-    private func primaryLabel(_ action: String?) -> String {
-        switch action {
-        case "record_only": return "仅记录"
-        case "try_later": return "待实践"
-        case "ferment_note": return "记工艺"
-        case "monitor_candidate": return "观察候选"
-        default: return "确认"
-        }
     }
 }

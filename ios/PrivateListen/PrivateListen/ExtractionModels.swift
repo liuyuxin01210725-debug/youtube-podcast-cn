@@ -85,6 +85,18 @@ struct ExtractionPacket: Codable, Hashable {
             + countPending(quotes, status: { $0.status }, low: { $0.lowConfidence })
             + countPending(openQuestions, status: { $0.status }, low: { $0.lowConfidence })
     }
+
+    /// UI 结果列表用：非丢弃要点总数（status 仍可保留 candidate）。
+    var visiblePointCount: Int {
+        func countVisible<T>(_ items: [T], status: (T) -> ItemStatus) -> Int {
+            items.filter { status($0) != .discarded }.count
+        }
+        return countVisible(claims, status: { $0.status })
+            + countVisible(methods, status: { $0.status })
+            + countVisible(entities, status: { $0.status })
+            + countVisible(quotes, status: { $0.status })
+            + countVisible(openQuestions, status: { $0.status })
+    }
 }
 
 protocol ExtractItem {
