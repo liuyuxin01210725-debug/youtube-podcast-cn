@@ -693,6 +693,12 @@ def publish_job(job_dir, library_root=None) -> dict:
     if isinstance(cover, dict) and cover.get('file') in ('cover.jpg', 'cover.png', 'cover.webp') and cover.get('kind') in ('provided', 'thumbnail', 'title', 'placeholder'):
         record['artwork'] = cover['file']
         record['artwork_kind'] = cover['kind']
+    # §13.2：再发布时保留 extract.json 确认/丢弃/动作；哈希变化标 stale。
+    try:
+        from studio_extract import preserve_extract_on_republish
+        preserve_extract_on_republish(episode_dir)
+    except Exception:
+        pass
     try:
         atomic_write_json(episode_dir / 'episode.json', record)
         rebuild_library(library)

@@ -309,6 +309,32 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(listed['job-cover']['artwork'], 'cover.jpg')
 
 
+    def test_publish_preserves_extract_json(self):
+        """§13.2：再发布不得整文件清掉 extract.json。"""
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root)
+            with patch('studio_publish_icloud.shutil.which', return_value=None):
+                publish_job(job, library)
+            episode_dir = Path(library) / 'episodes' / job.name
+            extract = {
+                'packet_id': 'p1', 'work_id': job.name, 'schema_id': 'ferment',
+                'mode': 'deep', 'status': 'ready', 'created_at': '2026-10-29T00:00:00+00:00',
+                'claims': [], 'methods': [{'id': 'm1', 'title': '盐曲', 'status': 'confirmed',
+                                           'span': '盐曲按两斤盐一斤曲密封', 't_start': 1, 't_end': 2,
+                                           'point_type': 'method_craft'}],
+                'entities': [], 'quotes': [], 'open_questions': [],
+                'actions': [{'id': 'a1', 'kind': 'try_later', 'item_id': 'm1'}],
+                'transcript_hash': 'abc',
+            }
+            (episode_dir / 'extract.json').write_text(json.dumps(extract), encoding='utf-8')
+            (job / 'output.mp3').write_bytes(b'republish')
+            with patch('studio_publish_icloud.shutil.which', return_value=None):
+                publish_job(job, library)
+            kept = json.loads((episode_dir / 'extract.json').read_text(encoding='utf-8'))
+            self.assertEqual(kept['methods'][0]['status'], 'confirmed')
+            self.assertEqual(kept['actions'][0]['id'], 'a1')
+
+
 class EngineHookTests(unittest.TestCase):
     def ready_engine(self, root):
         engine = StudioEngine(Path(root) / '6d898d4192de495fafcec86b9c938430')
@@ -378,7 +404,6 @@ class ServerHookTests(unittest.TestCase):
             before = read(job / 'state.json')
             studio.retry_private_listen(link)
             self.assertEqual(read(job / 'state.json'), before)
-
 
 if __name__ == '__main__':
     unittest.main()
