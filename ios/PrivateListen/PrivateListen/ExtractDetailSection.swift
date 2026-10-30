@@ -148,7 +148,7 @@ struct ExtractDetailSection: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                seekButton(tStart: method.tStart)
+                seekButton(tStart: method.tStart, tEnd: method.tEnd)
             }
             Text(method.title)
                 .font(.subheadline.weight(.semibold))
@@ -189,7 +189,7 @@ struct ExtractDetailSection: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                seekButton(tStart: claim.tStart)
+                seekButton(tStart: claim.tStart, tEnd: claim.tEnd)
             }
             Text(claim.text)
                 .font(.subheadline)
@@ -224,7 +224,7 @@ struct ExtractDetailSection: View {
                 }
             }
             Spacer()
-            seekButton(tStart: entity.tStart)
+            seekButton(tStart: entity.tStart, tEnd: entity.tEnd)
         }
         .padding(10)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
@@ -237,7 +237,7 @@ struct ExtractDetailSection: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                seekButton(tStart: quote.tStart)
+                seekButton(tStart: quote.tStart, tEnd: quote.tEnd)
             }
             Text(quote.text)
                 .font(.subheadline)
@@ -258,7 +258,7 @@ struct ExtractDetailSection: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Spacer()
-                seekButton(tStart: q.tStart)
+                seekButton(tStart: q.tStart, tEnd: q.tEnd)
             }
             Text(q.text)
                 .font(.subheadline)
@@ -267,15 +267,19 @@ struct ExtractDetailSection: View {
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// §13.2：跳回原句只 seek，不写 ListenMark。
-    private func seekButton(tStart: Double?) -> some View {
+    /// 切片 A「听这段」：seek → t_start，播到 t_end（缺省则 +20s）后暂停；§13.2 不写 ListenMark。
+    private func seekButton(tStart: Double?, tEnd: Double?) -> some View {
         Button {
             guard let tStart else { return }
-            player.seek(to: tStart, autoplay: true)
+            player.playClip(from: tStart, to: tEnd)
         } label: {
-            Image(systemName: "text.badge.checkmark")
+            Label("听这段", systemImage: "headphones")
+                .font(.caption.weight(.semibold))
+                .labelStyle(.titleAndIcon)
         }
-        .accessibilityLabel("跳回原句")
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityLabel("听这段")
         .disabled(tStart == nil)
     }
 }

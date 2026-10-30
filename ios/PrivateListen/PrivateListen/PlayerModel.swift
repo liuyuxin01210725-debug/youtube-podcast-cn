@@ -64,6 +64,10 @@ final class PlayerModel: ObservableObject {
     private let speedKey = "PrivateListen.speed"
     private var nowArtwork: MPMediaItemArtwork?
     private var artist = "声间"
+    /// When set, auto-pause once playhead reaches this time (output.mp3 axis).
+    private var clipStopAt: Double?
+    /// While true, checkpoint/onProgress must not write ListenMark (§13.2 clip path).
+    private var clipSuppressListenMark = false
 
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
@@ -103,6 +107,7 @@ final class PlayerModel: ObservableObject {
         positionTrusted = false
         resumeSeekInFlight = false
         resumeSeekID += 1
+        clearClipPlayback(restoreListenMarkWrites: true)
         currentID = episode.id
         title = episode.title
         artist = Self.showName(in: episode.title)
@@ -246,7 +251,11 @@ final class PlayerModel: ObservableObject {
         playWhenReady = false
         player.pause()
         isPlaying = false
-        checkpoint()
+        let suppress = clipSuppressListenMark
+        clearClipPlayback(restoreListenMarkWrites: true)
+        if !suppress {
+            checkpoint()
+        }
         updateNowPlaying()
     }
 
@@ -254,7 +263,26 @@ final class PlayerModel: ObservableObject {
         seek(to: current + delta, autoplay: isPlaying)
     }
 
-    func seek(to seconds: Double, autoplay: Bool? = nil) {
+    /// Slice A: seek to `start`, play, pause at `end` (or start+fallback). Does not write ListenMark.
+    /// Missing / invalid `end` (`nil` or `<= start`) → stop at `start + fallbackSeconds` (default 20s per addendum).
+    func playClip(from start: Double, to end: Double?, fallbackSeconds: Double = 20) {
+        let stop = Self.resolveClipStop(start: start, end: end, fallbackSeconds: fallbackSeconds)
+        clipSuppressListenMark = true
+        clipStopAt = stop
+        seek(to: start, autoplay: true, clearClip: false)
+    }
+
+    static func resolveClipStop(start: Double, end: Double?, fallbackSeconds: Double = 20) -> Double {
+        if let end, end > start {
+            return end
+        }
+        return start + max(1, fallbackSeconds)
+    }
+
+    func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true) {
+        if clearClip {
+            clearClipPlayback(restoreListenMarkWrites: true)
+        }
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
         let shouldPlay = autoplay ?? isPlaying
@@ -281,6 +309,13 @@ final class PlayerModel: ObservableObject {
         }
     }
 
+    private func clearClipPlayback(restoreListenMarkWrites: Bool) {
+        clipStopAt = nil
+        if restoreListenMarkWrites {
+            clipSuppressListenMark = false
+        }
+    }
+
     func setSpeed(_ newSpeed: ListenSpeed) {
         speed = newSpeed
         UserDefaults.standard.set(newSpeed.rawValue, forKey: speedKey)
@@ -291,6 +326,7 @@ final class PlayerModel: ObservableObject {
     }
 
     func checkpoint() {
+        guard !clipSuppressListenMark else { return }
         guard positionTrusted, let currentID else { return }
         lastSaved = current
         onProgress?(currentID, current, duration)
@@ -305,6 +341,16 @@ final class PlayerModel: ObservableObject {
             duration = itemDuration
         }
         isPlaying = player.timeControlStatus == .playing
+        if let stop = clipStopAt, seconds >= stop {
+            // Clip end: pause in place; do not write ListenMark (§13.2).
+            playWhenReady = false
+            player.pause()
+            isPlaying = false
+            current = stop
+            clearClipPlayback(restoreListenMarkWrites: true)
+            updateNowPlaying()
+            return
+        }
         if lastSaved < 0 || abs(seconds - lastSaved) >= 5 {
             checkpoint()
         }
@@ -314,9 +360,13 @@ final class PlayerModel: ObservableObject {
     }
 
     private func handleEnded() {
+        let suppress = clipSuppressListenMark
+        clearClipPlayback(restoreListenMarkWrites: true)
         isPlaying = false
         if duration > 0 { current = duration }
-        checkpoint()
+        if !suppress {
+            checkpoint()
+        }
         updateNowPlaying()
     }
 
