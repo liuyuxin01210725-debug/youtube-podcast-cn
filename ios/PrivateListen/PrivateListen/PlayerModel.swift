@@ -263,20 +263,78 @@ final class PlayerModel: ObservableObject {
         seek(to: current + delta, autoplay: isPlaying)
     }
 
-    /// Slice A: seek to `start`, play, pause at `end` (or start+fallback). Does not write ListenMark.
-    /// Missing / invalid `end` (`nil` or `<= start`) → stop at `start + fallbackSeconds` (default 20s per addendum).
-    func playClip(from start: Double, to end: Double?, fallbackSeconds: Double = 20) {
-        let stop = Self.resolveClipStop(start: start, end: end, fallbackSeconds: fallbackSeconds)
+    /// Slice A「听这段」：按最小窗口扩窗后 seek → 播 → 到终点暂停。Does not write ListenMark (§13.2).
+    ///
+    /// 产品规则（听这段最小窗口 · 2026-10-30）：
+    /// - `clipStart = max(0, t_start - leadIn)`，leadIn 默认 2.5s，给一点上文。
+    /// - 有合法 `t_end`：`clipEnd = max(t_end, t_start + minDuration)`，minDuration 默认 28s，
+    ///   避免真抽短 span（常 <10s）只播十几字就停。
+    /// - 缺 `t_end` 或 `t_end ≤ t_start`：回退 `t_start + fallbackSeconds`（默认 = minDuration）。
+    /// - softCap 默认 60s（相对 clipStart）：偶发 150s 长 span 不强制听到底；用户可自己拖进度。
+    func playClip(
+        from start: Double,
+        to end: Double?,
+        leadIn: Double = 2.5,
+        minDuration: Double = 28,
+        softCap: Double = 60,
+        fallbackSeconds: Double = 28
+    ) {
+        let window = Self.resolveClipWindow(
+            start: start,
+            end: end,
+            leadIn: leadIn,
+            minDuration: minDuration,
+            softCap: softCap,
+            fallbackSeconds: fallbackSeconds
+        )
         clipSuppressListenMark = true
-        clipStopAt = stop
-        seek(to: start, autoplay: true, clearClip: false)
+        clipStopAt = window.end
+        seek(to: window.start, autoplay: true, clearClip: false)
     }
 
-    static func resolveClipStop(start: Double, end: Double?, fallbackSeconds: Double = 20) -> Double {
+    /// 返回扩窗后的 (clipStart, clipEnd)。`resolveClipStop` 取 `.end`，便于单测。
+    static func resolveClipWindow(
+        start: Double,
+        end: Double?,
+        leadIn: Double = 2.5,
+        minDuration: Double = 28,
+        softCap: Double = 60,
+        fallbackSeconds: Double = 28
+    ) -> (start: Double, end: Double) {
+        let clipStart = max(0, start - max(0, leadIn))
+        let rawEnd: Double
         if let end, end > start {
-            return end
+            rawEnd = max(end, start + max(0, minDuration))
+        } else {
+            rawEnd = start + max(1, fallbackSeconds)
         }
-        return start + max(1, fallbackSeconds)
+        var clipEnd = rawEnd
+        let cap = max(1, softCap)
+        if clipEnd - clipStart > cap {
+            clipEnd = clipStart + cap
+        }
+        if clipEnd <= clipStart {
+            clipEnd = clipStart + max(1, fallbackSeconds)
+        }
+        return (clipStart, clipEnd)
+    }
+
+    static func resolveClipStop(
+        start: Double,
+        end: Double?,
+        leadIn: Double = 2.5,
+        minDuration: Double = 28,
+        softCap: Double = 60,
+        fallbackSeconds: Double = 28
+    ) -> Double {
+        resolveClipWindow(
+            start: start,
+            end: end,
+            leadIn: leadIn,
+            minDuration: minDuration,
+            softCap: softCap,
+            fallbackSeconds: fallbackSeconds
+        ).end
     }
 
     func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true) {

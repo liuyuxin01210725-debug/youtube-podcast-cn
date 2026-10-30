@@ -2,10 +2,12 @@ import SwiftUI
 
 /// 详情提炼区：点星深抽后直接展示要点结果（方法/观点/实体/金句/开放问题）。
 /// status 字段仍保留在模型里；UI 不做「待确认→确认/丢掉」主交互。
+/// 切片 A「听这段」+ 切片 B 要点星（与整集星分层）。
 struct ExtractDetailSection: View {
     let episode: Episode
     @ObservedObject var extracts: ExtractStore
     @EnvironmentObject private var player: PlayerModel
+    @EnvironmentObject private var pointStars: PointStarStore
     @State private var showSchemaPicker = false
 
     var body: some View {
@@ -130,24 +132,25 @@ struct ExtractDetailSection: View {
                 claimCard(claim, packet: packet)
             }
             ForEach(packet.entities.filter { $0.status != .discarded }, id: \.id) { entity in
-                entityCard(entity)
+                entityCard(entity, workId: packet.workId)
             }
             ForEach(packet.quotes.filter { $0.status != .discarded }, id: \.id) { quote in
-                quoteCard(quote)
+                quoteCard(quote, workId: packet.workId)
             }
             ForEach(packet.openQuestions.filter { $0.status != .discarded }, id: \.id) { q in
-                openCard(q)
+                openCard(q, workId: packet.workId)
             }
         }
     }
 
     private func methodCard(_ method: ExtractMethod, packet: ExtractionPacket) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("方法")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 0)
+                pointStarButton(workId: packet.workId, pointId: method.id, kind: "method")
                 seekButton(tStart: method.tStart, tEnd: method.tEnd)
             }
             Text(method.title)
@@ -184,11 +187,12 @@ struct ExtractDetailSection: View {
 
     private func claimCard(_ claim: ExtractClaim, packet: ExtractionPacket) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("观点")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 0)
+                pointStarButton(workId: packet.workId, pointId: claim.id, kind: "claim")
                 seekButton(tStart: claim.tStart, tEnd: claim.tEnd)
             }
             Text(claim.text)
@@ -209,8 +213,8 @@ struct ExtractDetailSection: View {
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func entityCard(_ entity: ExtractEntity) -> some View {
-        HStack(alignment: .top) {
+    private func entityCard(_ entity: ExtractEntity, workId: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("实体")
                     .font(.caption2)
@@ -223,20 +227,22 @@ struct ExtractDetailSection: View {
                         .foregroundStyle(.orange)
                 }
             }
-            Spacer()
+            Spacer(minLength: 0)
+            pointStarButton(workId: workId, pointId: entity.id, kind: "entity")
             seekButton(tStart: entity.tStart, tEnd: entity.tEnd)
         }
         .padding(10)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func quoteCard(_ quote: ExtractQuote) -> some View {
+    private func quoteCard(_ quote: ExtractQuote, workId: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("金句")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 0)
+                pointStarButton(workId: workId, pointId: quote.id, kind: "quote")
                 seekButton(tStart: quote.tStart, tEnd: quote.tEnd)
             }
             Text(quote.text)
@@ -251,13 +257,14 @@ struct ExtractDetailSection: View {
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    private func openCard(_ q: ExtractOpenQuestion) -> some View {
+    private func openCard(_ q: ExtractOpenQuestion, workId: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("开放问题")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Spacer()
+                Spacer(minLength: 0)
+                pointStarButton(workId: workId, pointId: q.id, kind: "open")
                 seekButton(tStart: q.tStart, tEnd: q.tEnd)
             }
             Text(q.text)
@@ -267,7 +274,24 @@ struct ExtractDetailSection: View {
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
     }
 
-    /// 切片 A「听这段」：seek → t_start，播到 t_end（缺省则 +20s）后暂停；§13.2 不写 ListenMark。
+    /// 切片 B：要点卡独立小星；与整集大星视觉/语义分离（取消要点星不撤深抽）。
+    private func pointStarButton(workId: String, pointId: String, kind: String) -> some View {
+        let on = pointStars.isStarred(workId: workId, pointId: pointId)
+        return Button {
+            pointStars.toggle(workId: workId, pointId: pointId, kind: kind)
+        } label: {
+            Image(systemName: on ? "star.fill" : "star")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(on ? Color.orange : Color.secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(on ? "取消收藏要点" : "收藏要点")
+        .accessibilityHint("与整集星标无关")
+    }
+
+    /// 切片 A「听这段」：扩窗后 seek → 播一小段后暂停；§13.2 不写 ListenMark。
     private func seekButton(tStart: Double?, tEnd: Double?) -> some View {
         Button {
             guard let tStart else { return }

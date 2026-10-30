@@ -453,3 +453,7 @@ Entity
 | Q3（已确认） | **声间内第一知识库 + MD 导出**；Notion/Obsidian 同步 v2 |
 
 Codex 对抗审若后到，只增补失败模式，不改以上 MVP 边界。
+
+## 附录指针（2026-10-30）
+
+要点「听这段」**最小窗口**（leadIn 2.5s / minDuration 28s / softCap 60s）与要点级 `PointStar`：见仓内 `docs/shengjian-point-jump-expand-2026-10-30.md`。Clip 路径不写 ListenMark（§13.2）。
