@@ -4,20 +4,22 @@ import SwiftUI
 struct PrivateListenApp: App {
     @StateObject private var library = LibraryStore()
     @StateObject private var player = PlayerModel()
+    @StateObject private var extracts = ExtractStore()
+    @StateObject private var pointStars = PointStarStore()
 
     var body: some Scene {
         WindowGroup {
-            TabView {
-                DiscoverView()
-                    .tabItem { Label("发现", systemImage: "circle.grid.cross") }
-                LibraryView()
-                    .tabItem { Label("资料库", systemImage: "books.vertical") }
-            }
-            .environmentObject(library)
-            .environmentObject(player)
-            .onOpenURL { url in
-                library.acceptIncoming(url)
-            }
+            // Option A: single primary surface = 资料库 (chips filter owned content).
+            // Discover mall tab removed; lenses appear as progressive Library chips.
+            // DiscoverView.swift / DiscoverCatalog.swift remain in the target unused by TabView.
+            LibraryView()
+                .environmentObject(library)
+                .environmentObject(player)
+                .environmentObject(extracts)
+                .environmentObject(pointStars)
+                .onOpenURL { url in
+                    library.acceptIncoming(url)
+                }
         }
     }
 }

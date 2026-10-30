@@ -1,0 +1,63 @@
+{
+  "packet_id": "fixture-health-deep-2026-10-29T074453+0000",
+  "work_id": "fixture-health",
+  "schema_id": "health",
+  "mode": "deep",
+  "status": "ready",
+  "created_at": "2026-10-29T07:44:53+00:00",
+  "model_meta": {
+    "provider": "mock",
+    "version": "mvp-1"
+  },
+  "cost_units": 1,
+  "summary_line": "抽出剂量方法（仅记录）与争议观点",
+  "transcript_hash": "c659956dc87e3d3b",
+  "claims": [
+    {
+      "id": "c-cont-1",
+      "kind": "claim",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "否有额外收益仍有争议，不可当医嘱。",
+      "t_start": 50.0,
+      "t_end": 70.0,
+      "point_type": "claim_controversy",
+      "text": "长期高剂量肌酸是否有额外收益仍有争议。",
+      "stance": "争议",
+      "default_action": "debate"
+    }
+  ],
+  "methods": [
+    {
+      "id": "m-dose-1",
+      "kind": "method",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "补充。肌酸每日约5克，仅作记录非处方，配足量水。长期高剂量肌酸是",
+      "t_start": 22.0,
+      "t_end": 48.0,
+      "point_type": "method_dose",
+      "title": "肌酸补充记录",
+      "steps": [
+        "每日固定时间服用",
+        "配足量水"
+      ],
+      "params": {
+        "剂量": "5g",
+        "频率": "每日一次"
+      },
+      "cautions": [
+        "非处方；个体差异大"
+      ],
+      "default_action": "record_only",
+      "ui_primary_label": "仅记录",
+      "disclaimer": "非诊断、非处方，可丢弃"
+    }
+  ],
+  "entities": [],
+  "quotes": [],
+  "open_questions": [],
+  "actions": [],
+  "degraded_from": null,
+  "pending_confirm_count": 2
+}

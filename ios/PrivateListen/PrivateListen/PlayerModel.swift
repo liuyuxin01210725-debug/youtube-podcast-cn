@@ -52,9 +52,22 @@ final class PlayerModel: ObservableObject {
     private var interruptionObserver: NSObjectProtocol?
     private var itemWatchers = Set<AnyCancellable>()
     private var lastSaved: Double = -1
+    /// Ignore playhead ticks until a resume seek has landed. Otherwise the observer
+    /// writes 0 over the saved episode and the next launch starts over.
+    private var positionTrusted = false
+    private var pendingResume: Double?
+    private var playWhenReady = false
+    private var dropPrematureZero = false
+    private var openGeneration = 0
+    private var resumeSeekID = 0
+    private var resumeSeekInFlight = false
     private let speedKey = "PrivateListen.speed"
     private var nowArtwork: MPMediaItemArtwork?
-    private var artist = "私人听"
+    private var artist = "声间"
+    /// When set, auto-pause once playhead reaches this time (output.mp3 axis).
+    private var clipStopAt: Double?
+    /// While true, checkpoint/onProgress must not write ListenMark (§13.2 clip path).
+    private var clipSuppressListenMark = false
 
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
@@ -85,12 +98,23 @@ final class PlayerModel: ObservableObject {
             updateNowPlaying()
             return
         }
+        if positionTrusted { checkpoint() }
+        openGeneration += 1
+        let generation = openGeneration
+        pendingResume = nil
+        playWhenReady = false
+        dropPrematureZero = false
+        positionTrusted = false
+        resumeSeekInFlight = false
+        resumeSeekID += 1
+        clearClipPlayback(restoreListenMarkWrites: true)
         currentID = episode.id
         title = episode.title
         artist = Self.showName(in: episode.title)
         nowArtwork = ArtworkImage.nowPlayingItem(for: episode)
         errorText = nil
-        current = 0
+        let start = max(0, resumeAt)
+        current = start
         duration = episode.durationSec ?? 0
         lastSaved = -1
         guard LocalAudio.isPlayable(episode.audioURL) else {
@@ -103,13 +127,25 @@ final class PlayerModel: ObservableObject {
         }
         let item = AVPlayerItem(url: episode.audioURL)
         itemWatchers.removeAll()
+        if start > 1 {
+            pendingResume = start
+            playWhenReady = true
+        } else {
+            positionTrusted = true
+            playWhenReady = true
+        }
         item.publisher(for: \.status)
             .receive(on: RunLoop.main)
             .sink { [weak self] status in
+                guard let self, self.openGeneration == generation else { return }
                 if status == .failed {
-                    self?.errorText = "这段音频打不开。"
-                    self?.isPlaying = false
-                    self?.updateNowPlaying()
+                    self.pendingResume = nil
+                    self.playWhenReady = false
+                    self.errorText = "这段音频打不开。"
+                    self.isPlaying = false
+                    self.updateNowPlaying()
+                } else if status == .readyToPlay {
+                    self.applyPendingResume(generation: generation)
                 }
             }
             .store(in: &itemWatchers)
@@ -117,7 +153,7 @@ final class PlayerModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] time in
                 let seconds = time.seconds
-                guard let self, seconds.isFinite, seconds > 0 else { return }
+                guard let self, self.openGeneration == generation, seconds.isFinite, seconds > 0 else { return }
                 self.duration = seconds
                 self.updateNowPlaying()
             }
@@ -130,20 +166,59 @@ final class PlayerModel: ObservableObject {
             object: item,
             queue: .main
         ) { [weak self] _ in
-            self?.handleEnded()
+            guard let self, self.openGeneration == generation else { return }
+            self.handleEnded()
         }
         player.replaceCurrentItem(with: item)
-        let start = max(0, resumeAt)
-        if start > 1 {
+        if item.status == .readyToPlay {
+            applyPendingResume(generation: generation)
+        }
+        if start <= 1 {
+            resume()
+        } else {
+            isPlaying = false
+            updateNowPlaying()
+        }
+    }
+
+    private func applyPendingResume(generation: Int) {
+        guard openGeneration == generation, let start = pendingResume else { return }
+        pendingResume = nil
+        resumeSeekID += 1
+        resumeSeekInFlight = true
+        let seekID = resumeSeekID
+        let target = CMTime(seconds: start, preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.finishResumeSeek(start: start, generation: generation, seekID: seekID, allowRetry: true)
+            }
+        }
+    }
+
+    private func finishResumeSeek(start: Double, generation: Int, seekID: Int, allowRetry: Bool) {
+        guard openGeneration == generation, resumeSeekID == seekID else { return }
+        let landed = player.currentTime().seconds
+        if allowRetry, start > 1, !landed.isFinite || landed < 1 {
             let target = CMTime(seconds: start, preferredTimescale: 600)
             player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
                 DispatchQueue.main.async {
-                    self?.current = start
-                    self?.resume()
+                    self?.finishResumeSeek(start: start, generation: generation, seekID: seekID, allowRetry: false)
                 }
             }
+            return
+        }
+        resumeSeekInFlight = false
+        if landed.isFinite, landed >= 1 {
+            current = landed
         } else {
+            current = start
+        }
+        dropPrematureZero = true
+        positionTrusted = true
+        if playWhenReady {
             resume()
+        } else {
+            updateNowPlaying()
         }
     }
 
@@ -156,7 +231,12 @@ final class PlayerModel: ObservableObject {
     }
 
     func resume() {
-        guard errorText == nil, player.currentItem != nil else { return }
+        guard errorText == nil else { return }
+        if pendingResume != nil || resumeSeekInFlight {
+            playWhenReady = true
+            return
+        }
+        guard player.currentItem != nil else { return }
         if duration > 1, current >= duration - 0.5 {
             seek(to: 0, autoplay: true)
             return
@@ -168,9 +248,14 @@ final class PlayerModel: ObservableObject {
     }
 
     func pause() {
+        playWhenReady = false
         player.pause()
         isPlaying = false
-        checkpoint()
+        let suppress = clipSuppressListenMark
+        clearClipPlayback(restoreListenMarkWrites: true)
+        if !suppress {
+            checkpoint()
+        }
         updateNowPlaying()
     }
 
@@ -178,10 +263,90 @@ final class PlayerModel: ObservableObject {
         seek(to: current + delta, autoplay: isPlaying)
     }
 
-    func seek(to seconds: Double, autoplay: Bool? = nil) {
+    /// Slice A「听这段」：按最小窗口扩窗后 seek → 播 → 到终点暂停。Does not write ListenMark (§13.2).
+    ///
+    /// 产品规则（听这段最小窗口 · 2026-10-30）：
+    /// - `clipStart = max(0, t_start - leadIn)`，leadIn 默认 2.5s，给一点上文。
+    /// - 有合法 `t_end`：`clipEnd = max(t_end, t_start + minDuration)`，minDuration 默认 28s，
+    ///   避免真抽短 span（常 <10s）只播十几字就停。
+    /// - 缺 `t_end` 或 `t_end ≤ t_start`：回退 `t_start + fallbackSeconds`（默认 = minDuration）。
+    /// - softCap 默认 60s（相对 clipStart）：偶发 150s 长 span 不强制听到底；用户可自己拖进度。
+    func playClip(
+        from start: Double,
+        to end: Double?,
+        leadIn: Double = 2.5,
+        minDuration: Double = 28,
+        softCap: Double = 60,
+        fallbackSeconds: Double = 28
+    ) {
+        let window = Self.resolveClipWindow(
+            start: start,
+            end: end,
+            leadIn: leadIn,
+            minDuration: minDuration,
+            softCap: softCap,
+            fallbackSeconds: fallbackSeconds
+        )
+        clipSuppressListenMark = true
+        clipStopAt = window.end
+        seek(to: window.start, autoplay: true, clearClip: false)
+    }
+
+    /// 返回扩窗后的 (clipStart, clipEnd)。`resolveClipStop` 取 `.end`，便于单测。
+    static func resolveClipWindow(
+        start: Double,
+        end: Double?,
+        leadIn: Double = 2.5,
+        minDuration: Double = 28,
+        softCap: Double = 60,
+        fallbackSeconds: Double = 28
+    ) -> (start: Double, end: Double) {
+        let clipStart = max(0, start - max(0, leadIn))
+        let rawEnd: Double
+        if let end, end > start {
+            rawEnd = max(end, start + max(0, minDuration))
+        } else {
+            rawEnd = start + max(1, fallbackSeconds)
+        }
+        var clipEnd = rawEnd
+        let cap = max(1, softCap)
+        if clipEnd - clipStart > cap {
+            clipEnd = clipStart + cap
+        }
+        if clipEnd <= clipStart {
+            clipEnd = clipStart + max(1, fallbackSeconds)
+        }
+        return (clipStart, clipEnd)
+    }
+
+    static func resolveClipStop(
+        start: Double,
+        end: Double?,
+        leadIn: Double = 2.5,
+        minDuration: Double = 28,
+        softCap: Double = 60,
+        fallbackSeconds: Double = 28
+    ) -> Double {
+        resolveClipWindow(
+            start: start,
+            end: end,
+            leadIn: leadIn,
+            minDuration: minDuration,
+            softCap: softCap,
+            fallbackSeconds: fallbackSeconds
+        ).end
+    }
+
+    func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true) {
+        if clearClip {
+            clearClipPlayback(restoreListenMarkWrites: true)
+        }
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
         let shouldPlay = autoplay ?? isPlaying
+        pendingResume = nil
+        resumeSeekID += 1
+        resumeSeekInFlight = false
         player.seek(
             to: CMTime(seconds: targetSeconds, preferredTimescale: 600),
             toleranceBefore: .zero,
@@ -189,6 +354,8 @@ final class PlayerModel: ObservableObject {
         ) { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.dropPrematureZero = false
+                self.positionTrusted = true
                 self.current = targetSeconds
                 self.checkpoint()
                 if shouldPlay {
@@ -197,6 +364,13 @@ final class PlayerModel: ObservableObject {
                 }
                 self.updateNowPlaying()
             }
+        }
+    }
+
+    private func clearClipPlayback(restoreListenMarkWrites: Bool) {
+        clipStopAt = nil
+        if restoreListenMarkWrites {
+            clipSuppressListenMark = false
         }
     }
 
@@ -210,18 +384,31 @@ final class PlayerModel: ObservableObject {
     }
 
     func checkpoint() {
-        guard let currentID else { return }
+        guard !clipSuppressListenMark else { return }
+        guard positionTrusted, let currentID else { return }
         lastSaved = current
         onProgress?(currentID, current, duration)
     }
 
     private func handle(time seconds: Double) {
-        guard seconds.isFinite, seconds >= 0 else { return }
+        guard positionTrusted, seconds.isFinite, seconds >= 0 else { return }
+        if dropPrematureZero, seconds < 1 { return }
+        dropPrematureZero = false
         current = seconds
         if let itemDuration = player.currentItem?.duration.seconds, itemDuration.isFinite, itemDuration > 0 {
             duration = itemDuration
         }
         isPlaying = player.timeControlStatus == .playing
+        if let stop = clipStopAt, seconds >= stop {
+            // Clip end: pause in place; do not write ListenMark (§13.2).
+            playWhenReady = false
+            player.pause()
+            isPlaying = false
+            current = stop
+            clearClipPlayback(restoreListenMarkWrites: true)
+            updateNowPlaying()
+            return
+        }
         if lastSaved < 0 || abs(seconds - lastSaved) >= 5 {
             checkpoint()
         }
@@ -231,9 +418,13 @@ final class PlayerModel: ObservableObject {
     }
 
     private func handleEnded() {
+        let suppress = clipSuppressListenMark
+        clearClipPlayback(restoreListenMarkWrites: true)
         isPlaying = false
         if duration > 0 { current = duration }
-        checkpoint()
+        if !suppress {
+            checkpoint()
+        }
         updateNowPlaying()
     }
 
@@ -324,8 +515,8 @@ final class PlayerModel: ObservableObject {
     }
 
     private static func showName(in title: String) -> String {
-        guard let range = title.range(of: " · ") else { return "私人听" }
+        guard let range = title.range(of: " · ") else { return "声间" }
         let show = title[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-        return show.isEmpty ? "私人听" : String(show)
+        return show.isEmpty ? "声间" : String(show)
     }
 }
