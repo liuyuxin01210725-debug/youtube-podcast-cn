@@ -14,6 +14,11 @@ struct ExtractDetailSection: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             if let packet = extracts.packet(for: episode.id) {
+                if extracts.refreshing.contains(episode.id) && ExtractDisplay.isShowable(packet) {
+                    Text("正在更新提炼…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 statusLine(packet)
                 if packet.mode == .light {
                     Text(packet.summaryLine ?? "听完轻摘")
@@ -44,9 +49,16 @@ struct ExtractDetailSection: View {
                     }
                 }
             } else {
-                Text("点星开始提炼")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                switch ExtractDisplay.emptyCaption(isStarred: extracts.isStarred(episode.id)) {
+                case .promptToStar:
+                    Text("点星开始提炼")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                case .syncingStarred:
+                    Text("已收藏，提炼结果同步中")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .padding(.top, 8)
