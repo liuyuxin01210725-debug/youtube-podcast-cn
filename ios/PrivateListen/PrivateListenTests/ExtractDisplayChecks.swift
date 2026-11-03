@@ -5,8 +5,10 @@ import Darwin
 import Glibc
 #endif
 
-/// 不依赖模拟器：直接跑「已收藏 + 就绪包」在 reload / 失败读 / 空 CTA 上的规则。
-/// `swiftc -parse-as-library` 这三个源文件即可。
+/// 不依赖模拟器：直接跑「已收藏 + 就绪包」在 reload / 失败读 / 空 CTA 上的规则，
+/// 以及占位 mock 不得盖过真 deep / LKG、无 Live key 不得落成 ready。
+/// `swiftc -parse-as-library`：
+/// ExtractionModels.swift ExtractSchemaMap.swift ExtractDisplay.swift MockExtractor.swift 和本文件。
 @main
 struct ExtractDisplayChecks {
     static func main() {
@@ -132,6 +134,144 @@ struct ExtractDisplayChecks {
 
         check("严格 JSON 仍能解出要点", strictRoundTrip())
         check("health-longevity / 数字 params / 缺数组仍解出要点", looseLivePacket())
+
+        let general = MockExtractor.build(
+            workId: episode,
+            schema: .general,
+            transcript: "收藏只是入口抽成可行动卡片才算拥有。本期嘉宾提到一个值得关注的人。也提到另一个节目值得候选关注。这套方法换到中文语境是否仍成立。",
+            durationSec: 600
+        )
+        check(
+            "general 夹具就是截图那四条",
+            general.visiblePointCount == 4
+                && general.packetId.hasSuffix("-deep-mock")
+                && general.claims.contains { $0.text == "收藏只是入口，抽成可行动卡片才算拥有。" }
+                && general.entities.contains { $0.type == "Person" && $0.nameZh == "嘉宾" }
+                && general.entities.contains { $0.type == "Show" && $0.nameSrc == "Some Show" }
+                && general.openQuestions.contains { $0.text == "这套方法换到中文语境是否仍成立？" }
+        )
+        check(
+            "无 key 的深抽路由拒绝 mock 成功",
+            ExtractorGate.route(apiKey: nil) == .missingApiKey
+                && ExtractorGate.route(apiKey: "") == .missingApiKey
+                && ExtractorGate.route(apiKey: " \n") == .missingApiKey
+        )
+        check(
+            "有 Live key 才走 live",
+            ExtractorGate.route(apiKey: " sk-live ") == .live("sk-live")
+        )
+
+        for schema in ExtractSchemaID.allCases {
+            let built = MockExtractor.build(
+                workId: episode,
+                schema: schema,
+                transcript: "占位夹具",
+                durationSec: 600
+            )
+            let kept = ExtractDisplay.merge(disk: built, memory: nil, lkg: ready)
+            check(
+                "\(schema.rawValue) mock 不能盖 LKG / 真 deep，无 key 不落盘",
+                ExtractDisplay.isPlaceholderDeep(built)
+                    && ExtractDisplay.isShowable(built) == false
+                    && ExtractDisplay.shouldReplaceFile(existing: ready, incoming: built) == false
+                    && ExtractDisplay.shouldReplaceFile(existing: nil, incoming: built) == false
+                    && ExtractDisplay.readyDeepForDisk(apiKey: nil, packet: built) == nil
+                    && ExtractDisplay.readyDeepForDisk(apiKey: "", packet: built) == nil
+                    && ExtractDisplay.readyDeepForDisk(apiKey: " ", packet: built) == nil
+                    && ExtractDisplay.readyDeepForDisk(apiKey: "sk-live", packet: built) == nil
+                    && kept?.packetId == "live-ready"
+                    && kept?.visiblePointCount == 10
+                    && ExtractDisplay.detailStatusLabel(built) == "无法提炼"
+                    && ExtractDisplay.detailStatusLabel(built).contains("已提炼") == false
+            )
+        }
+
+        var renamed = general
+        renamed.packetId = "\(episode)-deep-20261103T000000Z"
+        let mockOnly = ExtractDisplay.merge(disk: renamed, memory: renamed, lkg: nil)
+        check(
+            "改掉 deep-mock id 后四条仍不能标成已提炼",
+            ExtractDisplay.isPlaceholderDeep(renamed)
+                && mockOnly?.visiblePointCount == 0
+                && mockOnly?.claims.isEmpty == true
+                && mockOnly?.entities.isEmpty == true
+                && mockOnly?.openQuestions.isEmpty == true
+                && mockOnly?.failureReason == ExtractDisplay.mockNotOfficialReason
+                && mockOnly?.summaryLine == ExtractDisplay.missingLiveKeySummary
+                && mockOnly.map { ExtractDisplay.detailStatusLabel($0) == "无法提炼" } == true
+        )
+        check(
+            "内存里的 mock 也不能盖过 LKG",
+            ExtractDisplay.merge(disk: nil, memory: general, lkg: ready)?.packetId == "live-ready"
+        )
+        let reloadedOverMock = ExtractDisplay.reload(
+            previous: [episode: ready],
+            lkg: [episode: ready],
+            reads: [ExtractDisplay.DiskRead(id: episode, packet: general)]
+        )
+        check(
+            "刷新读到 mock 文件时保留真要点",
+            reloadedOverMock[episode]?.visiblePointCount == 10
+                && reloadedOverMock[episode]?.packetId == "live-ready"
+        )
+        check(
+            "空文件也不写入 mock ready",
+            ExtractDisplay.blocksFileWrite(disk: nil, remembered: nil, incoming: general)
+        )
+        check(
+            "磁盘已是 mock 时 LKG 真包仍挡住失败壳",
+            ExtractDisplay.blocksFileWrite(disk: general, remembered: ready, incoming: failed)
+        )
+        check(
+            "第一次排队包仍可写入空文件",
+            ExtractDisplay.blocksFileWrite(disk: nil, remembered: nil, incoming: queued) == false
+        )
+        check(
+            "有 Live key 的正式 deep 仍可落盘并替换",
+            ExtractDisplay.readyDeepForDisk(apiKey: "sk-live", packet: newer)?.packetId == "live-newer"
+                && ExtractDisplay.blocksFileWrite(disk: ready, remembered: ready, incoming: newer) == false
+                && ExtractDisplay.shouldReplaceFile(existing: ready, incoming: newer)
+        )
+        let heard = MockExtractor.lightSummary(workId: episode, schema: .general, title: "与生物黑客")
+        check("听完轻摘仍不是占位深包", ExtractDisplay.isPlaceholderDeep(heard) == false)
+        check(
+            "正式 ready 的状态行仍是已提炼",
+            ExtractDisplay.detailStatusLabel(ready) == "已提炼 · 要点 10"
+        )
+        check(
+            "普通失败状态行仍用摘要",
+            ExtractDisplay.detailStatusLabel(failed) == failed.summaryLine
+        )
+        var missingKey = failed
+        missingKey.failureReason = ExtractDisplay.missingLiveKeyReason
+        missingKey.summaryLine = ExtractDisplay.missingLiveKeySummary
+        check(
+            "缺密钥失败不标已提炼",
+            ExtractDisplay.detailStatusLabel(missingKey) == "无法提炼"
+        )
+        var partial = ready
+        partial.claims.append(
+            ExtractClaim(
+                id: "c-extra",
+                text: "收藏只是入口，抽成可行动卡片才算拥有。",
+                stance: nil,
+                span: nil,
+                tStart: 1,
+                tEnd: 2,
+                confidence: 0.5,
+                status: .candidate,
+                defaultAction: nil,
+                pointType: "claim_debate",
+                lowConfidence: nil,
+                attrs: nil
+            )
+        )
+        check(
+            "只含半句占位文案的真包仍可展示",
+            ExtractDisplay.isPlaceholderDeep(partial) == false
+                && ExtractDisplay.isShowable(partial)
+                && ExtractDisplay.detailStatusLabel(partial).contains("已提炼")
+        )
 
         if !failures.isEmpty {
             fputs("\(failures.count) failed: \(failures.joined(separator: ", "))\n", stderr)

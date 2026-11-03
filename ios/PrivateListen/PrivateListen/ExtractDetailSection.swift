@@ -39,7 +39,11 @@ struct ExtractDetailSection: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     case .ready, .stale:
-                        if resultIsEmpty(packet) {
+                        if ExtractDisplay.isPlaceholderDeep(packet) {
+                            Text(ExtractDisplay.missingLiveKeySummary)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        } else if resultIsEmpty(packet) {
                             Text("暂无要点。可从菜单改主题重抽。")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
@@ -117,17 +121,7 @@ struct ExtractDetailSection: View {
     }
 
     private func statusLabel(_ packet: ExtractionPacket) -> String {
-        switch packet.status {
-        case .queued: return "排队中"
-        case .running: return "抽取中"
-        case .ready:
-            if packet.mode == .light { return "轻摘就绪" }
-            let n = packet.visiblePointCount
-            return n > 0 ? "已提炼 · 要点 \(n)" : "已提炼"
-        case .failed:
-            return packet.summaryLine ?? "失败"
-        case .stale: return "已过期"
-        }
+        ExtractDisplay.detailStatusLabel(packet)
     }
 
     private func resultIsEmpty(_ packet: ExtractionPacket) -> Bool {
