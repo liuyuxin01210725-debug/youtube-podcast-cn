@@ -1,7 +1,8 @@
 import SwiftUI
 
-/// 资料库「继续播放」. One row per in-progress episode. Trailing swipe removes
-/// it from this rail only; the episode stays in the library and keeps its ListenMark.
+/// 资料库「继续播放」. At most one row: the latest unfinished episode.
+/// Trailing swipe removes it from this rail only; the episode stays in the library
+/// and keeps its ListenMark. The next unfinished episode can then take the slot.
 struct ContinueListeningSection: View {
     struct Row: Identifiable {
         let episode: Episode

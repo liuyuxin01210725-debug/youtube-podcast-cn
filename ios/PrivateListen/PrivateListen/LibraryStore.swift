@@ -141,7 +141,7 @@ final class LibraryStore: ObservableObject {
         saveContinueBookkeeping()
     }
 
-    /// Episodes that belong in 「继续播放」, newest listen first.
+    /// The 「继续播放」 card: newest unfinished listen, capped by `ContinueListening.displayLimit` (1).
     func continueEntries(in episodes: [Episode]) -> [ContinueListening.Item] {
         var marks: [String: ContinueListening.Mark] = [:]
         var durations: [String: Double] = [:]

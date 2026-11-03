@@ -2,7 +2,8 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Option A: one chronological library list + progressive filter chips (owned only).
-/// 「继续播放」and the bottom mini bar sit on that list. Discover mall stays out.
+/// 「继续播放」is at most the latest unfinished episode. 「全部」hides finished;
+/// 「已听」on the same chip row is the archive. Discover mall stays out.
 /// Extract badges, stars, and the extract design entry stay as they are.
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
@@ -12,7 +13,7 @@ struct LibraryView: View {
     @State private var path = NavigationPath()
     @State private var picking = false
     @State private var showExtractDesign = false
-    @State private var filter: LibraryChip = .all
+    @State private var filter: LibraryShelf.Chip = .all
     @State private var searchText = ""
     @State private var searchPresented = false
 
@@ -236,7 +237,7 @@ struct LibraryView: View {
         }
     }
 
-    private func chipButton(_ chip: LibraryChip) -> some View {
+    private func chipButton(_ chip: LibraryShelf.Chip) -> some View {
         let on = filter == chip
         return Button {
             filter = chip
@@ -300,22 +301,15 @@ struct LibraryView: View {
         }
     }
 
-    private var availableChips: [LibraryChip] {
-        var chips: [LibraryChip] = [.all]
+    private var availableChips: [LibraryShelf.Chip] {
         let eps = library.episodes
-        if eps.contains(where: { library.isInProgress($0.id) }) {
-            chips.append(.inProgress)
-        }
-        if eps.contains(where: { library.isUnplayed($0.id) }) {
-            chips.append(.unplayed)
-        }
-        if eps.contains(where: { extracts.isStarred($0.id) }) {
-            chips.append(.starred)
-        }
-        for lens in DiscoverCatalog.ownedLensChips(from: eps) {
-            chips.append(.lens(id: lens.id, label: lens.label))
-        }
-        return chips
+        return LibraryShelf.chips(
+            hasInProgress: eps.contains { library.isInProgress($0.id) },
+            hasUnplayed: eps.contains { library.isUnplayed($0.id) },
+            hasFinished: eps.contains { library.isFinished($0.id) },
+            hasStarred: eps.contains { extracts.isStarred($0.id) },
+            lenses: DiscoverCatalog.ownedLensChips(from: eps)
+        )
     }
 
     private var distinctShows: [String] {
@@ -333,53 +327,37 @@ struct LibraryView: View {
         return "按节目"
     }
 
+    private var shelfRows: [LibraryShelf.Row] {
+        library.episodes.map { episode in
+            LibraryShelf.Row(
+                id: episode.id,
+                title: episode.title,
+                showName: episode.showName,
+                guests: episode.guests,
+                finished: library.isFinished(episode.id),
+                inProgress: library.isInProgress(episode.id),
+                unplayed: library.isUnplayed(episode.id),
+                starred: extracts.isStarred(episode.id),
+                lensIDs: episode.effectiveLensIds
+            )
+        }
+    }
+
     private var visibleEpisodes: [Episode] {
-        var items = library.episodes
-        switch filter {
-        case .all:
-            break
-        case .inProgress:
-            items = items.filter { library.isInProgress($0.id) }
-        case .unplayed:
-            items = items.filter { library.isUnplayed($0.id) }
-        case .starred:
-            items = items.filter { extracts.isStarred($0.id) }
-        case .lens(let id, _):
-            items = items.filter { DiscoverCatalog.belongs($0, toLensID: id) }
-        case .show(let name):
-            items = items.filter { $0.showName == name }
-        }
-        let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !q.isEmpty {
-            items = items.filter { episode in
-                episode.title.localizedCaseInsensitiveContains(q)
-                    || episode.showName.localizedCaseInsensitiveContains(q)
-                    || episode.guests.contains { $0.localizedCaseInsensitiveContains(q) }
-            }
-        }
-        return items
+        let shown = Set(LibraryShelf.visible(shelfRows, chip: filter, query: searchText).map(\.id))
+        return library.episodes.filter { shown.contains($0.id) }
     }
 
     private var sectionHeader: String {
-        let count = visibleEpisodes.count
-        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "搜索结果 · \(count)"
-        }
-        switch filter {
-        case .all: return "全部 · \(count)"
-        case .inProgress: return "在听 · \(count)"
-        case .unplayed: return "未听 · \(count)"
-        case .starred: return "星标 · \(count)"
-        case .lens(_, let label): return "\(label) · \(count)"
-        case .show(let name): return "\(name) · \(count)"
-        }
+        LibraryShelf.sectionTitle(chip: filter, query: searchText, count: visibleEpisodes.count)
     }
 
     private var emptyFilterMessage: String {
-        if !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "没有匹配的节目。"
-        }
-        return "这个筛选下暂时没有节目。"
+        LibraryShelf.emptyMessage(
+            chip: filter,
+            query: searchText,
+            hasFinished: library.episodes.contains { library.isFinished($0.id) }
+        )
     }
 
     private func sanitizeFilter() {
@@ -387,7 +365,7 @@ struct LibraryView: View {
         switch filter {
         case .all:
             return
-        case .inProgress, .unplayed, .starred, .lens:
+        case .inProgress, .unplayed, .finished, .starred, .lens:
             if !chips.contains(filter) {
                 filter = .all
             }
@@ -399,13 +377,7 @@ struct LibraryView: View {
     }
 
     private var showsContinueSection: Bool {
-        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
-        switch filter {
-        case .all, .inProgress:
-            return true
-        case .unplayed, .starred, .lens, .show:
-            return false
-        }
+        LibraryShelf.showsContinue(chip: filter, query: searchText)
     }
 
     private var continueSectionRows: [ContinueListeningSection.Row] {
@@ -529,37 +501,6 @@ struct LibraryView: View {
         .refreshable {
             library.reload()
             extracts.reloadAll(episodes: library.episodes)
-        }
-    }
-}
-
-private enum LibraryChip: Identifiable, Hashable {
-    case all
-    case inProgress
-    case unplayed
-    case starred
-    case lens(id: String, label: String)
-    case show(String)
-
-    var id: String {
-        switch self {
-        case .all: return "all"
-        case .inProgress: return "inProgress"
-        case .unplayed: return "unplayed"
-        case .starred: return "starred"
-        case .lens(let id, _): return "lens:\(id)"
-        case .show(let name): return "show:\(name)"
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .all: return "全部"
-        case .inProgress: return "在听"
-        case .unplayed: return "未听"
-        case .starred: return "★"
-        case .lens(_, let label): return label
-        case .show(let name): return name
         }
     }
 }

@@ -30,6 +30,8 @@ struct ContinueUXProbe {
 
         let shown = ContinueListening.items(marks: marks, durations: durations, dismissed: [], limit: 20)
         check("在听进入继续播放", shown.contains { $0.id == "a" && $0.remaining == 560 })
+        let one = ContinueListening.items(marks: marks, durations: durations, dismissed: [])
+        check("默认继续播放只留最近的未听完", one.map(\.id) == ["a"] && ContinueListening.displayLimit == 1)
         check("不到 5 秒不算继续播放", shown.allSatisfy { $0.id != "b" })
         check("已听完不进继续播放", shown.allSatisfy { $0.id != "c" })
         check("没有触摸时间的排在有时间的后面", shown.map(\.id) == ["a", "d"])
@@ -92,7 +94,10 @@ struct ContinueUXProbe {
             many["id-\(index)"] = .init(seconds: 20, finished: false, touchedAt: TimeInterval(index + 1))
         }
         let capped = ContinueListening.items(marks: many, durations: [:], dismissed: [])
-        check("继续播放最多 12 条，留最近听的", capped.count == 12 && capped.first?.id == "id-12" && capped.allSatisfy { $0.id != "id-0" })
+        check("多条未听完时继续播放只留最近听的", capped.count == 1 && capped.first?.id == "id-12")
+        let hiddenLatest = ContinueListening.dismissing([], id: "id-12")
+        let nextUp = ContinueListening.items(marks: many, durations: [:], dismissed: hiddenLatest)
+        check("滑掉最近一条后，下一条未听完顶上，仍只有一条", nextUp.count == 1 && nextUp.first?.id == "id-11")
 
         check(
             "播放头还在断点附近就不要拉回",

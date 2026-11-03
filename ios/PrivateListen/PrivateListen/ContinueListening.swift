@@ -4,6 +4,7 @@ import Foundation
 /// The rail reads ListenMark only (seconds, finished, swipe-dismiss). It does not
 /// follow the 「听这段」 playhead. `PlayerModel` still refuses to write ListenMark
 /// while a clip is active; `record` repeats that gate so the probe can lock it.
+/// The default rail is one card: the latest unfinished episode.
 enum ContinueListening {
     struct Mark: Equatable {
         var seconds: Double
@@ -23,7 +24,9 @@ enum ContinueListening {
     /// continue tap seeks back to ListenMark. Wider than the 5s progress checkpoint
     /// so ordinary playback still toggles, while a jump (听这段) seeks back.
     static let resumeTolerance = 8.0
-    static let displayLimit = 12
+    /// One resume card. Most recently touched unfinished episode wins.
+    /// Swipe-dismiss still only hides that card; the next unfinished one can take the slot.
+    static let displayLimit = 1
 
     /// In progress (≥5s, not finished), not swipe-dismissed.
     /// Most recently touched first. Unknown touch time sinks below dated marks.
