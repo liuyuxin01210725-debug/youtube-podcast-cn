@@ -43,6 +43,8 @@ final class PlayerModel: ObservableObject {
     @Published private(set) var duration: Double = 0
     @Published var speed: ListenSpeed
     @Published var errorText: String?
+    /// Full-screen PlayerView is up; the library mini bar steps aside.
+    @Published var fullPlayerOpen = false
 
     var onProgress: ((String, Double, Double) -> Void)?
 
@@ -68,6 +70,9 @@ final class PlayerModel: ObservableObject {
     private var clipStopAt: Double?
     /// While true, checkpoint/onProgress must not write ListenMark (§13.2 clip path).
     private var clipSuppressListenMark = false
+
+    /// 「听这段」 owns the playhead. The continue pill seeks back to ListenMark instead of toggling.
+    var isClipPlayback: Bool { clipSuppressListenMark }
 
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
