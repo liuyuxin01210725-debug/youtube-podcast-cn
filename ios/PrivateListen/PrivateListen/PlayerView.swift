@@ -111,7 +111,7 @@ struct PlayerView: View {
         }
         .onAppear {
             player.open(episode, resumeAt: library.resumeSeconds(for: episode.id))
-            extracts.load(from: episode.audioURL.deletingLastPathComponent())
+            extracts.load(episode: episode)
         }
         .onDisappear {
             player.checkpoint()
