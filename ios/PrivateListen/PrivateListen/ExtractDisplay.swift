@@ -7,10 +7,16 @@ import Foundation
 /// `reloadAll` 以前按「这一次库列表」整表替换内存：iCloud 清单短暂缺集、
 /// `extract.json` 还是占位/排队壳、或解码失败时，已就绪的要点会被丢掉，
 /// 详情只剩「点星开始提炼」，但右上角星仍是实心的。
-/// 这里保证：已可展示的 deep / 上次成功包（LKG）不会输给缺读、失败壳或轻摘。
+/// 这里保证：已可展示的 deep / 上次成功包（LKG）不会输给缺读、失败壳、轻摘，
+/// 也不会输给 MockExtractor 的占位深包。占位四条不能标成「已提炼」。
 enum ExtractDisplay {
-    /// 详情能列出要点，或至少是一条听完轻摘。排队 / 失败 / 空 ready 不算。
+    static let missingLiveKeySummary = "未配置抽取密钥，无法深抽。已有要点会保留。"
+    static let missingLiveKeyReason = "no_api_key"
+    static let mockNotOfficialReason = "mock_not_official"
+
+    /// 详情能列出要点，或至少是一条听完轻摘。排队 / 失败 / 空 ready / 占位 mock 不算。
     static func isShowable(_ packet: ExtractionPacket) -> Bool {
+        if isPlaceholderDeep(packet) { return false }
         switch packet.status {
         case .ready, .stale:
             if packet.mode == .light { return true }
@@ -20,21 +26,34 @@ enum ExtractDisplay {
         }
     }
 
-    /// 磁盘、内存、上次成功包。有要点的 deep 优先于轻摘和排队/失败壳。
+    /// MockExtractor / 同文案夹具。这种包不是正式提炼。
+    static func isPlaceholderDeep(_ packet: ExtractionPacket) -> Bool {
+        MockExtractor.isFixturePacket(packet)
+    }
+
+    /// 磁盘、内存、上次成功包。有要点的正式 deep 优先于轻摘和排队/失败壳。
+    /// 占位 mock 不参与竞选；只剩它时改成失败壳，不把四条交出去。
     /// 磁盘上新的可展示 deep 优先于更旧的内存包。
     static func merge(
         disk: ExtractionPacket?,
         memory: ExtractionPacket?,
         lkg: ExtractionPacket?
     ) -> ExtractionPacket? {
-        let ordered = [disk, memory, lkg].compactMap { $0 }
-        if let deep = ordered.first(where: { $0.mode != .light && isShowable($0) }) {
+        let raw = [disk, memory, lkg].compactMap { $0 }
+        let official = raw.filter { !isPlaceholderDeep($0) }
+        if let deep = official.first(where: { $0.mode != .light && isShowable($0) }) {
             return deep
         }
-        if let light = ordered.first(where: { isShowable($0) }) {
+        if let light = official.first(where: { isShowable($0) }) {
             return light
         }
-        return disk ?? memory
+        if let shell = official.first {
+            return shell
+        }
+        if let placeholder = raw.first(where: isPlaceholderDeep) {
+            return rejectingPlaceholder(placeholder)
+        }
+        return nil
     }
 
     /// 一次库刷新读到的 `extract.json`。`packet == nil` 表示没读到或解不出来，不是「用户删了」。
@@ -60,11 +79,78 @@ enum ExtractDisplay {
     }
 
     /// 非可展示包（排队/失败/轻摘）不得覆盖磁盘上已有的 deep 要点。
+    /// 占位 mock 即使 status 是 ready，也不能覆盖已有包，磁盘为空时也不写入。
     static func shouldReplaceFile(existing: ExtractionPacket?, incoming: ExtractionPacket) -> Bool {
+        if isPlaceholderDeep(incoming) { return false }
         if let existing, existing.mode != .light, isShowable(existing) {
             return incoming.mode != .light && isShowable(incoming)
         }
         return true
+    }
+
+    /// `ExtractStore.save`：磁盘和 LKG 分别看。一边是占位 mock 时，另一边的正式 deep 仍然挡住写入。
+    static func blocksFileWrite(
+        disk: ExtractionPacket?,
+        remembered: ExtractionPacket?,
+        incoming: ExtractionPacket
+    ) -> Bool {
+        if !shouldReplaceFile(existing: disk, incoming: incoming) { return true }
+        if !shouldReplaceFile(existing: remembered, incoming: incoming) { return true }
+        return false
+    }
+
+    /// `ExtractStore.runDeep` 落盘前的闸。无 Live key，或包是占位 mock，返回 nil。
+    static func readyDeepForDisk(apiKey: String?, packet: ExtractionPacket) -> ExtractionPacket? {
+        guard case .live = ExtractorGate.route(apiKey: apiKey) else { return nil }
+        if isPlaceholderDeep(packet) { return nil }
+        guard packet.mode != .light else { return nil }
+        guard packet.status == .ready || packet.status == .stale else { return nil }
+        return packet
+    }
+
+    /// 播放页状态行。占位 mock 和缺密钥失败都不写成「已提炼」。
+    static func detailStatusLabel(_ packet: ExtractionPacket) -> String {
+        if isPlaceholderDeep(packet) { return "无法提炼" }
+        switch packet.status {
+        case .queued: return "排队中"
+        case .running: return "抽取中"
+        case .ready:
+            if packet.mode == .light { return "轻摘就绪" }
+            let n = packet.visiblePointCount
+            return n > 0 ? "已提炼 · 要点 \(n)" : "已提炼"
+        case .failed:
+            if packet.failureReason == missingLiveKeyReason || packet.failureReason == mockNotOfficialReason {
+                return "无法提炼"
+            }
+            return packet.summaryLine ?? "失败"
+        case .stale: return "已过期"
+        }
+    }
+
+    /// 磁盘上只剩占位 mock 时给界面看的失败壳。不带那四条，调用方也不必把它写回文件。
+    static func rejectingPlaceholder(_ packet: ExtractionPacket) -> ExtractionPacket {
+        ExtractionPacket(
+            packetId: packet.workId + "-mock-rejected",
+            workId: packet.workId,
+            schemaId: packet.schemaId,
+            mode: .deep,
+            status: .failed,
+            createdAt: packet.createdAt,
+            summaryLine: missingLiveKeySummary,
+            transcriptHash: nil,
+            costUnits: 0,
+            failureReason: mockNotOfficialReason,
+            degradedFrom: packet.degradedFrom,
+            claims: [],
+            methods: [],
+            entities: [],
+            quotes: [],
+            openQuestions: [],
+            roster: nil,
+            actions: nil,
+            secondarySchemas: packet.secondarySchemas,
+            pendingConfirmCount: 0
+        )
     }
 
     enum EmptyCaption: Equatable {

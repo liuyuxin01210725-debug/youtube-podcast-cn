@@ -3,6 +3,7 @@ import Foundation
 
 /// 按 episode 独立 `extract.json`（§13.2）；星标触发深抽；听完 light；取消星标撤 queued。
 /// 已就绪的要点同时记一份本机 LKG。库刷新 / iCloud 占位 / 失败壳不能把详情打回「点星开始提炼」。
+/// 无 Live API key 时不跑 MockExtractor，也不把占位四条写成 ready deep。
 @MainActor
 final class ExtractStore: ObservableObject {
     @Published private(set) var packets: [String: ExtractionPacket] = [:]
@@ -45,6 +46,7 @@ final class ExtractStore: ObservableObject {
             if packet.failureReason == "no_transcript" { return "缺译稿" }
             return "提炼失败"
         case .ready:
+            if ExtractDisplay.isPlaceholderDeep(packet) { return "提炼失败" }
             if packet.mode == .light { return nil }
             let n = packet.visiblePointCount
             if n <= 0 { return "已提炼" }
@@ -231,15 +233,13 @@ final class ExtractStore: ObservableObject {
             job.status = .running
             jobs[episode.id] = job
             publishIfNoShowable(episode.id, job, folder: folder)
-            let transcript = Self.readTranscript(in: folder) ?? Self.mockTranscript(for: schema)
             do {
                 if Task.isCancelled { throw ExtractRuntimeError.cancelled }
-                let extractor: any EpisodeExtracting = {
-                    if let key = ExtractorGate.apiKey, !key.isEmpty {
-                        return LiveExtractor(apiKey: key)
-                    }
-                    return MockExtractor()
-                }()
+                guard case .live(let key) = ExtractorGate.route(apiKey: ExtractorGate.apiKey) else {
+                    throw ExtractRuntimeError.missingApiKey
+                }
+                let transcript = Self.readTranscript(in: folder) ?? Self.mockTranscript(for: schema)
+                let extractor: any EpisodeExtracting = LiveExtractor(apiKey: key)
                 var ready = try await extractor.deepExtract(
                     workId: episode.id,
                     schema: schema,
@@ -253,9 +253,16 @@ final class ExtractStore: ObservableObject {
                     refreshing.remove(episode.id)
                     return
                 }
+                guard ExtractDisplay.readyDeepForDisk(apiKey: key, packet: ready) != nil else {
+                    throw ExtractRuntimeError.missingApiKey
+                }
                 if let old = packet(for: episode.id),
+                   !ExtractDisplay.isPlaceholderDeep(old),
                    old.status == .ready || old.status == .stale {
                     ready = Self.merge(old: old, incoming: ready)
+                }
+                guard ExtractDisplay.readyDeepForDisk(apiKey: key, packet: ready) != nil else {
+                    throw ExtractRuntimeError.missingApiKey
                 }
                 jobs[episode.id] = nil
                 jobTokens[episode.id] = nil
@@ -273,10 +280,19 @@ final class ExtractStore: ObservableObject {
                 jobs[episode.id] = nil
                 jobTokens[episode.id] = nil
                 refreshing.remove(episode.id)
+                let reason: String
+                switch error as? ExtractRuntimeError {
+                case .noTranscript:
+                    reason = "no_transcript"
+                case .missingApiKey:
+                    reason = ExtractDisplay.missingLiveKeyReason
+                default:
+                    reason = "error"
+                }
                 let failed = failedPacket(
                     episode: episode,
                     schema: schema,
-                    reason: (error as? ExtractRuntimeError) == .noTranscript ? "no_transcript" : "error",
+                    reason: reason,
                     summary: error.localizedDescription
                 )
                 banner = failed.summaryLine
@@ -339,9 +355,11 @@ final class ExtractStore: ObservableObject {
 
     private func save(_ packet: ExtractionPacket, folder: URL) {
         let id = folder.lastPathComponent
-        let existing = lastKnownReady[id] ?? readPacket(in: folder)
-        guard ExtractDisplay.shouldReplaceFile(existing: existing, incoming: packet) else {
-            if let existing { rememberIfShowable(id, existing) }
+        let onDisk = readPacket(in: folder)
+        let remembered = lastKnownReady[id]
+        if ExtractDisplay.blocksFileWrite(disk: onDisk, remembered: remembered, incoming: packet) {
+            if let onDisk { rememberIfShowable(id, onDisk) }
+            if let remembered { rememberIfShowable(id, remembered) }
             return
         }
         let url = folder.appendingPathComponent("extract.json")

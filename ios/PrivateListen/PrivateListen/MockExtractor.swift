@@ -1,6 +1,6 @@
 import Foundation
 
-/// 抽取协议：无 API key 时走确定性 mock；真调用路径预留。
+/// 抽取协议。正式深抽只接受 Live；夹具包不能冒充 ready deep。
 protocol EpisodeExtracting: Sendable {
     func deepExtract(
         workId: String,
@@ -10,16 +10,30 @@ protocol EpisodeExtracting: Sendable {
     ) async throws -> ExtractionPacket
 }
 
-enum ExtractorGate {
-    /// 环境变量 / Info 日后可接；MVP 无 key → mock。
-    static var apiKey: String? {
-        ProcessInfo.processInfo.environment["SHENGJIAN_EXTRACT_API_KEY"]
-    }
-
-    static var usesMock: Bool { apiKey?.isEmpty != false }
+enum DeepExtractRoute: Equatable {
+    case live(String)
+    case missingApiKey
 }
 
-/// 确定性 mock：按 schema 产出合格类型卡（与 fixtures/extract 对齐）。
+enum ExtractorGate {
+    /// `SHENGJIAN_EXTRACT_API_KEY`。空白与未设置都是没有 Live key。
+    static var apiKey: String? {
+        if case .live(let key) = route(apiKey: ProcessInfo.processInfo.environment["SHENGJIAN_EXTRACT_API_KEY"]) {
+            return key
+        }
+        return nil
+    }
+
+    /// 无可用 Live key 时固定走 `.missingApiKey`。调用方不得改跑 MockExtractor 再落盘。
+    static func route(apiKey: String?) -> DeepExtractRoute {
+        let trimmed = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if trimmed.isEmpty { return .missingApiKey }
+        return .live(trimmed)
+    }
+}
+
+/// 确定性夹具：按 schema 产出合格类型卡（与 fixtures/extract 对齐）。
+/// 只给测试和形状对照。不能写成正式 ready deep，也不能在界面上标成「已提炼」。
 struct MockExtractor: EpisodeExtracting {
     func deepExtract(
         workId: String,
@@ -215,6 +229,42 @@ struct MockExtractor: EpisodeExtracting {
         return packet
     }
 
+    /// 离线夹具。`packet_id` 带 `-deep-mock`，或正文是各 schema 的固定占位卡。
+    /// 听完轻摘不是深抽夹具。
+    static func isFixturePacket(_ packet: ExtractionPacket) -> Bool {
+        if packet.mode == .light { return false }
+        if packet.packetId.contains("-deep-mock") { return true }
+        let claims = Set(packet.claims.map(\.text))
+        let methods = Set(packet.methods.map(\.title))
+        let entities = Set(packet.entities.map(\.nameSrc))
+        let questions = Set(packet.openQuestions.map(\.text))
+        if claims.contains("收藏只是入口，抽成可行动卡片才算拥有。"),
+           entities.contains("Some Show"),
+           questions.contains("这套方法换到中文语境是否仍成立？") {
+            return true
+        }
+        if methods.contains("盐曲工艺"),
+           claims.contains("短时高盐比会压住杂菌、风味更干净。") {
+            return true
+        }
+        if claims.contains("未来两年推理成本下降会重塑应用层毛利。"),
+           entities.contains("OpenAI") {
+            return true
+        }
+        if methods.contains("肌酸补充记录"),
+           claims.contains("长期高剂量肌酸是否有额外收益仍有争议。") {
+            return true
+        }
+        if methods.contains("双栏笔记教法"),
+           claims.contains("AI 时代应先教提问与校对，再教标准答案。") {
+            return true
+        }
+        if methods.contains("三分钟身体扫描"), packet.summaryLine == "抽出练习协议" {
+            return true
+        }
+        return false
+    }
+
     static func lightSummary(workId: String, schema: ExtractSchemaID, title: String) -> ExtractionPacket {
         ExtractionPacket(
             packetId: "\(workId)-light",
@@ -276,12 +326,14 @@ struct LiveExtractor: EpisodeExtracting {
 
 enum ExtractRuntimeError: LocalizedError {
     case notWired
+    case missingApiKey
     case noTranscript
     case cancelled
 
     var errorDescription: String? {
         switch self {
         case .notWired: return "真模型抽取尚未接线"
+        case .missingApiKey: return ExtractDisplay.missingLiveKeySummary
         case .noTranscript: return "无译稿，无法深抽。请先完成听译。"
         case .cancelled: return "已取消星标，深抽任务已撤销"
         }
