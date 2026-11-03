@@ -42,7 +42,7 @@ test-extract-display:
 		/tmp/extract-display-checks; \
 	fi
 
-# 资料库「继续播放」：谁出现、左滑删除、听这段不写 ListenMark。
+# 资料库「继续播放」与筛选条：谁出现、同对象去重、左滑删除、听这段不写 ListenMark。
 test-continue-ux:
 	@SWIFTC=$$(command -v swiftc || true); \
 	if [ -z "$$SWIFTC" ] && command -v xcrun >/dev/null 2>&1; then \
@@ -54,5 +54,9 @@ test-continue-ux:
 		"$$SWIFTC" -parse-as-library -o /tmp/continue-ux-probe \
 			ios/PrivateListen/PrivateListen/ContinueListening.swift \
 			ios/PrivateListen/PrivateListenTests/ContinueUXProbe.swift && \
-		/tmp/continue-ux-probe; \
+		/tmp/continue-ux-probe && \
+		"$$SWIFTC" -parse-as-library -o /tmp/library-list-probe \
+			ios/PrivateListen/PrivateListen/LibraryShelf.swift \
+			ios/PrivateListen/PrivateListenTests/LibraryListProbe.swift && \
+		/tmp/library-list-probe; \
 	fi
