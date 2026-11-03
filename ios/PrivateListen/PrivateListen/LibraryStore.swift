@@ -25,10 +25,16 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var waitingOnCloud = false
     @Published var message: String?
     @Published private var progress: [String: ListenMark] = [:]
+    @Published private var continueDismissedIDs: Set<String> = []
+    @Published private var continueTouched: [String: TimeInterval] = [:]
 
     private let bookmarkKey = "PrivateListen.libraryBookmark"
     private let progressKey = "PrivateListen.progress"
     private let pendingKey = "PrivateListen.pendingShares"
+    /// Ids removed from 「继续播放」 by swipe. ListenMark seconds are kept.
+    private let dismissedKey = "PrivateListen.continueDismissed"
+    /// Last ListenMark write time, so the rail can sort by recent listens.
+    private let touchedKey = "PrivateListen.continueTouched"
     private var pendingShares: [PendingShare] = []
     /// Only ever the user-chosen iCloud folder, never the Documents copy.
     private var folderURL: URL?
@@ -42,6 +48,13 @@ final class LibraryStore: ObservableObject {
         if let data = UserDefaults.standard.data(forKey: progressKey),
            let stored = try? JSONDecoder().decode([String: ListenMark].self, from: data) {
             progress = stored
+        }
+        if let ids = UserDefaults.standard.array(forKey: dismissedKey) as? [String] {
+            continueDismissedIDs = Set(ids)
+        }
+        if let data = UserDefaults.standard.data(forKey: touchedKey),
+           let stored = try? JSONDecoder().decode([String: TimeInterval].self, from: data) {
+            continueTouched = stored
         }
         if let data = UserDefaults.standard.data(forKey: pendingKey),
            let stored = try? JSONDecoder().decode([PendingShare].self, from: data) {
@@ -119,10 +132,61 @@ final class LibraryStore: ObservableObject {
     }
 
     func remember(id: String, seconds: Double, duration: Double) {
-        guard let next = Self.reducing(progress, id: id, seconds: seconds, duration: duration) else { return }
-        progress = next
+        guard seconds.isFinite, seconds >= 0, !id.isEmpty else { return }
+        if let next = Self.reducing(progress, id: id, seconds: seconds, duration: duration) {
+            progress = next
+            saveProgressMap()
+        }
+        continueTouched[id] = Date().timeIntervalSince1970
+        saveContinueBookkeeping()
+    }
+
+    /// Episodes that belong in 「继续播放」, newest listen first.
+    func continueEntries(in episodes: [Episode]) -> [ContinueListening.Item] {
+        var marks: [String: ContinueListening.Mark] = [:]
+        var durations: [String: Double] = [:]
+        for episode in episodes {
+            guard let entry = progress[episode.id] else { continue }
+            marks[episode.id] = ContinueListening.Mark(
+                seconds: entry.seconds,
+                finished: entry.finished,
+                touchedAt: continueTouched[episode.id] ?? 0
+            )
+            durations[episode.id] = episode.durationSec ?? 0
+        }
+        return ContinueListening.items(
+            marks: marks,
+            durations: durations,
+            dismissed: continueDismissedIDs
+        )
+    }
+
+    /// Left swipe on a continue row. Does not delete the episode or its ListenMark.
+    func dismissContinue(_ id: String) {
+        let next = ContinueListening.dismissing(continueDismissedIDs, id: id)
+        guard next != continueDismissedIDs else { return }
+        continueDismissedIDs = next
+        saveContinueBookkeeping()
+    }
+
+    /// Opening the episode or pressing its continue pill puts the row back.
+    func acknowledgeContinue(_ id: String) {
+        let next = ContinueListening.acknowledging(continueDismissedIDs, id: id)
+        guard next != continueDismissedIDs else { return }
+        continueDismissedIDs = next
+        saveContinueBookkeeping()
+    }
+
+    private func saveProgressMap() {
         if let data = try? JSONEncoder().encode(progress) {
             UserDefaults.standard.set(data, forKey: progressKey)
+        }
+    }
+
+    private func saveContinueBookkeeping() {
+        UserDefaults.standard.set(Array(continueDismissedIDs), forKey: dismissedKey)
+        if let data = try? JSONEncoder().encode(continueTouched) {
+            UserDefaults.standard.set(data, forKey: touchedKey)
         }
     }
 

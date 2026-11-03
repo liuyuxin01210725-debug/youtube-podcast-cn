@@ -110,10 +110,13 @@ struct PlayerView: View {
             }
         }
         .onAppear {
+            player.fullPlayerOpen = true
+            library.acknowledgeContinue(episode.id)
             player.open(episode, resumeAt: library.resumeSeconds(for: episode.id))
             extracts.load(episode: episode)
         }
         .onDisappear {
+            player.fullPlayerOpen = false
             player.checkpoint()
         }
     }

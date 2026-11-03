@@ -2,12 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Option A: one chronological library list + progressive filter chips (owned only).
-/// Keeps today's extract design entry, listen resume bar, ExtractStore badges/stars.
+/// 「继续播放」and the bottom mini bar sit on that list. Discover mall stays out.
+/// Extract badges, stars, and the extract design entry stay as they are.
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var player: PlayerModel
     @EnvironmentObject private var extracts: ExtractStore
     @Environment(\.scenePhase) private var scenePhase
+    @State private var path = NavigationPath()
     @State private var picking = false
     @State private var showExtractDesign = false
     @State private var filter: LibraryChip = .all
@@ -18,7 +20,7 @@ struct LibraryView: View {
     private let showFilterAtDistinctShows = 2
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             Group {
                 if !library.hasCloudFolder && library.episodes.isEmpty {
                     prompt(
@@ -34,6 +36,17 @@ struct LibraryView: View {
                     )
                 } else {
                     list
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if let episode = miniEpisode, !player.fullPlayerOpen {
+                    MiniPlayerBar(
+                        episode: episode,
+                        isPlaying: player.isPlaying,
+                        fraction: miniFraction,
+                        status: player.errorText,
+                        onToggle: { toggleMini(episode) }
+                    )
                 }
             }
             .navigationTitle("资料库")
@@ -153,6 +166,13 @@ struct LibraryView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
+            }
+            if showsContinueSection && !continueSectionRows.isEmpty {
+                ContinueListeningSection(
+                    rows: continueSectionRows,
+                    onPlay: playFromLibrary,
+                    onDismiss: { library.dismissContinue($0.id) }
+                )
             }
             if !library.inbox.isEmpty && filter == .all && searchText.isEmpty {
                 Section("收件箱") {
@@ -375,6 +395,76 @@ struct LibraryView: View {
             if !distinctShows.contains(name) {
                 filter = .all
             }
+        }
+    }
+
+    private var showsContinueSection: Bool {
+        guard searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        switch filter {
+        case .all, .inProgress:
+            return true
+        case .unplayed, .starred, .lens, .show:
+            return false
+        }
+    }
+
+    private var continueSectionRows: [ContinueListeningSection.Row] {
+        let entries = library.continueEntries(in: library.episodes)
+        let byID = Dictionary(uniqueKeysWithValues: library.episodes.map { ($0.id, $0) })
+        return entries.compactMap { item in
+            guard let episode = byID[item.id] else { return nil }
+            let nearResume = !ContinueListening.shouldReopenAtListenMark(
+                currentID: player.currentID,
+                episodeID: episode.id,
+                playhead: player.current,
+                resumeAt: item.seconds,
+                clipInProgress: player.isClipPlayback
+            )
+            let playing = nearResume && player.currentID == episode.id && player.isPlaying
+            return ContinueListeningSection.Row(episode: episode, item: item, playing: playing)
+        }
+    }
+
+    private var miniEpisode: Episode? {
+        guard let id = player.currentID else { return nil }
+        return library.episodes.first { $0.id == id }
+    }
+
+    private var miniFraction: Double? {
+        if player.duration > 1 {
+            return min(1, max(0, player.current / player.duration))
+        }
+        return miniEpisode.flatMap { library.playedFraction(for: $0) }
+    }
+
+    /// Continue pill uses ListenMark. If 「听这段」 left the playhead elsewhere, seek back.
+    private func playFromLibrary(_ episode: Episode) {
+        library.acknowledgeContinue(episode.id)
+        let resumeAt = library.resumeSeconds(for: episode.id)
+        guard episode.isPlayableNow else {
+            path.append(episode)
+            return
+        }
+        if player.errorText != nil || ContinueListening.shouldReopenAtListenMark(
+            currentID: player.currentID,
+            episodeID: episode.id,
+            playhead: player.current,
+            resumeAt: resumeAt,
+            clipInProgress: player.isClipPlayback
+        ) {
+            player.open(episode, resumeAt: resumeAt, force: true)
+        } else if player.isPlaying {
+            player.pause()
+        } else {
+            player.resume()
+        }
+    }
+
+    private func toggleMini(_ episode: Episode) {
+        if player.currentID == episode.id {
+            player.toggle()
+        } else {
+            player.open(episode, resumeAt: library.resumeSeconds(for: episode.id))
         }
     }
 
