@@ -28,6 +28,25 @@ enum ContinueListening {
     /// Swipe-dismiss still only hides that card; the next unfinished one can take the slot.
     static let displayLimit = 1
 
+    /// Same-object de-dupe with the mini player.
+    ///
+    /// Show the card unless it names the episode the mini player can already
+    /// play or pause. A missing player, a different episode (replay a finished
+    /// star while something else is still unfinished), or transport that is not
+    /// ready yet (download / open error) keeps the card. No continue id means
+    /// no card. This does not open a player and does not decide「听完」.
+    static func showsContinueCard(
+        continueID: String?,
+        playerID: String?,
+        controlsUsable: Bool
+    ) -> Bool {
+        guard let continueID, !continueID.isEmpty else { return false }
+        if let playerID, !playerID.isEmpty, continueID == playerID, controlsUsable {
+            return false
+        }
+        return true
+    }
+
     /// In progress (≥5s, not finished), not swipe-dismissed.
     /// Most recently touched first. Unknown touch time sinks below dated marks.
     static func items(
@@ -70,7 +89,8 @@ enum ContinueListening {
     }
 
     /// Left swipe removes the card from the rail. The ListenMark seconds stay,
-    /// so opening the episode still resumes. Playback progress does not undo this;
+    /// `finished` is not set, the file is not deleted, and the star is untouched
+    /// (stars live outside this set). Playback progress does not undo this;
     /// opening or pressing the continue pill does (`acknowledging`).
     static func dismissing(_ dismissed: Set<String>, id: String) -> Set<String> {
         guard !id.isEmpty else { return dismissed }

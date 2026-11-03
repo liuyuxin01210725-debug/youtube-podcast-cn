@@ -46,7 +46,10 @@ struct ContinueUXProbe {
 
         let hidden = ContinueListening.dismissing([], id: "a")
         let afterDismiss = ContinueListening.items(marks: marks, durations: durations, dismissed: hidden, limit: 20)
-        check("左滑删除只拿掉这一条", afterDismiss.map(\.id) == ["d"] && marks["a"]?.seconds == 40)
+        check(
+            "左滑删除只拿掉这一条，不写成听完",
+            afterDismiss.map(\.id) == ["d"] && marks["a"]?.seconds == 40 && marks["a"]?.finished == false
+        )
         check("空 id 不能当成删除", ContinueListening.dismissing(hidden, id: "") == hidden)
         let restored = ContinueListening.acknowledging(hidden, id: "a")
         let afterAck = ContinueListening.items(marks: marks, durations: durations, dismissed: restored, limit: 20)
@@ -120,6 +123,28 @@ struct ContinueUXProbe {
         check(
             "换一集就按那一集的 ListenMark 打开",
             ContinueListening.shouldReopenAtListenMark(currentID: "a", episodeID: "b", playhead: 40, resumeAt: 10)
+        )
+
+        check(
+            "没有迷你条时继续播放还在，不为此新建播放器",
+            ContinueListening.showsContinueCard(continueID: "a", playerID: nil, controlsUsable: false)
+        )
+        check(
+            "同一集且控制可用时藏起继续播放卡",
+            ContinueListening.showsContinueCard(continueID: "a", playerID: "a", controlsUsable: true) == false
+        )
+        check(
+            "同一集但控制还没就绪时留下继续播放卡",
+            ContinueListening.showsContinueCard(continueID: "a", playerID: "a", controlsUsable: false)
+        )
+        check(
+            "迷你条在播另一集时继续播放照实显示",
+            ContinueListening.showsContinueCard(continueID: "a", playerID: "b", controlsUsable: true)
+        )
+        check(
+            "没有继续播放目标时不留空卡",
+            ContinueListening.showsContinueCard(continueID: nil, playerID: "b", controlsUsable: true) == false
+                && ContinueListening.showsContinueCard(continueID: "", playerID: "a", controlsUsable: true) == false
         )
 
         if !failures.isEmpty {

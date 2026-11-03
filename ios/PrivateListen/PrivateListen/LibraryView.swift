@@ -1,10 +1,11 @@
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Option A: one chronological library list + progressive filter chips (owned only).
-/// 「继续播放」is at most the latest unfinished episode. 「全部」hides finished;
-/// 「已听」on the same chip row is the archive. Discover mall stays out.
-/// Extract badges, stars, and the extract design entry stay as they are.
+/// Option A: one chronological library list. No Discover mall, no extra tab.
+/// 「继续播放」is at most the latest unfinished episode, and hides when the mini
+/// player already controls that same episode. 「未听完」hides finished;
+/// 「星」and「已听」stay on the chip bar. 在听／未听／主题 sit in「更多」.
+/// Extract badges and the extract design entry stay as they are.
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var player: PlayerModel
@@ -13,12 +14,11 @@ struct LibraryView: View {
     @State private var path = NavigationPath()
     @State private var picking = false
     @State private var showExtractDesign = false
-    @State private var filter: LibraryShelf.Chip = .all
+    @State private var filter: LibraryShelf.Chip = LibraryShelf.defaultChip
     @State private var searchText = ""
     @State private var searchPresented = false
 
     private let searchAlwaysVisibleAt = 40
-    private let showFilterAtDistinctShows = 2
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -135,12 +135,10 @@ struct LibraryView: View {
 
     private var list: some View {
         List {
-            if !availableChips.isEmpty {
-                Section {
-                    chipBar
-                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
-                        .listRowBackground(Color.clear)
-                }
+            Section {
+                chipBar
+                    .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                    .listRowBackground(Color.clear)
             }
             if library.readingLocalCopyOnly {
                 Section {
@@ -175,7 +173,7 @@ struct LibraryView: View {
                     onDismiss: { library.dismissContinue($0.id) }
                 )
             }
-            if !library.inbox.isEmpty && filter == .all && searchText.isEmpty {
+            if !library.inbox.isEmpty && filter == LibraryShelf.defaultChip && searchText.isEmpty {
                 Section("收件箱") {
                     ForEach(library.inbox) { item in
                         VStack(alignment: .leading, spacing: 4) {
@@ -191,9 +189,7 @@ struct LibraryView: View {
             }
             Section {
                 if visibleEpisodes.isEmpty {
-                    Text(emptyFilterMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    emptyFilterRow
                 } else {
                     episodeRows
                 }
@@ -209,47 +205,72 @@ struct LibraryView: View {
     }
 
     private var chipBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        let rail = shelfRail
+        return ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
-                ForEach(availableChips) { chip in
+                ForEach(rail.resident) { chip in
                     chipButton(chip)
                 }
-                if distinctShows.count >= showFilterAtDistinctShows {
-                    Menu {
-                        ForEach(distinctShows, id: \.self) { show in
-                            Button(show) { filter = .show(show) }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(showChipLabel)
-                                .font(.subheadline.weight(isShowFilter ? .semibold : .regular))
-                            Image(systemName: "chevron.down")
-                                .font(.caption2.weight(.semibold))
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .background(isShowFilter ? Color.primary.opacity(0.9) : Color.secondary.opacity(0.12), in: Capsule())
-                        .foregroundStyle(isShowFilter ? Color(.systemBackground) : Color.primary)
-                    }
-                }
+                moreMenu(rail.more)
             }
             .padding(.vertical, 2)
         }
     }
 
     private func chipButton(_ chip: LibraryShelf.Chip) -> some View {
-        let on = filter == chip
-        return Button {
+        Button {
             filter = chip
         } label: {
-            Text(chip.label)
-                .font(.subheadline.weight(on ? .semibold : .regular))
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(on ? Color.primary.opacity(0.9) : Color.secondary.opacity(0.12), in: Capsule())
-                .foregroundStyle(on ? Color(.systemBackground) : Color.primary)
+            chipLabel(chip.label, on: filter == chip)
         }
         .buttonStyle(.plain)
+    }
+
+    /// Existing filter popover. Not a tab, not Discover.
+    private func moreMenu(_ chips: [LibraryShelf.Chip]) -> some View {
+        let on = chips.contains(filter)
+        let lead = chips.filter { !isShowChip($0) }
+        let shows = chips.filter { isShowChip($0) }
+        return Menu {
+            ForEach(lead) { chip in
+                moreItem(chip)
+            }
+            if !shows.isEmpty {
+                Divider()
+                ForEach(shows) { chip in
+                    moreItem(chip)
+                }
+            }
+        } label: {
+            chipLabel(LibraryShelf.moreLabel, on: on)
+        }
+        .accessibilityLabel("更多筛选")
+    }
+
+    private func moreItem(_ chip: LibraryShelf.Chip) -> some View {
+        Button {
+            filter = chip
+        } label: {
+            if filter == chip {
+                Label(chip.label, systemImage: "checkmark")
+            } else {
+                Text(chip.label)
+            }
+        }
+    }
+
+    private func chipLabel(_ title: String, on: Bool) -> some View {
+        Text(title)
+            .font(.subheadline.weight(on ? .semibold : .regular))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(on ? Color.primary.opacity(0.9) : Color.secondary.opacity(0.12), in: Capsule())
+            .foregroundStyle(on ? Color(.systemBackground) : Color.primary)
+    }
+
+    private func isShowChip(_ chip: LibraryShelf.Chip) -> Bool {
+        if case .show = chip { return true }
+        return false
     }
 
     private var episodeRows: some View {
@@ -257,35 +278,7 @@ struct LibraryView: View {
         return ForEach(visibleEpisodes) { episode in
             let badge = extracts.badge(for: episode.id, densityUsed: &density)
             NavigationLink(value: episode) {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(episode.title)
-                            .font(.body)
-                            .foregroundStyle(.primary)
-                        if library.isUnplayed(episode.id) {
-                            listenBadge("未听", emphasized: true)
-                        } else if library.isInProgress(episode.id) {
-                            listenBadge("在听", emphasized: false)
-                        } else if library.isFinished(episode.id) {
-                            listenBadge("已听完", emphasized: false)
-                        }
-                        if extracts.isStarred(episode.id) {
-                            Image(systemName: "star.fill")
-                                .font(.caption2)
-                                .foregroundStyle(.yellow)
-                        }
-                        if let badge {
-                            listenBadge(badge, emphasized: badge.contains("要点") || badge == "已提炼")
-                        }
-                    }
-                    Text(subtitle(episode))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                    if let fraction = library.playedFraction(for: episode) {
-                        listenBar(fraction)
-                    }
-                }
-                .padding(.vertical, 4)
+                episodeRow(episode, badge: badge)
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 Button {
@@ -301,30 +294,16 @@ struct LibraryView: View {
         }
     }
 
-    private var availableChips: [LibraryShelf.Chip] {
-        let eps = library.episodes
-        return LibraryShelf.chips(
-            hasInProgress: eps.contains { library.isInProgress($0.id) },
-            hasUnplayed: eps.contains { library.isUnplayed($0.id) },
-            hasFinished: eps.contains { library.isFinished($0.id) },
-            hasStarred: eps.contains { extracts.isStarred($0.id) },
-            lenses: DiscoverCatalog.ownedLensChips(from: eps)
+    private var shelfRail: LibraryShelf.ChipRail {
+        LibraryShelf.rail(
+            lenses: DiscoverCatalog.ownedLensChips(from: library.episodes),
+            shows: distinctShows
         )
     }
 
     private var distinctShows: [String] {
         let names = Set(library.episodes.map(\.showName).filter { $0 != "未分类" })
         return names.sorted()
-    }
-
-    private var isShowFilter: Bool {
-        if case .show = filter { return true }
-        return false
-    }
-
-    private var showChipLabel: String {
-        if case .show(let name) = filter { return name }
-        return "按节目"
     }
 
     private var shelfRows: [LibraryShelf.Row] {
@@ -352,26 +331,48 @@ struct LibraryView: View {
         LibraryShelf.sectionTitle(chip: filter, query: searchText, count: visibleEpisodes.count)
     }
 
-    private var emptyFilterMessage: String {
-        LibraryShelf.emptyMessage(
+    private var emptyFilterState: LibraryShelf.EmptyState {
+        LibraryShelf.emptyState(
             chip: filter,
             query: searchText,
             hasFinished: library.episodes.contains { library.isFinished($0.id) }
         )
     }
 
-    private func sanitizeFilter() {
-        let chips = availableChips
-        switch filter {
-        case .all:
-            return
-        case .inProgress, .unplayed, .finished, .starred, .lens:
-            if !chips.contains(filter) {
-                filter = .all
+    private var emptyFilterRow: some View {
+        let state = emptyFilterState
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(state.message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+            if let action = state.action, let label = state.actionLabel {
+                Button(label) {
+                    applyEmptyAction(action)
+                }
+                .font(.footnote.weight(.semibold))
+                .buttonStyle(.borderless)
             }
-        case .show(let name):
-            if !distinctShows.contains(name) {
-                filter = .all
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func applyEmptyAction(_ action: LibraryShelf.EmptyAction) {
+        switch action {
+        case .showArchive:
+            filter = .finished
+        case .showUnfinished:
+            filter = LibraryShelf.defaultChip
+        }
+    }
+
+    private func sanitizeFilter() {
+        let rail = shelfRail
+        switch filter {
+        case .all, .starred, .finished, .inProgress, .unplayed:
+            return
+        case .lens, .show:
+            if !rail.more.contains(filter) {
+                filter = LibraryShelf.defaultChip
             }
         }
     }
@@ -385,6 +386,11 @@ struct LibraryView: View {
         let byID = Dictionary(uniqueKeysWithValues: library.episodes.map { ($0.id, $0) })
         return entries.compactMap { item in
             guard let episode = byID[item.id] else { return nil }
+            guard ContinueListening.showsContinueCard(
+                continueID: episode.id,
+                playerID: player.currentID,
+                controlsUsable: miniTransportUsable
+            ) else { return nil }
             let nearResume = !ContinueListening.shouldReopenAtListenMark(
                 currentID: player.currentID,
                 episodeID: episode.id,
@@ -395,6 +401,17 @@ struct LibraryView: View {
             let playing = nearResume && player.currentID == episode.id && player.isPlaying
             return ContinueListeningSection.Row(episode: episode, item: item, playing: playing)
         }
+    }
+
+    /// Mini-player transport can play or pause this episode. A download or open
+    /// error still shows the bar, but that bar is not usable control, so the
+    /// Continue card stays. This does not create a player.
+    private var miniTransportUsable: Bool {
+        guard let id = player.currentID, !id.isEmpty else { return false }
+        if let error = player.errorText?.trimmingCharacters(in: .whitespacesAndNewlines), !error.isEmpty {
+            return false
+        }
+        return true
     }
 
     private var miniEpisode: Episode? {
@@ -440,18 +457,73 @@ struct LibraryView: View {
         }
     }
 
-    private func subtitle(_ episode: Episode) -> String {
-        var parts: [String] = []
-        if episode.showName != "未分类" {
-            parts.append(episode.showName)
+    /// Title is the identity. One secondary line. Listen-note gray（上次听到）stays
+    /// off the row; the player detail is one tap away and the list keeps its place.
+    /// Chips sit under the title so large Dynamic Type cannot crush it sideways.
+    private func episodeRow(_ episode: Episode, badge: String?) -> some View {
+        let marks = LibraryShelf.rowMarks(
+            listen: LibraryShelf.rowListenChip(
+                chip: filter,
+                finished: library.isFinished(episode.id),
+                inProgress: library.isInProgress(episode.id),
+                unplayed: library.isUnplayed(episode.id)
+            ),
+            starred: extracts.isStarred(episode.id),
+            extra: badge
+        )
+        let secondary = rowSecondary(episode)
+        return VStack(alignment: .leading, spacing: 4) {
+            Text(episode.title)
+                .font(.body)
+                .foregroundStyle(.primary)
+                .lineLimit(LibraryShelf.titleLineLimit)
+                .multilineTextAlignment(.leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if !secondary.isEmpty {
+                Text(secondary)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if !marks.isEmpty {
+                HStack(spacing: 6) {
+                    ForEach(0..<marks.count, id: \.self) { index in
+                        rowMark(marks[index])
+                    }
+                }
+            }
         }
-        parts.append(episode.durationLabel)
-        parts.append(episode.dateLabel)
-        if let heard = library.continuePointLabel(for: episode.id) {
-            parts.append(heard)
+        .padding(.vertical, 4)
+    }
+
+    private func rowSecondary(_ episode: Episode) -> String {
+        let remaining: String?
+        if library.isInProgress(episode.id), let duration = episode.durationSec, duration > 1 {
+            remaining = ContinueListening.remainingLabel(
+                seconds: library.resumeSeconds(for: episode.id),
+                duration: duration
+            )
+        } else {
+            remaining = nil
         }
-        if episode.downloading { parts.append("正在从 iCloud 下载") }
-        return parts.joined(separator: " · ")
+        return LibraryShelf.rowSecondary(
+            showName: episode.showName,
+            durationLabel: episode.durationLabel,
+            remainingLabel: remaining,
+            downloading: episode.downloading
+        )
+    }
+
+    @ViewBuilder
+    private func rowMark(_ mark: LibraryShelf.RowMark) -> some View {
+        switch mark {
+        case .star:
+            Image(systemName: "star.fill")
+                .font(.caption2)
+                .foregroundStyle(.yellow)
+        case .text(let title, let emphasized):
+            listenBadge(title, emphasized: emphasized)
+        }
     }
 
     private func listenBadge(_ title: String, emphasized: Bool) -> some View {
@@ -464,14 +536,6 @@ struct LibraryView: View {
                 (emphasized ? Color.accentColor : Color.primary).opacity(emphasized ? 0.15 : 0.08),
                 in: Capsule()
             )
-    }
-
-    private func listenBar(_ fraction: Double) -> some View {
-        ProgressView(value: min(1, max(0, fraction)))
-            .progressViewStyle(.linear)
-            .tint(Color.primary.opacity(0.55))
-            .accessibilityLabel("上次听到")
-            .accessibilityValue("\(Int((fraction * 100).rounded()))%")
     }
 
     private func prompt(title: String, systemImage: String, detail: String) -> some View {

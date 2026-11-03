@@ -2,23 +2,31 @@ import Foundation
 
 /// What the 资料库 list shows.
 ///
-/// Default「全部」is the shelf still worth opening: 未听 and 在听. Finished episodes
-/// leave that surface and stay on disk. 「已听」is the same chip row's archive, not a
-/// new tab and not a Discover mall (Option A).
+/// Default「未听完」is the shelf still worth opening: 未听 and 在听 (`D = U ∪ I`).
+/// Finished episodes leave that surface and stay on disk. 「已听」is a resident chip
+/// on the same bar, not a new tab and not a Discover mall (Option A).
+///
+/// The bar is at most four controls: 未听完｜星｜已听｜更多. 在听／未听／主题／按节目
+/// live in the existing 更多 menu. That menu is a filter popover, not a new surface.
 ///
 /// Apple Podcasts keeps one「继续播放」and lets played episodes leave Up Next while
 /// staying inside a show. Overcast and Pocket Casts put played items behind one
 /// filter. This shelf does both with the chips that already exist:
-/// - 「全部」hides finished until you search.
-/// - 「已听」browses finished.
-/// - 「★」still lists a finished episode that was starred.
-/// - 「按节目」and a lens include that show or topic's finished episodes, the way a
-///   show page still lists what you already played.
+/// - 「未听完」hides finished until you search. The set is unchanged from「全部」.
+/// - 「已听」browses finished, one tap from the bar.
+/// - 「星」still lists a finished episode that was starred.
+/// - A show or a lens, reached from「更多」, includes that show or topic's finished episodes.
 enum LibraryShelf {
-    /// Chip the user taps to browse finished episodes.
+    /// Cold start. Same set as the old「全部」chip: unfinished ∪ in progress.
+    static let defaultChip = Chip.all
+    static let unfinishedLabel = "未听完"
+    static let starLabel = "星"
     static let archiveLabel = "已听"
-    /// Shown when「全部」is empty only because everything left is finished.
-    static let archiveEmptyHint = "听完的节目在「已听」。"
+    static let moreLabel = "更多"
+    /// Default-row title wraps, but never collapses to a forced single line.
+    static let titleLineLimit = 2
+    /// Status chips on a row are a cap, not a quota. Empty means no chips.
+    static let rowStatusChipCap = 3
 
     enum Chip: Hashable, Identifiable {
         case all
@@ -43,15 +51,21 @@ enum LibraryShelf {
 
         var label: String {
             switch self {
-            case .all: return "全部"
+            case .all: return LibraryShelf.unfinishedLabel
             case .inProgress: return "在听"
             case .unplayed: return "未听"
             case .finished: return LibraryShelf.archiveLabel
-            case .starred: return "★"
+            case .starred: return LibraryShelf.starLabel
             case .lens(_, let label): return label
             case .show(let name): return name
             }
         }
+    }
+
+    /// Resident chips plus the filters that belong behind「更多」.
+    struct ChipRail: Equatable {
+        var resident: [Chip]
+        var more: [Chip]
     }
 
     /// One library row, with listen state already decided by `LibraryStore`.
@@ -67,26 +81,51 @@ enum LibraryShelf {
         var lensIDs: [String]
     }
 
-    /// Progressive chips. 「已听」appears only once something is finished.
-    static func chips(
-        hasInProgress: Bool,
-        hasUnplayed: Bool,
-        hasFinished: Bool,
-        hasStarred: Bool,
-        lenses: [(id: String, label: String)]
-    ) -> [Chip] {
-        var chips: [Chip] = [.all]
-        if hasInProgress { chips.append(.inProgress) }
-        if hasUnplayed { chips.append(.unplayed) }
-        if hasFinished { chips.append(.finished) }
-        if hasStarred { chips.append(.starred) }
-        for lens in lenses {
-            chips.append(.lens(id: lens.id, label: lens.label))
+    enum RowMark: Equatable {
+        case text(String, emphasized: Bool)
+        case star
+    }
+
+    enum EmptyAction: Equatable {
+        case showArchive
+        case showUnfinished
+    }
+
+    struct EmptyState: Equatable {
+        var message: String
+        var action: EmptyAction?
+
+        var actionLabel: String? {
+            switch action {
+            case .showArchive: return LibraryShelf.archiveLabel
+            case .showUnfinished: return LibraryShelf.unfinishedLabel
+            case nil: return nil
+            }
         }
-        return chips
+    }
+
+    /// Bar is always 未听完｜星｜已听, plus a 更多 button in the view (≤4).
+    /// 在听／未听 stay one menu tap away even when their sets are empty.
+    /// Themes and shows are listed only when the library actually has them.
+    /// `shows` is included when there are at least two distinct show names.
+    static func rail(
+        lenses: [(id: String, label: String)],
+        shows: [String]
+    ) -> ChipRail {
+        var more: [Chip] = [.inProgress, .unplayed]
+        for lens in lenses {
+            more.append(.lens(id: lens.id, label: lens.label))
+        }
+        if shows.count >= 2 {
+            for name in shows where !name.isEmpty {
+                more.append(.show(name))
+            }
+        }
+        return ChipRail(resident: [.all, .starred, .finished], more: more)
     }
 
     /// Keeps library order. Does not drop or rewrite episodes.
+    /// Play and pause do not reorder; a finished episode leaves the default shelf.
     static func visible(_ rows: [Row], chip: Chip, query: String) -> [Row] {
         rows.filter { include($0, chip: chip, query: query) }
     }
@@ -95,8 +134,7 @@ enum LibraryShelf {
         let q = trimmed(query)
         switch chip {
         case .all:
-            // Resting「全部」hides finished. A typed search still finds them,
-            // the way podcast search finds a played episode by name.
+            // Resting「未听完」hides finished. A typed search still finds them.
             if row.finished && q.isEmpty { return false }
         case .inProgress:
             if !row.inProgress { return false }
@@ -115,6 +153,8 @@ enum LibraryShelf {
     }
 
     /// The continue rail sits on the shelf you are still working through.
+    /// The view also hides the card when it names the episode the mini player
+    /// can already control. This function does not know about the player.
     static func showsContinue(chip: Chip, query: String) -> Bool {
         guard trimmed(query).isEmpty else { return false }
         switch chip {
@@ -130,7 +170,7 @@ enum LibraryShelf {
             return "搜索结果 · \(count)"
         }
         switch chip {
-        case .all: return "全部 · \(count)"
+        case .all: return "\(unfinishedLabel) · \(count)"
         case .inProgress: return "在听 · \(count)"
         case .unplayed: return "未听 · \(count)"
         case .finished: return "\(archiveLabel) · \(count)"
@@ -140,14 +180,94 @@ enum LibraryShelf {
         }
     }
 
-    static func emptyMessage(chip: Chip, query: String, hasFinished: Bool) -> String {
+    static func emptyState(chip: Chip, query: String, hasFinished: Bool) -> EmptyState {
         if !trimmed(query).isEmpty {
-            return "没有匹配的节目。"
+            return EmptyState(message: "没有匹配的节目。", action: nil)
         }
-        if chip == .all && hasFinished {
-            return archiveEmptyHint
+        switch chip {
+        case .all where hasFinished:
+            return EmptyState(message: "都听完了。", action: .showArchive)
+        case .finished:
+            return EmptyState(message: "还没有已听完的节目。", action: .showUnfinished)
+        case .all:
+            return EmptyState(message: "这个筛选下暂时没有节目。", action: nil)
+        default:
+            return EmptyState(message: "这个筛选下暂时没有节目。", action: .showUnfinished)
         }
-        return "这个筛选下暂时没有节目。"
+    }
+
+    /// One secondary line: 节目 · 时长, or 节目 · 剩余 when that label is real.
+    /// 「上次听到」is a listen note. It stays off this line; the player still has the resume point.
+    /// An unknown duration is omitted rather than replaced with a made-up percent.
+    static func rowSecondary(
+        showName: String,
+        durationLabel: String,
+        remainingLabel: String?,
+        downloading: Bool
+    ) -> String {
+        var parts: [String] = []
+        let show = showName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !show.isEmpty && show != "未分类" {
+            parts.append(show)
+        }
+        let remaining = remainingLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if remaining.hasPrefix("剩余") {
+            parts.append(remaining)
+        } else if !durationLabel.isEmpty && durationLabel != "时长未知" {
+            parts.append(durationLabel)
+        }
+        if downloading {
+            parts.append("正在从 iCloud 下载")
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    /// Listen chip for one row. The default shelf does not repeat「未听」on every row.
+    /// A chip that only restates the current filter is omitted.
+    static func rowListenChip(
+        chip: Chip,
+        finished: Bool,
+        inProgress: Bool,
+        unplayed: Bool
+    ) -> String? {
+        switch chip {
+        case .all:
+            if finished { return "已听完" }
+            if inProgress { return "在听" }
+            return nil
+        case .inProgress, .unplayed, .finished:
+            return nil
+        default:
+            if finished { return "已听完" }
+            if inProgress { return "在听" }
+            if unplayed { return "未听" }
+            return nil
+        }
+    }
+
+    /// At most `rowStatusChipCap` marks. Missing listen / star / extra are skipped, not filled in.
+    static func rowMarks(listen: String?, starred: Bool, extra: String?) -> [RowMark] {
+        var marks: [RowMark] = []
+        if let listen {
+            let trimmed = listen.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                marks.append(.text(trimmed, emphasized: trimmed == "未听"))
+            }
+        }
+        if starred {
+            marks.append(.star)
+        }
+        if let extra {
+            let trimmed = extra.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                let emphasized = trimmed.contains("要点") || trimmed == "已提炼"
+                marks.append(.text(trimmed, emphasized: emphasized))
+            }
+        }
+        if marks.count > rowStatusChipCap {
+            return Array(marks.prefix(rowStatusChipCap))
+        }
+        return marks
     }
 
     private static func matches(_ row: Row, query: String) -> Bool {

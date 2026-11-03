@@ -114,7 +114,8 @@ final class LibraryStore: ObservableObject {
         return entry.seconds >= 5
     }
 
-    /// Partial listen only. Finished episodes start over next time; the row says 已听完.
+    /// Partial listen only. Finished episodes start over next time.
+    /// The library row does not print this; resume still lives on the ListenMark.
     func continuePointLabel(for id: String) -> String? {
         guard let entry = progress[id], !entry.finished, entry.seconds >= 5 else { return nil }
         return "上次听到 \(listenClock(entry.seconds))"
