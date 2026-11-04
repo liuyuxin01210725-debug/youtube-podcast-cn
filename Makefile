@@ -37,6 +37,7 @@ test-extract-display:
 		"$$SWIFTC" -parse-as-library -o /tmp/extract-display-checks \
 			ios/PrivateListen/PrivateListen/ExtractionModels.swift \
 			ios/PrivateListen/PrivateListen/ExtractSchemaMap.swift \
+			ios/PrivateListen/PrivateListen/MockExtractor.swift \
 			ios/PrivateListen/PrivateListen/ExtractDisplay.swift \
 			ios/PrivateListen/PrivateListenTests/ExtractDisplayChecks.swift && \
 		/tmp/extract-display-checks; \
