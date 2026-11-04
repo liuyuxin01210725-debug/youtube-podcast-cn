@@ -142,7 +142,9 @@ final class LibraryStore: ObservableObject {
         saveContinueBookkeeping()
     }
 
-    /// The 「继续播放」 card: newest unfinished listen, capped by `ContinueListening.displayLimit` (1).
+    /// The 「继续播放」 card: newest unfinished listen whose playhead moved
+    /// (a few seconds count; the 5s floor stays on `isInProgress`), capped by
+    /// `ContinueListening.displayLimit` (1).
     func continueEntries(in episodes: [Episode]) -> [ContinueListening.Item] {
         var marks: [String: ContinueListening.Mark] = [:]
         var durations: [String: Double] = [:]

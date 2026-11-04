@@ -112,6 +112,7 @@ struct PlayerView: View {
         }
         .onAppear {
             player.fullPlayerOpen = true
+            // Opening clears a swipe-dismiss. It does not add one, and it does not write ListenMark.
             library.acknowledgeContinue(episode.id)
             player.open(episode, resumeAt: library.resumeSeconds(for: episode.id))
             extracts.load(episode: episode)

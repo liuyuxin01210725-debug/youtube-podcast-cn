@@ -2,9 +2,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// Option A: one chronological library list. No Discover mall, no extra tab.
-/// 「继续播放」is at most the latest unfinished episode, and hides when the mini
-/// player already controls that same episode. 「未听完」hides finished;
-/// 「星」and「已听」stay on the chip bar. 在听／未听／主题 sit in「更多」.
+/// 「继续播放」is at most the latest unfinished episode, including a short play
+/// under 5 seconds. The card stays when the mini player is that same episode,
+/// so leaving the player does not keep an older one in the slot. 「未听完」hides
+/// finished; 「星」and「已听」stay on the chip bar. 在听／未听／主题 sit in「更多」.
 /// Extract badges and the extract design entry stay as they are.
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
