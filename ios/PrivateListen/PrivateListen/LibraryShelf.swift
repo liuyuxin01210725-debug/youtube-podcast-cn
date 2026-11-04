@@ -153,8 +153,9 @@ enum LibraryShelf {
     }
 
     /// The continue rail sits on the shelf you are still working through.
-    /// The view also hides the card when it names the episode the mini player
-    /// can already control. This function does not know about the player.
+    /// Which episode is on the card, and whether the mini player is that same
+    /// episode, is decided by `ContinueListening`. This function does not know
+    /// about the player.
     static func showsContinue(chip: Chip, query: String) -> Bool {
         guard trimmed(query).isEmpty else { return false }
         switch chip {

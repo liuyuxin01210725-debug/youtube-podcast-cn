@@ -391,6 +391,12 @@ final class PlayerModel: ObservableObject {
     func checkpoint() {
         guard !clipSuppressListenMark else { return }
         guard positionTrusted, let currentID else { return }
+        // Observer ticks are 0.5s apart. Leaving must store the clock the
+        // listener reached, including a short play that has not crossed 5s.
+        current = ContinueListening.playheadToPersist(
+            observed: current,
+            liveClock: player.currentTime().seconds
+        )
         lastSaved = current
         onProgress?(currentID, current, duration)
     }

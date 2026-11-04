@@ -31,10 +31,19 @@ struct ContinueUXProbe {
         let shown = ContinueListening.items(marks: marks, durations: durations, dismissed: [], limit: 20)
         check("在听进入继续播放", shown.contains { $0.id == "a" && $0.remaining == 560 })
         let one = ContinueListening.items(marks: marks, durations: durations, dismissed: [])
-        check("默认继续播放只留最近的未听完", one.map(\.id) == ["a"] && ContinueListening.displayLimit == 1)
-        check("不到 5 秒不算继续播放", shown.allSatisfy { $0.id != "b" })
+        check(
+            "默认继续播放只留最近摸过的未听完，短于 5 秒也算",
+            one.map(\.id) == ["b"] && ContinueListening.displayLimit == 1
+        )
+        var withZero = marks
+        withZero["z"] = .init(seconds: 0, finished: false, touchedAt: 99)
+        let noZero = ContinueListening.items(marks: withZero, durations: durations, dismissed: [], limit: 20)
+        check(
+            "播放头没动过不算继续播放",
+            noZero.allSatisfy { $0.id != "z" } && noZero.first?.id == "b"
+        )
         check("已听完不进继续播放", shown.allSatisfy { $0.id != "c" })
-        check("没有触摸时间的排在有时间的后面", shown.map(\.id) == ["a", "d"])
+        check("没有触摸时间的排在有时间的后面", shown.map(\.id) == ["b", "a", "d"])
         check(
             "剩余文案",
             ContinueListening.remainingLabel(seconds: 120, duration: 180) == "剩余 1:00"
@@ -48,12 +57,16 @@ struct ContinueUXProbe {
         let afterDismiss = ContinueListening.items(marks: marks, durations: durations, dismissed: hidden, limit: 20)
         check(
             "左滑删除只拿掉这一条，不写成听完",
-            afterDismiss.map(\.id) == ["d"] && marks["a"]?.seconds == 40 && marks["a"]?.finished == false
+            afterDismiss.map(\.id) == ["b", "d"] && marks["a"]?.seconds == 40 && marks["a"]?.finished == false
         )
         check("空 id 不能当成删除", ContinueListening.dismissing(hidden, id: "") == hidden)
         let restored = ContinueListening.acknowledging(hidden, id: "a")
         let afterAck = ContinueListening.items(marks: marks, durations: durations, dismissed: restored, limit: 20)
-        check("打开或点继续播放会回到列表", afterAck.first?.id == "a")
+        check(
+            "打开会把滑掉的一条放回候选，但不会单靠打开抢走最近的短播",
+            afterAck.contains { $0.id == "a" } && afterAck.first?.id == "b" && !restored.contains("a")
+        )
+        check("打开不会把这一集写进滑掉名单", ContinueListening.acknowledging([], id: "a").isEmpty)
 
         let clip = ContinueListening.record(
             marks: marks,
@@ -130,8 +143,8 @@ struct ContinueUXProbe {
             ContinueListening.showsContinueCard(continueID: "a", playerID: nil, controlsUsable: false)
         )
         check(
-            "同一集且控制可用时藏起继续播放卡",
-            ContinueListening.showsContinueCard(continueID: "a", playerID: "a", controlsUsable: true) == false
+            "回库后迷你条还停在同一集，继续播放仍显示这一集",
+            ContinueListening.showsContinueCard(continueID: "a", playerID: "a", controlsUsable: true)
         )
         check(
             "同一集但控制还没就绪时留下继续播放卡",
@@ -145,6 +158,127 @@ struct ContinueUXProbe {
             "没有继续播放目标时不留空卡",
             ContinueListening.showsContinueCard(continueID: nil, playerID: "b", controlsUsable: true) == false
                 && ContinueListening.showsContinueCard(continueID: "", playerID: "a", controlsUsable: true) == false
+        )
+
+        let older = ["b": ContinueListening.Mark(seconds: 40, finished: false, touchedAt: 10)]
+        let journeyDurations = ["a": 600.0, "b": 600.0]
+        for sample in [2.5, 6.0] {
+            let left = ContinueListening.afterLeavingPlayer(
+                marks: older,
+                dismissed: [],
+                durations: journeyDurations,
+                episodeID: "a",
+                seconds: sample,
+                duration: 600,
+                touchedAt: 100,
+                clipSuppressListenMark: false,
+                playerID: "a",
+                controlsUsable: true
+            )
+            check(
+                "短播 \(sample) 秒后回库，继续播放是刚听的那集",
+                left.cardID == "a"
+                    && left.marks["a"]?.seconds == sample
+                    && left.marks["a"]?.finished == false
+                    && ContinueListening.items(
+                        marks: left.marks,
+                        durations: journeyDurations,
+                        dismissed: left.dismissed
+                    ).count == 1
+            )
+        }
+
+        let wasDismissed = ContinueListening.dismissing([], id: "a")
+        var dismissedMarks = older
+        dismissedMarks["a"] = .init(seconds: 30, finished: false, touchedAt: 1)
+        let replayed = ContinueListening.afterLeavingPlayer(
+            marks: dismissedMarks,
+            dismissed: wasDismissed,
+            durations: journeyDurations,
+            episodeID: "a",
+            seconds: 3,
+            duration: 600,
+            touchedAt: 80,
+            clipSuppressListenMark: false,
+            playerID: "a",
+            controlsUsable: true
+        )
+        check(
+            "滑掉之后再短播，打开会取消隐藏并且继续播放换成这一集",
+            replayed.cardID == "a" && !replayed.dismissed.contains("a")
+        )
+        let swipedAgain = ContinueListening.dismissing(replayed.dismissed, id: "a")
+        let afterSwipe = ContinueListening.items(
+            marks: replayed.marks,
+            durations: journeyDurations,
+            dismissed: swipedAgain
+        )
+        check(
+            "短播之后再左滑，槽让回上一条未听完，仍只有一条",
+            afterSwipe.count == 1 && afterSwipe.first?.id == "b"
+        )
+
+        let clipLeave = ContinueListening.afterLeavingPlayer(
+            marks: older,
+            dismissed: [],
+            durations: journeyDurations,
+            episodeID: "a",
+            seconds: 30,
+            duration: 600,
+            touchedAt: 200,
+            clipSuppressListenMark: true,
+            playerID: "a",
+            controlsUsable: true
+        )
+        check(
+            "听这段后回库不改继续播放，也不写 ListenMark",
+            clipLeave.cardID == "b" && clipLeave.marks == older
+        )
+
+        let untouched = ContinueListening.afterLeavingPlayer(
+            marks: older,
+            dismissed: [],
+            durations: journeyDurations,
+            episodeID: "a",
+            seconds: 0,
+            duration: 600,
+            touchedAt: 300,
+            clipSuppressListenMark: false,
+            playerID: "a",
+            controlsUsable: true
+        )
+        check(
+            "打开后播放头还是 0 就离开，继续播放仍是原来那集",
+            untouched.cardID == "b" && untouched.marks["a"]?.seconds == 0
+        )
+
+        let finishedLeave = ContinueListening.afterLeavingPlayer(
+            marks: older,
+            dismissed: [],
+            durations: journeyDurations,
+            episodeID: "a",
+            seconds: 590,
+            duration: 600,
+            touchedAt: 400,
+            clipSuppressListenMark: false,
+            playerID: "a",
+            controlsUsable: true
+        )
+        check(
+            "听到接近结尾再回库，不把听完的放进继续播放",
+            finishedLeave.cardID == "b" && finishedLeave.marks["a"]?.finished == true
+        )
+
+        check(
+            "离开播放器时用真实播放头，不把刚过 5 秒写成上一拍",
+            ContinueListening.playheadToPersist(observed: 4.5, liveClock: 5.2) == 5.2
+                && ContinueListening.playheadToPersist(observed: 0, liveClock: 2.5) == 2.5
+        )
+        check(
+            "续播定位还没落地时，0 不能盖掉已经记下的播放头",
+            ContinueListening.playheadToPersist(observed: 40, liveClock: 0) == 40
+                && ContinueListening.playheadToPersist(observed: 0.4, liveClock: 0) == 0.4
+                && ContinueListening.playheadToPersist(observed: 40, liveClock: .nan) == 40
         )
 
         if !failures.isEmpty {
