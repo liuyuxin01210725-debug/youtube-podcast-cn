@@ -102,32 +102,55 @@ PY
 
 scan_binary() {
   local bin="$1"
-  command -v strings >/dev/null 2>&1 || fail "找到二进制但没有 strings：$bin"
-  local blob
-  blob=$(strings "$bin" || true)
-  local token
-  for token in "继续播放" "听后感" "mock_not_official"; do
-    if ! grep -q -F "$token" <<<"$blob"; then
-      fail "二进制缺少「${token}」：$bin"
-    fi
-  done
-  echo "ok  二进制含继续播放、听后感、mock_not_official：$bin"
+  # macOS `strings` often drops UTF-8 Chinese; search raw bytes instead.
+  python3 -c '
+import pathlib, sys
+bin_path = pathlib.Path(sys.argv[1])
+blob = bin_path.read_bytes()
+for token in ("继续播放", "听后感", "mock_not_official"):
+    if token.encode("utf-8") not in blob:
+        print(f"FAIL 二进制缺少「{token}」：{bin_path}", file=sys.stderr)
+        raise SystemExit(1)
+print(f"ok  二进制含继续播放、听后感、mock_not_official：{bin_path}")
+' "$bin" || fail "二进制探针失败：$bin"
 }
 
 shopt -s nullglob
 found=0
-search_roots=("$root")
-if [[ -d "$HOME/Library/Developer/Xcode/DerivedData" ]]; then
-  search_roots+=("$HOME/Library/Developer/Xcode/DerivedData")
-fi
-
-while IFS= read -r -d '' app; do
-  exe="$app/PrivateListen"
-  if [[ -f "$exe" ]]; then
-    scan_binary "$exe"
-    found=1
+# Only CURRENT tip + DerivedData — historic dist/*.app would false-fail on old builds.
+search_roots=()
+for cand in   "$root/dist/CURRENT-iphoneos"   "$root/dist/PrivateListen-CURRENT-iphoneos.app"   "$root/dist/CURRENT-iphoneos.app"; do
+  if [[ -e "$cand" ]]; then
+    search_roots+=("$cand")
   fi
-done < <(find "${search_roots[@]}" -type d -name 'PrivateListen.app' -print0 2>/dev/null || true)
+done
+
+for root_cand in "${search_roots[@]}"; do
+  while IFS= read -r -d '' app; do
+    # Debug tip builds put Chinese strings in PrivateListen.debug.dylib (thin stub is ~90KB).
+    dylib="$app/PrivateListen.debug.dylib"
+    exe="$app/PrivateListen"
+    if [[ -f "$dylib" ]]; then
+      scan_binary "$dylib"
+      found=1
+    elif [[ -f "$exe" ]]; then
+      scan_binary "$exe"
+      found=1
+    fi
+  done < <(find "$root_cand" -type d -name 'PrivateListen.app' -print0 2>/dev/null || true)
+  # CURRENT may itself be the .app bundle
+  if [[ -d "$root_cand" && -f "$root_cand/Info.plist" ]]; then
+    dylib="$root_cand/PrivateListen.debug.dylib"
+    exe="$root_cand/PrivateListen"
+    if [[ -f "$dylib" ]]; then
+      scan_binary "$dylib"
+      found=1
+    elif [[ -f "$exe" ]]; then
+      scan_binary "$exe"
+      found=1
+    fi
+  fi
+done
 
 while IFS= read -r -d '' bin; do
   case "$bin" in
