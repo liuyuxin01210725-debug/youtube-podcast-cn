@@ -93,6 +93,7 @@ struct PlayerView: View {
                 }
 
                 Divider()
+                ListenNoteSection(episodeId: episode.id, isFinished: library.isFinished(episode.id))
                 ExtractDetailSection(episode: episode, extracts: extracts)
             }
             .padding(24)

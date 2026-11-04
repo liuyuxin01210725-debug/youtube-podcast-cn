@@ -6,6 +6,7 @@ struct PrivateListenApp: App {
     @StateObject private var player = PlayerModel()
     @StateObject private var extracts = ExtractStore()
     @StateObject private var pointStars = PointStarStore()
+    @StateObject private var listenNotes = ListenNoteStore()
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +18,7 @@ struct PrivateListenApp: App {
                 .environmentObject(player)
                 .environmentObject(extracts)
                 .environmentObject(pointStars)
+                .environmentObject(listenNotes)
                 .onOpenURL { url in
                     library.acceptIncoming(url)
                 }
