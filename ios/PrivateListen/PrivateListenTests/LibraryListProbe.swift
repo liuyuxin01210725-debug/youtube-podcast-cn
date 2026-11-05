@@ -9,6 +9,7 @@ import Glibc
 /// `swiftc -parse-as-library` LibraryShelf.swift and this file.
 @main
 struct LibraryListProbe {
+    @MainActor
     static func main() {
         var failures: [String] = []
         func check(_ name: String, _ ok: Bool) {
@@ -72,6 +73,41 @@ struct LibraryListProbe {
             "已听里的搜索只留听完且匹配的",
             LibraryShelf.visible(rows, chip: .finished, query: "星").map(\.id) == ["starred-done"]
         )
+
+        // Exercise the actual store write, persisted ListenMark and existing rail policy.
+        let suite = "LibraryListProbe.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = LibraryStore(defaults: defaults)
+        let episodes = ["manual", "fallback"].map { id in
+            Episode(id: id, title: id, guests: [], lensIds: [], createdAt: .distantPast,
+                    durationSec: nil, audioURL: URL(fileURLWithPath: "/tmp/\(id).mp3"), downloading: false)
+        }
+        store.remember(id: "fallback", seconds: 2, duration: 0)
+        store.remember(id: "manual", seconds: 3, duration: 0)
+        check("手动归档前 Continue 是目标集", store.continueEntries(in: episodes).map(\.id) == ["manual"])
+        store.markFinished("manual")
+        let manualRows = episodes.map { episode in
+            row(episode.id, title: episode.title, show: "Probe",
+                finished: store.isFinished(episode.id), inProgress: store.isInProgress(episode.id),
+                unplayed: store.isUnplayed(episode.id), starred: episode.id == "manual")
+        }
+        check("手动标已听后未听完过滤掉该 id", LibraryShelf.visible(manualRows, chip: .all, query: "").map(\.id) == ["fallback"])
+        check("手动标已听后已听含该 id", LibraryShelf.visible(manualRows, chip: .finished, query: "").map(\.id) == ["manual"])
+        check("手动标已听后星标仍能找到该 id", LibraryShelf.visible(manualRows, chip: .starred, query: "").map(\.id) == ["manual"])
+        check("手动标已听后 Continue 换槽且最多一条", store.continueEntries(in: episodes).map(\.id) == ["fallback"])
+        let restored = LibraryStore(defaults: defaults)
+        check("重读后完成事实仍在且不再续听该集", restored.isFinished("manual") && restored.resumeSeconds(for: "manual") == 0
+            && restored.continueEntries(in: episodes).map(\.id) == ["fallback"])
+        let persisted = try! JSONDecoder().decode([String: LibraryStore.ListenMark].self,
+            from: defaults.data(forKey: "PrivateListen.progress")!)
+        check("完成只写既有 finished 且保留真实进度", persisted["manual"]?.finished == true && persisted["manual"]?.seconds == 3)
+        restored.dismissContinue("fallback")
+        check("Continue 卡左滑不写完成且保留进度", !restored.isFinished("fallback") && restored.resumeSeconds(for: "fallback") == 2)
+        store.markFinished("fallback")
+        check("最后一集完成后 Continue 隐藏", store.continueEntries(in: episodes).isEmpty)
+        store.markFinished("never-started")
+        check("未播且时长未知也可直接完成", store.isFinished("never-started") && !store.isUnplayed("never-started"))
 
         let offered = LibraryShelf.rail(
             lenses: [(id: "health", label: "健康")],

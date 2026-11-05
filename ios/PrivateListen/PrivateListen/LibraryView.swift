@@ -282,6 +282,14 @@ struct LibraryView: View {
                 episodeRow(episode, badge: badge)
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                if filter == .all && !library.isFinished(episode.id) {
+                    Button {
+                        library.markFinished(episode.id)
+                    } label: {
+                        Label("已听完", systemImage: "checkmark.circle")
+                    }
+                    .tint(.green)
+                }
                 Button {
                     extracts.toggleStar(episode: episode, lensIds: episode.effectiveLensIds)
                 } label: {
