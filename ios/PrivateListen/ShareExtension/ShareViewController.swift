@@ -23,7 +23,7 @@ final class ShareViewController: UIViewController, UIDocumentPickerDelegate {
         chooseButton.setTitle("选择中文播客私人库", for: .normal)
         chooseButton.titleLabel?.font = .preferredFont(forTextStyle: .headline)
         chooseButton.addTarget(self, action: #selector(pickFolder), for: .touchUpInside)
-        openButton.setTitle("打开私人听写入", for: .normal)
+        openButton.setTitle("打开声间写入", for: .normal)
         openButton.addTarget(self, action: #selector(openHostTapped), for: .touchUpInside)
         cancelButton.setTitle("取消", for: .normal)
         cancelButton.addTarget(self, action: #selector(cancelTapped), for: .touchUpInside)
@@ -144,9 +144,9 @@ final class ShareViewController: UIViewController, UIDocumentPickerDelegate {
         extensionContext?.open(destination) { success in
             DispatchQueue.main.async {
                 if success || self.openViaResponder(destination) {
-                    self.finish("已打开私人听")
+                    self.finish("已打开声间")
                 } else {
-                    self.show("没能打开私人听。请改用「选择中文播客私人库」。")
+                    self.show("没能打开声间。请改用「选择中文播客私人库」。")
                 }
             }
         }

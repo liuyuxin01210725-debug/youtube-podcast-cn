@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Reads the iCloud Drive folder the Mac publisher fills: 「中文播客私人库」.
 /// The folder is chosen once and kept with a security-scoped bookmark. Playback
@@ -25,10 +26,16 @@ final class LibraryStore: ObservableObject {
     @Published private(set) var waitingOnCloud = false
     @Published var message: String?
     @Published private var progress: [String: ListenMark] = [:]
+    @Published private var continueDismissedIDs: Set<String> = []
+    @Published private var continueTouched: [String: TimeInterval] = [:]
 
     private let bookmarkKey = "PrivateListen.libraryBookmark"
     private let progressKey = "PrivateListen.progress"
     private let pendingKey = "PrivateListen.pendingShares"
+    /// Ids removed from 「继续播放」 by swipe. ListenMark seconds are kept.
+    private let dismissedKey = "PrivateListen.continueDismissed"
+    /// Last ListenMark write time, so the rail can sort by recent listens.
+    private let touchedKey = "PrivateListen.continueTouched"
     private var pendingShares: [PendingShare] = []
     /// Only ever the user-chosen iCloud folder, never the Documents copy.
     private var folderURL: URL?
@@ -38,12 +45,22 @@ final class LibraryStore: ObservableObject {
 
     var readingLocalCopyOnly: Bool { hasFolder && !hasCloudFolder }
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: progressKey),
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let data = defaults.data(forKey: progressKey),
            let stored = try? JSONDecoder().decode([String: ListenMark].self, from: data) {
             progress = stored
         }
-        if let data = UserDefaults.standard.data(forKey: pendingKey),
+        if let ids = defaults.array(forKey: dismissedKey) as? [String] {
+            continueDismissedIDs = Set(ids)
+        }
+        if let data = defaults.data(forKey: touchedKey),
+           let stored = try? JSONDecoder().decode([String: TimeInterval].self, from: data) {
+            continueTouched = stored
+        }
+        if let data = defaults.data(forKey: pendingKey),
            let stored = try? JSONDecoder().decode([PendingShare].self, from: data) {
             pendingShares = stored
         }
@@ -88,24 +105,125 @@ final class LibraryStore: ObservableObject {
     }
 
     func isUnplayed(_ id: String) -> Bool {
-        guard let entry = progress[id] else { return true }
-        return entry.seconds < 5 && !entry.finished
+        Self.isUnplayed(progress[id])
+    }
+
+    func isFinished(_ id: String) -> Bool {
+        progress[id]?.finished == true
+    }
+
+    /// In progress: started (≥5s) and not finished.
+    func isInProgress(_ id: String) -> Bool {
+        guard let entry = progress[id], !entry.finished else { return false }
+        return entry.seconds >= 5
+    }
+
+    /// Partial listen only. Finished episodes start over next time.
+    /// The library row does not print this; resume still lives on the ListenMark.
+    func continuePointLabel(for id: String) -> String? {
+        guard let entry = progress[id], !entry.finished, entry.seconds >= 5 else { return nil }
+        return "上次听到 \(listenClock(entry.seconds))"
+    }
+
+    func playedFraction(for episode: Episode) -> Double? {
+        guard let entry = progress[episode.id], !entry.finished, entry.seconds >= 5 else { return nil }
+        let duration = episode.durationSec ?? 0
+        guard duration > 1 else { return nil }
+        return min(1, max(0, entry.seconds / duration))
     }
 
     func resumeSeconds(for id: String) -> Double {
-        guard let entry = progress[id], !entry.finished else { return 0 }
-        return max(0, entry.seconds)
+        Self.resumeSeconds(in: progress, id: id)
     }
 
     func remember(id: String, seconds: Double, duration: Double) {
-        guard seconds.isFinite, seconds >= 0 else { return }
+        guard seconds.isFinite, seconds >= 0, !id.isEmpty else { return }
+        if let next = Self.reducing(progress, id: id, seconds: seconds, duration: duration) {
+            progress = next
+            saveProgressMap()
+        }
+        continueTouched[id] = Date().timeIntervalSince1970
+        saveContinueBookkeeping()
+    }
+
+    /// Manual archive uses the same finished fact as playback, without inventing progress.
+    func markFinished(_ id: String) {
+        guard !id.isEmpty else { return }
+        progress[id] = ListenMark(seconds: progress[id]?.seconds ?? 0, finished: true)
+        saveProgressMap()
+    }
+
+    /// The 「继续播放」 card: newest unfinished listen whose playhead moved
+    /// (a few seconds count; the 5s floor stays on `isInProgress`), capped by
+    /// `ContinueListening.displayLimit` (1).
+    func continueEntries(in episodes: [Episode]) -> [ContinueListening.Item] {
+        var marks: [String: ContinueListening.Mark] = [:]
+        var durations: [String: Double] = [:]
+        for episode in episodes {
+            guard let entry = progress[episode.id] else { continue }
+            marks[episode.id] = ContinueListening.Mark(
+                seconds: entry.seconds,
+                finished: entry.finished,
+                touchedAt: continueTouched[episode.id] ?? 0
+            )
+            durations[episode.id] = episode.durationSec ?? 0
+        }
+        return ContinueListening.items(
+            marks: marks,
+            durations: durations,
+            dismissed: continueDismissedIDs
+        )
+    }
+
+    /// Left swipe on a continue row. Does not delete the episode or its ListenMark.
+    func dismissContinue(_ id: String) {
+        let next = ContinueListening.dismissing(continueDismissedIDs, id: id)
+        guard next != continueDismissedIDs else { return }
+        continueDismissedIDs = next
+        saveContinueBookkeeping()
+    }
+
+    /// Opening the episode or pressing its continue pill puts the row back.
+    func acknowledgeContinue(_ id: String) {
+        let next = ContinueListening.acknowledging(continueDismissedIDs, id: id)
+        guard next != continueDismissedIDs else { return }
+        continueDismissedIDs = next
+        saveContinueBookkeeping()
+    }
+
+    private func saveProgressMap() {
+        if let data = try? JSONEncoder().encode(progress) {
+            defaults.set(data, forKey: progressKey)
+        }
+    }
+
+    private func saveContinueBookkeeping() {
+        defaults.set(Array(continueDismissedIDs), forKey: dismissedKey)
+        if let data = try? JSONEncoder().encode(continueTouched) {
+            defaults.set(data, forKey: touchedKey)
+        }
+    }
+
+    nonisolated static func isUnplayed(_ entry: ListenMark?) -> Bool {
+        guard let entry else { return true }
+        return entry.seconds < 5 && !entry.finished
+    }
+
+    /// Per-episode map. A new id never replaces another. Near the end counts as finished,
+    /// and a finished episode resumes from the start.
+    nonisolated static func reducing(_ progress: [String: ListenMark], id: String, seconds: Double, duration: Double) -> [String: ListenMark]? {
+        guard seconds.isFinite, seconds >= 0, !id.isEmpty else { return nil }
         let finished = duration > 1 && seconds >= max(0, duration - 15)
         let mark = ListenMark(seconds: seconds, finished: finished)
-        if progress[id]?.seconds == mark.seconds && progress[id]?.finished == mark.finished { return }
-        progress[id] = mark
-        if let data = try? JSONEncoder().encode(progress) {
-            UserDefaults.standard.set(data, forKey: progressKey)
-        }
+        if progress[id]?.seconds == mark.seconds && progress[id]?.finished == mark.finished { return nil }
+        var next = progress
+        next[id] = mark
+        return next
+    }
+
+    nonisolated static func resumeSeconds(in progress: [String: ListenMark], id: String) -> Double {
+        guard let entry = progress[id], !entry.finished else { return 0 }
+        return max(0, entry.seconds)
     }
 
     func adopt(_ url: URL) {
@@ -116,7 +234,7 @@ final class LibraryStore: ObservableObject {
         let started = url.startAccessingSecurityScopedResource()
         do {
             let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-            UserDefaults.standard.set(data, forKey: bookmarkKey)
+            defaults.set(data, forKey: bookmarkKey)
         } catch {
             if started { url.stopAccessingSecurityScopedResource() }
             message = "无法记住这个文件夹，请再选一次「中文播客私人库」。"
@@ -190,7 +308,7 @@ final class LibraryStore: ObservableObject {
 
     private func savePending() {
         if let data = try? JSONEncoder().encode(pendingShares) {
-            UserDefaults.standard.set(data, forKey: pendingKey)
+            defaults.set(data, forKey: pendingKey)
         }
     }
 
@@ -198,16 +316,16 @@ final class LibraryStore: ObservableObject {
     /// `reload`; holding it here used to make the app look set up while it never
     /// saw an iCloud publish again.
     private func restore() {
-        if let data = UserDefaults.standard.data(forKey: bookmarkKey) {
+        if let data = defaults.data(forKey: bookmarkKey) {
             var stale = false
             do {
                 let url = try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
                 if Self.isInsideAppContainer(url) {
-                    UserDefaults.standard.removeObject(forKey: bookmarkKey)
+                    defaults.removeObject(forKey: bookmarkKey)
                 } else {
                     hold(url)
                     if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                        UserDefaults.standard.set(fresh, forKey: bookmarkKey)
+                        defaults.set(fresh, forKey: bookmarkKey)
                     }
                     return
                 }
@@ -333,9 +451,15 @@ final class LibraryStore: ObservableObject {
                     try? fileManager.startDownloadingUbiquitousItem(at: artworkURL)
                 }
             }
+            let show = record.show?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let guests = (record.guests ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            let lensIds = (record.lensIds ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             return Episode(
                 id: id,
                 title: (title?.isEmpty == false ? title! : id),
+                show: (show?.isEmpty == false ? show : nil),
+                guests: guests,
+                lensIds: lensIds,
                 createdAt: EpisodeDate.parse(record.createdAt) ?? Date(timeIntervalSince1970: 0),
                 durationSec: record.durationSec,
                 audioURL: audioURL,
@@ -389,6 +513,9 @@ private struct EpisodeLibrary: Decodable {
 private struct EpisodeRecord: Decodable {
     var id: String?
     var title: String?
+    var show: String?
+    var guests: [String]?
+    var lensIds: [String]?
     var createdAt: String?
     var durationSec: Double?
     var file: String?

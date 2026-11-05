@@ -54,13 +54,13 @@ enum ArtworkImage {
         let renderer = UIGraphicsImageRenderer(size: size)
         let parts = title.components(separatedBy: " · ")
         let topic = parts.first?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let show = parts.count > 1 ? parts.dropFirst().joined(separator: " · ") : "私人听"
+        let show = parts.count > 1 ? parts.dropFirst().joined(separator: " · ") : "声间"
         return renderer.image { _ in
             color(for: title).setFill()
             UIBezierPath(rect: CGRect(origin: .zero, size: size)).fill()
             let topicStyle = NSMutableParagraphStyle()
             topicStyle.alignment = .center
-            let topicText = (topic?.isEmpty == false ? topic! : "私人听") as NSString
+            let topicText = (topic?.isEmpty == false ? topic! : "声间") as NSString
             let topicRect = CGRect(x: 48, y: 180, width: 504, height: 220)
             topicText.draw(in: topicRect, withAttributes: [
                 .font: UIFont.systemFont(ofSize: 44, weight: .semibold),

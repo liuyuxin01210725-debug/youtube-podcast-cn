@@ -1,0 +1,55 @@
+{
+  "packet_id": "fixture-biz_invest-deep-2026-10-29T074453+0000",
+  "work_id": "fixture-biz_invest",
+  "schema_id": "biz_invest",
+  "mode": "deep",
+  "status": "ready",
+  "created_at": "2026-10-29T07:44:53+00:00",
+  "model_meta": {
+    "provider": "mock",
+    "version": "mvp-1"
+  },
+  "cost_units": 1,
+  "summary_line": "抽出行业判断与观察标的",
+  "transcript_hash": "e6a05b7e7c3d2ae0",
+  "claims": [
+    {
+      "id": "c-outlook-1",
+      "kind": "claim",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "嘉宾判断未来两年推理成本下降会重塑应用层毛利。也提到 OpenA",
+      "t_start": 30.0,
+      "t_end": 55.0,
+      "point_type": "claim_outlook",
+      "text": "未来两年推理成本下降会重塑应用层毛利。",
+      "stance": "bullish",
+      "default_action": "monitor_candidate",
+      "attrs": {
+        "framework": "成本曲线"
+      }
+    }
+  ],
+  "methods": [],
+  "entities": [
+    {
+      "id": "e-org-1",
+      "kind": "entity",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "层毛利。也提到 OpenAI 作为观察标的而非荐股。成本曲线这个",
+      "t_start": 60.0,
+      "t_end": 78.0,
+      "point_type": "org_watch",
+      "type": "Org",
+      "name_src": "OpenAI",
+      "name_zh": null,
+      "default_action": "monitor_candidate"
+    }
+  ],
+  "quotes": [],
+  "open_questions": [],
+  "actions": [],
+  "degraded_from": null,
+  "pending_confirm_count": 2
+}
