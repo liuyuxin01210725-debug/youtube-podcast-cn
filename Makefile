@@ -65,6 +65,11 @@ test-continue-ux:
 			ios/PrivateListen/PrivateListenTests/ContinueUXProbe.swift && \
 		/tmp/continue-ux-probe && \
 		"$$SWIFTC" -parse-as-library -o /tmp/library-list-probe \
+			ios/PrivateListen/PrivateListen/LibraryStore.swift \
+			ios/PrivateListen/PrivateListen/Episode.swift \
+			ios/PrivateListen/PrivateListen/DiscoverCatalog.swift \
+			ios/PrivateListen/Shared/InboxDrop.swift \
+			ios/PrivateListen/PrivateListen/ContinueListening.swift \
 			ios/PrivateListen/PrivateListen/LibraryShelf.swift \
 			ios/PrivateListen/PrivateListenTests/LibraryListProbe.swift && \
 		/tmp/library-list-probe; \

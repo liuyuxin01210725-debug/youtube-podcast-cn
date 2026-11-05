@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// Reads the iCloud Drive folder the Mac publisher fills: 「中文播客私人库」.
 /// The folder is chosen once and kept with a security-scoped bookmark. Playback
@@ -44,19 +45,22 @@ final class LibraryStore: ObservableObject {
 
     var readingLocalCopyOnly: Bool { hasFolder && !hasCloudFolder }
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: progressKey),
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        if let data = defaults.data(forKey: progressKey),
            let stored = try? JSONDecoder().decode([String: ListenMark].self, from: data) {
             progress = stored
         }
-        if let ids = UserDefaults.standard.array(forKey: dismissedKey) as? [String] {
+        if let ids = defaults.array(forKey: dismissedKey) as? [String] {
             continueDismissedIDs = Set(ids)
         }
-        if let data = UserDefaults.standard.data(forKey: touchedKey),
+        if let data = defaults.data(forKey: touchedKey),
            let stored = try? JSONDecoder().decode([String: TimeInterval].self, from: data) {
             continueTouched = stored
         }
-        if let data = UserDefaults.standard.data(forKey: pendingKey),
+        if let data = defaults.data(forKey: pendingKey),
            let stored = try? JSONDecoder().decode([PendingShare].self, from: data) {
             pendingShares = stored
         }
@@ -142,6 +146,13 @@ final class LibraryStore: ObservableObject {
         saveContinueBookkeeping()
     }
 
+    /// Manual archive uses the same finished fact as playback, without inventing progress.
+    func markFinished(_ id: String) {
+        guard !id.isEmpty else { return }
+        progress[id] = ListenMark(seconds: progress[id]?.seconds ?? 0, finished: true)
+        saveProgressMap()
+    }
+
     /// The 「继续播放」 card: newest unfinished listen whose playhead moved
     /// (a few seconds count; the 5s floor stays on `isInProgress`), capped by
     /// `ContinueListening.displayLimit` (1).
@@ -182,14 +193,14 @@ final class LibraryStore: ObservableObject {
 
     private func saveProgressMap() {
         if let data = try? JSONEncoder().encode(progress) {
-            UserDefaults.standard.set(data, forKey: progressKey)
+            defaults.set(data, forKey: progressKey)
         }
     }
 
     private func saveContinueBookkeeping() {
-        UserDefaults.standard.set(Array(continueDismissedIDs), forKey: dismissedKey)
+        defaults.set(Array(continueDismissedIDs), forKey: dismissedKey)
         if let data = try? JSONEncoder().encode(continueTouched) {
-            UserDefaults.standard.set(data, forKey: touchedKey)
+            defaults.set(data, forKey: touchedKey)
         }
     }
 
@@ -223,7 +234,7 @@ final class LibraryStore: ObservableObject {
         let started = url.startAccessingSecurityScopedResource()
         do {
             let data = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
-            UserDefaults.standard.set(data, forKey: bookmarkKey)
+            defaults.set(data, forKey: bookmarkKey)
         } catch {
             if started { url.stopAccessingSecurityScopedResource() }
             message = "无法记住这个文件夹，请再选一次「中文播客私人库」。"
@@ -297,7 +308,7 @@ final class LibraryStore: ObservableObject {
 
     private func savePending() {
         if let data = try? JSONEncoder().encode(pendingShares) {
-            UserDefaults.standard.set(data, forKey: pendingKey)
+            defaults.set(data, forKey: pendingKey)
         }
     }
 
@@ -305,16 +316,16 @@ final class LibraryStore: ObservableObject {
     /// `reload`; holding it here used to make the app look set up while it never
     /// saw an iCloud publish again.
     private func restore() {
-        if let data = UserDefaults.standard.data(forKey: bookmarkKey) {
+        if let data = defaults.data(forKey: bookmarkKey) {
             var stale = false
             do {
                 let url = try URL(resolvingBookmarkData: data, options: [], relativeTo: nil, bookmarkDataIsStale: &stale)
                 if Self.isInsideAppContainer(url) {
-                    UserDefaults.standard.removeObject(forKey: bookmarkKey)
+                    defaults.removeObject(forKey: bookmarkKey)
                 } else {
                     hold(url)
                     if stale, let fresh = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
-                        UserDefaults.standard.set(fresh, forKey: bookmarkKey)
+                        defaults.set(fresh, forKey: bookmarkKey)
                     }
                     return
                 }
