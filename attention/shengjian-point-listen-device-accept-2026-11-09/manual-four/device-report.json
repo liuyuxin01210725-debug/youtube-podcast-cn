@@ -1,0 +1,134 @@
+{
+  "checks" : [
+    {
+      "audio_path" : "\/var\/mobile\/Containers\/Data\/Application\/660E196F-3A0E-4C77-B1A3-30F7D2D04E79\/Documents\/中文播客私人库\/episodes\/42786039aaf346a1bf851613199e260a\/output.mp3",
+      "catalog_count" : 52,
+      "group" : "P-Merge",
+      "library_sha256" : "02b30ed0aa18aecac9ce00ead967ddc28c7eac31baf8b6d66f1e2adcbcb7966e",
+      "name" : "local_Norton_and_52_baseline",
+      "pass" : true,
+      "visible_count" : 52
+    },
+    {
+      "group" : "P-Play",
+      "name" : "claim-s1_click_does_not_write_completed",
+      "pass" : true
+    },
+    {
+      "clock" : 435.39999999999998,
+      "delta_seconds" : 0,
+      "group" : "P-Play",
+      "name" : "claim-s1_real_AVPlayer_landing",
+      "pass" : true,
+      "t_start" : 435.39999999999998
+    },
+    {
+      "advanced_seconds" : 4.4467960599999969,
+      "group" : "P-Play",
+      "name" : "claim-s1_real_play_crosses_t_end",
+      "pass" : true,
+      "playhead" : 439.84679605999997,
+      "t_end" : 438.89999999999998,
+      "wall_seconds" : 4.4790860414505005
+    },
+    {
+      "card_id" : "42786039aaf346a1bf851613199e260a",
+      "group" : "P-Continue",
+      "name" : "claim-s1_checkpoint_exit_Continue_and_persisted_ListenMark",
+      "pass" : true,
+      "player_current" : 439.84819758899999,
+      "saved" : 439.84732918100002,
+      "write_count" : 3
+    },
+    {
+      "group" : "P-Play",
+      "name" : "claim-i9_click_does_not_write_completed",
+      "pass" : true
+    },
+    {
+      "clock" : 2156.5,
+      "delta_seconds" : 0,
+      "group" : "P-Play",
+      "name" : "claim-i9_real_AVPlayer_landing",
+      "pass" : true,
+      "t_start" : 2156.5
+    },
+    {
+      "advanced_seconds" : 4.1581975610001791,
+      "group" : "P-Play",
+      "name" : "claim-i9_real_play_crosses_t_end",
+      "pass" : true,
+      "playhead" : 2160.6581975610002,
+      "t_end" : 2158.0999999999999,
+      "wall_seconds" : 4.2334650754928589
+    },
+    {
+      "card_id" : "42786039aaf346a1bf851613199e260a",
+      "group" : "P-Continue",
+      "name" : "claim-i9_checkpoint_exit_Continue_and_persisted_ListenMark",
+      "pass" : true,
+      "player_current" : 2160.6585352709999,
+      "saved" : 2160.6582686020001,
+      "write_count" : 3
+    },
+    {
+      "baseline_count" : 52,
+      "group" : "P-Merge",
+      "library_sha256" : "02b30ed0aa18aecac9ce00ead967ddc28c7eac31baf8b6d66f1e2adcbcb7966e",
+      "name" : "catalog_bytes_unchanged_and_baseline_retained",
+      "pass" : true
+    },
+    {
+      "automatic_note_write" : false,
+      "entry_visibility" : "host source assertion required",
+      "group" : "P-ListenNote",
+      "name" : "notes_bytes_unchanged",
+      "pass" : true
+    }
+  ],
+  "claim_phone_listenable" : false,
+  "device" : "physical",
+  "device_checks_pass" : true,
+  "done" : true,
+  "episode_id" : "42786039aaf346a1bf851613199e260a",
+  "groups" : {
+    "P-Continue" : true,
+    "P-Merge" : true,
+    "P-Play" : true
+  },
+  "merge_evidence" : "..\/device-file-verification.json",
+  "merge_scope" : "单集已落盘、library.json 未整库盖、基线 52 保留",
+  "model" : "iPhone",
+  "P-ListenNote" : {
+    "automatic_note_write" : false,
+    "validation" : "host source assertion required against installed source hashes"
+  },
+  "probe_kind" : "equivalent self-driven real playback",
+  "run_id" : "norton-four-3752757-20261109-b",
+  "samples" : [
+    {
+      "heard_clock" : 439.84679605999997,
+      "id" : "claim-s1",
+      "landed_clock" : 435.39999999999998,
+      "landing_delta_seconds" : 0,
+      "saved" : 439.84732918100002,
+      "t_end" : 438.89999999999998,
+      "t_start" : 435.39999999999998
+    },
+    {
+      "heard_clock" : 2160.6581975610002,
+      "id" : "claim-i9",
+      "landed_clock" : 2156.5,
+      "landing_delta_seconds" : 0,
+      "saved" : 2160.6582686020001,
+      "t_end" : 2158.0999999999999,
+      "t_start" : 2156.5
+    }
+  ],
+  "schema" : "shengjian.norton-device-four.probe.v1",
+  "semantic_landing_verified" : false,
+  "started_at" : "2026-11-09T12:40:56Z",
+  "system_version" : "27.2",
+  "ui_taps_performed" : false,
+  "updated_at" : "2026-11-09T12:41:06Z"
+}

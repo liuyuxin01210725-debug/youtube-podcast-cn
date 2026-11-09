@@ -1,0 +1,59 @@
+{
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "device",
+      "process",
+      "launch",
+      "--device",
+      "00008160-001639DA3480000A",
+      "--terminate-existing",
+      "--timeout",
+      "30",
+      "--json-output",
+      "attention/shengjian-point-listen-device-accept-2026-11-09/manual-four/normal-relaunch.json",
+      "com.liuyuxin.privatelisten"
+    ],
+    "commandType" : "devicectl.device.process.launch",
+    "environment" : {
+      "TERM" : "dumb"
+    },
+    "jsonVersion" : 5,
+    "outcome" : "success",
+    "version" : "651.32"
+  },
+  "result" : {
+    "deviceIdentifier" : "C57A23AA-BF28-5853-89E1-DF79DEB39F13",
+    "launchOptions" : {
+      "activatedWhenStarted" : true,
+      "arguments" : [
+
+      ],
+      "environmentVariables" : {
+        "TERM" : "dumb"
+      },
+      "platformSpecificOptions" : {
+
+      },
+      "startStopped" : false,
+      "terminateExistingInstances" : true,
+      "user" : {
+        "active" : true
+      }
+    },
+    "process" : {
+      "auditToken" : [
+        4294967295,
+        501,
+        501,
+        501,
+        501,
+        3490,
+        0,
+        9085
+      ],
+      "executable" : "file:///private/var/containers/Bundle/Application/B23BA7FC-5D3F-4BCA-BA61-B5FF03A6461A/PrivateListen-norton-device-four-2026-11-09-3752757-iphoneos.app/PrivateListen",
+      "processIdentifier" : 3490
+    }
+  }
+}

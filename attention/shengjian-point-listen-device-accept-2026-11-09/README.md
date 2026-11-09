@@ -1,10 +1,10 @@
 # 声间点段跳听 · Norton 真机装机回执
 
-已完成生产指纹修复、Norton 单集绑定、覆盖装机及设备文件回读；**真机手点四连未做，四层证据未齐，不能宣称「手机可听」「真机可听」或「四连通过」**。
+已完成生产指纹修复、Norton 单集绑定、覆盖装机和真机四连等价自驱验收。**P-Play / P-Continue / P-ListenNote / P-Merge 全部 PASS**；这是指定 iPhone 的真实 AVPlayer 回执，实际手点为 false。语义落点仍未听辨，`claim_phone_listenable=false`，继续禁止宣称「手机可听」「真机可听」。
 
 - 分支：`feature/shengjian-point-listen-jump-continue`。
-- 实现及装机源提交：`f4b3c47`，基于 `f570351`；本回执由后续资料提交追加，未再改 App 源码。
-- [PR#31](https://github.com/liuyuxin01210725-debug/youtube-podcast-cn/pull/31)：OPEN / draft，目标 `feature/shengjian-point-clip-tend`；不合并。最终远端状态以 `pr-after.json` 为准。
+- 当前装机源提交：`3752757afb4b20347a42a0bcc05e1de5d077ac93`；核心实现与指纹修复来自 `f570351` / `f4b3c47`。本轮仅追加 DEBUG 真机探针、只读时钟和 opt-in 启动入口；模拟器 fixture 仍隔离。
+- [PR#31](https://github.com/liuyuxin01210725-debug/youtube-podcast-cn/pull/31)：OPEN / draft，目标 `feature/shengjian-point-clip-tend`；不合并。本轮远端状态以 `manual-four/pr-after.json` 为准。
 - 本会话模型从当前 session 的 `turn_context.model` 核实为 `gpt-6.1-sol`；未启动 CloudAgent，未切模型、未委派。
 
 ## 契约与 Norton 索引
@@ -31,7 +31,7 @@
 
 时间取自现有 extract 锚点且已做时长门禁，未改任何起止时间；越界 claim 不收录，method 大标题不作主观点。`span` 保留原始 `String?` 子串，7 条均在译稿中查到。**时长内不等于语义落点正确**，整份 extract 有疑似错轴条目，仍需真机听辨。未重抽、未自动入队、未全库发布，未覆盖 OSS/iCloud 或 `library.json`，未使用历史 `73fd…` 作为音频 hash。
 
-## 装机与文件落盘
+## 首轮装机与文件落盘（历史证据）
 
 - 包：`dist/PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app`
 - 构建：Xcode 27.2，Debug-iphoneos，`DEVELOPMENT_TEAM=3CK4AMUHH5`，BUILD SUCCEEDED；正常本机信任服务下签名校验 exit 0。
@@ -42,25 +42,36 @@
 - 8 文件从手机回读后全部 SHA-256 和长度匹配，音频 hash 与索引一致；回读字节也通过生产 Swift 解码/绑定/时长门禁 **7/7**。该探针在 Mac 上检查手机回读文件，不是手机内播放器探针。
 - 基线 52 集 → 52 集；其余 51 集目录记录相同；手机 `library.json` 回读字节前后完全一致。未整库重推。
 
-## 实测与未完成边界
+## 本轮真机四连结果
 
-| 四层证据 | 本轮结果 |
-| --- | --- |
-| (a) 成片音频 | SHA、ffprobe、ffmpeg 全段解码、AVFoundation 通过 |
-| (b) 提炼/索引 | ready deep 包、7 条合法窗口、生产 Swift 绑定校验通过 |
-| (c) 远端字节回读 | App 容器远端回读 8 文件一致；未重新回读/发布 OSS 或 iCloud |
-| (d) App 打开详情并实测 ≥2 段跳听 | **未手点、未验收**；只有安装/启动/进程证据 |
+- 当前包：`dist/PrivateListen-norton-device-four-2026-11-09-3752757-iphoneos.app`；Debug-iphoneos 构建及签名校验 exit 0，覆盖安装到同一 UDID，未 uninstall / wipe。两个 CURRENT 指针及说明均已更新到本包。
+- 启动：`devicectl device process launch … -- -NortonDeviceFourProbe -NortonProbeRunID norton-four-3752757-20261109-b`。探针只在 `DEBUG && !targetEnvironment(simulator)` 编译，且必须显式带参；普通启动不运行。
+- [真机原始回执](manual-four/device-report.json)：设备 Documents 写入后用 `devicectl device copy from` 拉回，`device=physical`、`done=true`、`device_checks_pass=true`，运行编号与启动回执一致。
+- [四连汇总报告](manual-four/manual-four-report.json)：19 项 host/device/source 核验通过，`manual_four_probes_performed=true`；该字段表示用户授权的等价自驱验收，`actual_hand_taps_performed=false`，不冒称物理手点。
 
-| 四连探针 | 自动证据 | 真机手点 |
+| 四连 | 结果 | 本轮证据与边界 |
 | --- | --- | --- |
-| P-Continue | ContinueUXProbe / LibraryListProbe、seek 与实际播放完成边界通过 | **未做** 3–5 秒播放→退出→Continue 卡与真实位点 |
-| P-Merge | 单集直拷，52 集基线保留，library.json 字节未变 | **未手点**；本轮未执行整库发布旅程 |
-| P-Play | 装机、在架、启动、回读音频与 7 条绑定门禁通过 | **未做**详情 ≥2 段普通跳播、落点、越段尾续听、Continue 更新及点击不完成 |
-| P-ListenNote | 当前安装包的源码/二进制听后感探针通过 | **未做**播放页入口目视/操作 |
+| P-Play | **PASS** | 同集真实 `jumpContinue` 两段；s1 435.4 → 439.8468 秒，i9 2156.5 → 2160.6582 秒，均真实推进 ≥3 秒并越过原始 t_end；仍在播、无 clip 窗停。点击时没有进度/完成写入，播放后仍未完成。 |
+| P-Continue | **PASS** | 两段短播约 4.45 / 4.16 秒后调用与播放页退出相同的 checkpoint；沿用 LibraryView 生产回调，不替换为探针写入。Continue 卡均为 Norton，保存 439.8473 / 2160.6583 秒。额外普通冷启动后，真实偏好文件与末段保存位点一致，最新未完成条目仍为 Norton。 |
+| P-ListenNote | **PASS（源码断言）** | 装机源码 SHA 一致；PlayerView 第 96 行无条件呈现 ListenNoteSection，位于提炼之前，TextEditor 可访问标签为「听后感」。真机回执确认听后感文件前后字节相同；未自动写听后感，未冒称目视或手点。 |
+| P-Merge | **PASS（本地只读核验）** | 单集已落盘、library.json 未整库盖、基线 52 保留；真机可见集数与 catalog 均 52，本轮前后 library.json 字节相同，SHA 仍与既有 device-file-verification 一致。本轮没有上传任何库文件，也未执行整库发布旅程。 |
 
-`make shengjian-before-claim-ready` 通过，且 CURRENT 更新后再次通过。既有 `PointListenProbe` 只在 DEBUG simulator 编译，本轮未冒用为真机探针。额外 `make test` 在 `test-public` 停止：`test_public_files_contain_no_personal_absolute_paths` 对既有本地资料报 31 处失败，本次改动文件不在失败列表，未擅改这些资料；其余完整套件目标未执行，不能称完整测试全绿。
+两锚点 AVPlayer 首次落地均与 t_start 偏差 0 秒；记录只证明时钟定位，**不证明观点与音频语义正确**。7 条原锚点均未改。
 
-真实剩余验收：没有现成的真机 UI 自动化，本轮未手点上述四连，未听辨这 7 条现有锚点的语义落点。无装机/拷贝/本机门禁阻塞；四层尚缺 (d)，保持草稿，不作可听宣称。
+首轮 a 的设备播放检查通过，但延后回取偏好时出现 1193.6758 秒，写入时间比探针完成晚 13 秒。该后续写入的触发者未确定，不能据此认定持久化缺陷；本轮 b 立即冷启动回取后通过。[首轮差异记录](manual-four/attempt-a/summary.json)保留事实与推断边界，未以失败首轮作完成宣称。
+
+`make shengjian-before-claim-ready` 本轮通过，CURRENT 指向实际新装包后再次通过；[最终门禁日志](manual-four/installed-local-gate.log)。初次受限环境的 Swift 缓存写入失败，通过显式可写的 CLANG_MODULE_CACHE_PATH 重跑解决。Xcode / CoreDevice / 签名使用本机服务权限执行。
+
+| 四层证据 | 当前结果 |
+| --- | --- |
+| (a) 成片音频 | 首轮 SHA、ffprobe、ffmpeg 全段解码、AVFoundation 通过；本轮手机内重新核对真实音频 SHA。 |
+| (b) 提炼/索引 | ready deep 包、7 条合法窗口、生产 Swift 绑定校验；本轮直接读取手机 Norton 包。 |
+| (c) 远端字节回读 | 既有 App 容器回读 8 文件一致；本轮未重新发布 OSS/iCloud 或重拷资料库。 |
+| (d) 真机实际 ≥2 段跳听 | 本轮指定 iPhone 自驱真实 AVPlayer 路径通过；允许的听后感源码断言通过。未做物理手点与音频语义听辨。 |
+
+本轮没有重跑完整 `make test`；首轮完整测试曾在 `test-public` 因 31 处既有本地资料个人路径失败而停止，仍不宣称完整套件全绿。
+
+四连任务**无用户步骤**；未听辨语义落点的限制继续保留，不把验证转交用户，不作可听宣称。PR 保持 OPEN / draft，不合并。
 
 ## 可核查证据
 
@@ -69,3 +80,6 @@
 - [设备文件字节比对与基线保留](device-file-verification.json)、[手机回读文件 Swift 绑定探针](norton-device-readback-binding-probe.json)
 - [staging 绑定探针](norton-staging-binding-probe.json)、[索引筛选审计](norton-index-audit.json)、[音频解码记录](audio-decode.json)
 - 原始构建、完整测试、全进程等较大本机日志保留在本目录，提交只选本任务必要证据；不提交无关 `_raw`、`.tmp` 或音频/App 二进制。
+
+- 本轮 [构建清单](manual-four/build-manifest.json)、[覆盖安装](manual-four/device-install.json)、[唯一编号启动](manual-four/device-launch.json)、[报告回取](manual-four/copy-device-report.json)、[普通冷启动](manual-four/normal-relaunch.json)
+- [核验脚本](manual-four/verify_report.py)、[完成回报](manual-four/codex-last-message.md)。完整偏好/52 集目录原件只留本机；提交包含核验 SHA 与 Norton 的必要进度事实。

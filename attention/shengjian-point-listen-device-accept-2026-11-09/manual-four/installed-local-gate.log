@@ -1,0 +1,141 @@
+ok  在听进入继续播放
+ok  默认继续播放只留最近摸过的未听完，短于 5 秒也算
+ok  播放头没动过不算继续播放
+ok  已听完不进继续播放
+ok  没有触摸时间的排在有时间的后面
+ok  剩余文案
+ok  没有总时长时用上次听到
+ok  左滑删除只拿掉这一条，不写成听完
+ok  空 id 不能当成删除
+ok  打开会把滑掉的一条放回候选，但不会单靠打开抢走最近的短播
+ok  打开不会把这一集写进滑掉名单
+ok  听这段不写继续播放
+ok  正常进度会进入继续播放
+ok  快结束记为听完，不进继续播放
+ok  多条未听完时继续播放只留最近听的
+ok  滑掉最近一条后，下一条未听完顶上，仍只有一条
+ok  播放头还在断点附近就不要拉回
+ok  听这段把播放头拉走后，继续播放要回到 ListenMark
+ok  听这段即使停在断点附近，继续播放也回到 ListenMark
+ok  换一集就按那一集的 ListenMark 打开
+ok  没有迷你条时继续播放还在，不为此新建播放器
+ok  回库后迷你条还停在同一集，继续播放仍显示这一集
+ok  同一集但控制还没就绪时留下继续播放卡
+ok  迷你条在播另一集时继续播放照实显示
+ok  没有继续播放目标时不留空卡
+ok  短播 2.5 秒后回库，继续播放是刚听的那集
+ok  短播 6.0 秒后回库，继续播放是刚听的那集
+ok  滑掉之后再短播，打开会取消隐藏并且继续播放换成这一集
+ok  短播之后再左滑，槽让回上一条未听完，仍只有一条
+ok  听这段后回库不改继续播放，也不写 ListenMark
+ok  打开后播放头还是 0 就离开，继续播放仍是原来那集
+ok  听到接近结尾再回库，不把听完的放进继续播放
+ok  离开播放器时用真实播放头，不把刚过 5 秒写成上一拍
+ok  续播定位还没落地时，0 不能盖掉已经记下的播放头
+continue ux probe passed
+ok  冷启动默认是未听完
+ok  未听完不含已听完
+ok  未听完仍保留未听和在听的顺序
+ok  已听完混入默认是 0
+ok  已听只有听完的
+ok  已听文案
+ok  星标仍能找到已听完的星标
+ok  未听完不因为星标把听完的留在主列表
+ok  在听只有听到一半的
+ok  未听不含已听完
+ok  按节目仍看得到该节目里听完的
+ok  透镜仍包含该主题里听完的
+ok  在未听完里搜索仍能找到已听完
+ok  空白搜索不算搜索，听完的继续藏着
+ok  在听里搜索不会把已听完翻出来
+ok  已听里的搜索只留听完且匹配的
+ok  手动归档前 Continue 是目标集
+ok  手动标已听后未听完过滤掉该 id
+ok  手动标已听后已听含该 id
+ok  手动标已听后星标仍能找到该 id
+ok  手动标已听后 Continue 换槽且最多一条
+ok  重读后完成事实仍在且不再续听该集
+ok  完成只写既有 finished 且保留真实进度
+ok  Continue 卡左滑不写完成且保留进度
+ok  最后一集完成后 Continue 隐藏
+ok  未播且时长未知也可直接完成
+ok  常驻是未听完、星、已听
+ok  在听、未听、主题、按节目在更多里
+ok  已听和星不埋进更多
+ok  常驻三枚，加上更多仍不超过四
+ok  没有主题、节目不到两个时，更多仍留在听和未听
+ok  未听完和在听显示继续播放
+ok  已听、星标、按节目不显示继续播放
+ok  搜索时不显示继续播放
+ok  未听完被听完清空时短接已听
+ok  还有未听完时不用这条提示
+ok  已听是空的可以回未听完
+ok  其它筛选空回到未听完
+ok  搜索落空仍是搜索文案
+ok  已听标题带数量
+ok  未听完标题只数还留在主列表里的
+ok  默认行次要信息是节目和时长
+ok  在听用剩余，不叠总时长
+ok  上次听到不进默认行
+ok  时长未知不造百分比
+ok  下载状态仍在同一行
+ok  未听完行不重复未听
+ok  未听完里的在听仍标在听
+ok  已听筛选不再每行重复已听完
+ok  行内没有状态就不补芯片
+ok  行内芯片最多三枚
+library list probe passed
+ok  reload 清单短暂缺集时保留已就绪要点
+ok  extract.json 读失败时不把就绪包换成空
+ok  排队壳不能盖过已有要点
+ok  失败包不能盖过 LKG
+ok  杀进程后 iCloud 读失败仍用 LKG
+ok  已收藏且 LKG 就绪时不显示点星 CTA
+ok  已收藏但这一帧还没有包时也不是点星 CTA
+ok  未收藏且没有包仍是点星开始提炼
+ok  轻摘不能盖过 deep 要点
+ok  磁盘上新的就绪包仍然生效
+ok  只有排队包时保留排队状态而不是 nil
+ok  extract.json 是壳而 extract.live.json 已就绪时用 live
+ok  刷新不会凭空造出深抽包
+ok  排队/失败不得覆盖磁盘上的 deep 文件
+ok  第一次收藏仍可写入排队包
+ok  只刷新到别的集时本集要点还在
+ok  严格 JSON 仍能解出要点
+ok  health-longevity / 数字 params / 缺数组仍解出要点
+ok  general 夹具就是截图那四条
+ok  无 key 的深抽路由拒绝 mock 成功
+ok  有 Live key 才走 live
+ok  general mock 不能盖 LKG / 真 deep，无 key 不落盘
+ok  ferment mock 不能盖 LKG / 真 deep，无 key 不落盘
+ok  biz_invest mock 不能盖 LKG / 真 deep，无 key 不落盘
+ok  health mock 不能盖 LKG / 真 deep，无 key 不落盘
+ok  edu mock 不能盖 LKG / 真 deep，无 key 不落盘
+ok  embodied mock 不能盖 LKG / 真 deep，无 key 不落盘
+ok  改掉 deep-mock id 后四条仍不能标成已提炼
+ok  内存里的 mock 也不能盖过 LKG
+ok  刷新读到 mock 文件时保留真要点
+ok  空文件也不写入 mock ready
+ok  磁盘已是 mock 时 LKG 真包仍挡住失败壳
+ok  第一次排队包仍可写入空文件
+ok  有 Live key 的正式 deep 仍可落盘并替换
+ok  听完轻摘仍不是占位深包
+ok  正式 ready 的状态行仍是已提炼
+ok  普通失败状态行仍用摘要
+ok  缺密钥失败不标已提炼
+ok  只含半句占位文案的真包仍可展示
+extract display checks passed
+ok  seek-only vs actual playback: 15-second finished boundary unchanged
+ok  bound isolated output.mp3 decoded; semantic order and question text; span stays String?
+ok  PL-D3 production 64→16 and uppercase normalize on strict/loose decode and comparison; wrong 16/malformed denied
+ok  PL-D1 missing anchor/index denied; valid sibling remains enabled
+ok  PL-D2 missing/mismatched audio and wrong episode/packet denied; document hash is not audio hash
+ok  PL-D3 transcript stale/status stale/mock packet denied
+ok  PL-D4 illegal numeric/interval/source axis denied
+ok  PL-D5 out-of-duration start/end denied
+ok  P-Continue synthetic 4.2s after fractional-second jump; legacy reading preserves point IDs
+point listen checks passed
+ok  源码探针：继续播放短播 / 听后感在提炼前 / mock 不冒充 ready
+ok  二进制含继续播放、听后感、mock_not_official：/Users/liuyuxin/Desktop/音频/youtube-podcast-cn/dist/CURRENT-iphoneos/PrivateListen.debug.dylib
+ok  二进制含继续播放、听后感、mock_not_official：/Users/liuyuxin/Desktop/音频/youtube-podcast-cn/dist/PrivateListen-CURRENT-iphoneos.app/PrivateListen.debug.dylib
+声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + mock 不冒充 ready）。

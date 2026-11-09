@@ -1,0 +1,42 @@
+{
+  "schema": "shengjian.norton-device-four.build.v1",
+  "app_source_commit": "3752757afb4b20347a42a0bcc05e1de5d077ac93",
+  "branch": "feature/shengjian-point-listen-jump-continue",
+  "app_path": "dist/PrivateListen-norton-device-four-2026-11-09-3752757-iphoneos.app",
+  "configuration": "Debug-iphoneos",
+  "device_udid": "00008160-001639DA3480000A",
+  "bundle_id": "com.liuyuxin.privatelisten",
+  "model": "gpt-6.1-sol",
+  "build_exit_code": 0,
+  "codesign_verify_exit_code": 0,
+  "build_log": "iphoneos-build.log",
+  "source_sha256": {
+    "ios/PrivateListen/PrivateListen/NortonDeviceFourProbe.swift": "9a9542b249a624d59fe572fe8f8b1b2089de0f45ef85983c918eee38bfac9813",
+    "ios/PrivateListen/PrivateListen/PrivateListenApp.swift": "006890dbbf569218bcba08cee21de1d6a7444289c4ef1e9d599bfb0fd066865b",
+    "ios/PrivateListen/PrivateListen/PlayerModel.swift": "3fdd6503103cf40bf73607a07a9dbdaa4f3b0c55196964b2631f8571172290fa",
+    "ios/PrivateListen/PrivateListen/PlayerView.swift": "d2593e94ee584d049dd07bc63bd88a488254d16bc835e6e89199ed3398dd661d",
+    "ios/PrivateListen/PrivateListen/ListenNoteSection.swift": "d27cd570cd0a30ecfcd78a94f1338d513da9ca0a7a19ca9d7c67bf605ed10030",
+    "ios/PrivateListen/PrivateListen/LibraryView.swift": "bf1628e317c23155b1c40b5bf410fbe1e17f90516f6633ace840405d51aef394"
+  },
+  "app_sha256": {
+    "AppIcon60x60@2x.png": "0095676289a2ec72fe79317dc4642c6bd7e5c9c2620ee2111764b33780b886a1",
+    "AppIcon76x76@2x~ipad.png": "a5cdff51c23505aaf230c6810cba67f74403693dfb42663754b68923ab492684",
+    "Assets.car": "9eb44d05c656f90f790dcacee40079d3043a75b570c0d949d7c1a3985155fe79",
+    "ExtractDesign.md": "0dd97988ad404b3416a9f4982b3f0b9d489f03e6a1776f38a104185a131be2e9",
+    "Info.plist": "0dbf7a071f0a696812e2f96ad8cabb4223cfd77adc6e8b5e9176493c0c11dbd4",
+    "PkgInfo": "82502191c9484b04d685374f9879a0066069c49b8acae7a04b01d38d07e8eca0",
+    "PlugIns/ShareExtension.appex/Info.plist": "60b2fcc0933808bfbcc7a48b1b460ad27887dd1a20cc9c6b8aa064be66d2c9b8",
+    "PlugIns/ShareExtension.appex/ShareExtension": "4925f5f7b38616002737a684573f1810352160d53974b0742529885d04d965f4",
+    "PlugIns/ShareExtension.appex/ShareExtension.debug.dylib": "93163f6ba47ac77064b5cd3161352592588680e8f04890458d85b0d45a79290c",
+    "PlugIns/ShareExtension.appex/_CodeSignature/CodeResources": "fc8a2c023bb99067c57cfe9dcfeaf6016310522c32b62c5bb56898a0aad3bdbf",
+    "PlugIns/ShareExtension.appex/__preview.dylib": "58ef64ded9a57816764ae912da110fa948a711a5caac5a82cfa1b8d18ddcb8d0",
+    "PlugIns/ShareExtension.appex/embedded.mobileprovision": "db8071404c340c93875c3cc46a92b301911fb5c26542b8ab6dbce8b8b6518b21",
+    "PrivateListen": "c1411578481c05dc7ab499ac3b51bcefa2e5f1fbcce04c59e9a654cf2213073f",
+    "PrivateListen.debug.dylib": "0877be42fa11d27e1e4b1b21558c1fbaebbd290a1331825a33ef32ab53597c0d",
+    "_CodeSignature/CodeResources": "ad1c01fc797cf27f969b31a2b3b1adb7b02d058c8cf934d0674bb432474bec4a",
+    "__preview.dylib": "6367c929ff7fc7ffb9961238e64ab44177bd1f52b6e2547fc5b4ff85899bbddf",
+    "embedded.mobileprovision": "2ca1273d537c209404b584c57177c38bac2af6fea8025a3ec4b3dc0a8aacf237",
+    "lenses.json": "2b64755cc036b81d0a82b5b309b97395ec725f8ef353ace7bd0b5d424309c23f"
+  },
+  "run_id": "norton-four-3752757-20261109-b"
+}
