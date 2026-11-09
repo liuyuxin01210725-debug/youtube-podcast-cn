@@ -1,0 +1,57 @@
+{
+  "pass": true,
+  "device_udid": "00008160-001639DA3480000A",
+  "apps": [
+    {
+      "appClip": false,
+      "builtByDeveloper": true,
+      "bundleIdentifier": "com.liuyuxin.privatelisten",
+      "bundleVersion": "1",
+      "containerAccessible": true,
+      "defaultApp": false,
+      "hidden": false,
+      "internalApp": false,
+      "name": "声间",
+      "removable": true,
+      "url": "file:///private/var/containers/Bundle/Application/5B8D5323-FADA-431B-8E29-7B20C3DE587A/PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app/",
+      "version": "1.0"
+    }
+  ],
+  "launch": {
+    "deviceIdentifier": "C57A23AA-BF28-5853-89E1-DF79DEB39F13",
+    "launchOptions": {
+      "activatedWhenStarted": true,
+      "arguments": [],
+      "environmentVariables": {
+        "TERM": "dumb"
+      },
+      "platformSpecificOptions": {},
+      "startStopped": false,
+      "terminateExistingInstances": false,
+      "user": {
+        "active": true
+      }
+    },
+    "process": {
+      "auditToken": [
+        4294967295,
+        501,
+        501,
+        501,
+        501,
+        3254,
+        0,
+        8436
+      ],
+      "executable": "file:///private/var/containers/Bundle/Application/5B8D5323-FADA-431B-8E29-7B20C3DE587A/PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app/PrivateListen",
+      "processIdentifier": 3254
+    }
+  },
+  "running_process": {
+    "executable": "file:///private/var/containers/Bundle/Application/5B8D5323-FADA-431B-8E29-7B20C3DE587A/PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app/PrivateListen",
+    "processIdentifier": 3254
+  },
+  "ui_opened_detail": false,
+  "ui_taps_performed": false,
+  "audio_playback_verified": false
+}

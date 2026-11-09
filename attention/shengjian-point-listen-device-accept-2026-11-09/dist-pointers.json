@@ -1,0 +1,9 @@
+{
+  "previous": {
+    "CURRENT-iphoneos": "PrivateListen-unfinished-mark-heard-2026-11-05-iphoneos.app",
+    "PrivateListen-CURRENT-iphoneos.app": "PrivateListen-resign-2026-11-08-iphoneos.app",
+    "CURRENT-iphoneos.sha.txt": "feature/shengjian-point-clip-tend@ef04e74 (PR#28 continue shortplay); local build 2026-11-04 18:23 +0800\n"
+  },
+  "current": "PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app",
+  "build_commit": "f4b3c47"
+}

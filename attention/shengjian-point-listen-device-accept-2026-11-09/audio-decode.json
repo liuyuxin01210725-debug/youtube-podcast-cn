@@ -1,0 +1,9 @@
+{
+  "file": "output.mp3",
+  "sha256": "fcb337634866181e6107eb6cb519006fe9102c756b35f83bb8d1410a04749f25",
+  "ffprobe_duration_seconds": 3809.112,
+  "ffmpeg_full_decode_exit_code": 0,
+  "ffmpeg_decode_log": "audio-decode.log",
+  "avfoundation_duration_seconds": 3809.16,
+  "duration_difference_seconds": 0.048
+}

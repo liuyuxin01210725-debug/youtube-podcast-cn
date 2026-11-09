@@ -1,0 +1,1129 @@
+{
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "device",
+      "info",
+      "files",
+      "--device",
+      "00008160-001639DA3480000A",
+      "--domain-type",
+      "appDataContainer",
+      "--domain-identifier",
+      "com.liuyuxin.privatelisten",
+      "--subdirectory",
+      "Documents/中文播客私人库/episodes",
+      "--no-recurse",
+      "--timeout",
+      "45",
+      "--json-output",
+      "attention/shengjian-point-listen-device-accept-2026-11-09/device-library-after.json"
+    ],
+    "commandType" : "devicectl.device.info.files",
+    "environment" : {
+      "TERM" : "dumb"
+    },
+    "jsonVersion" : 5,
+    "outcome" : "success",
+    "version" : "651.32"
+  },
+  "result" : {
+    "deviceIdentifier" : "C57A23AA-BF28-5853-89E1-DF79DEB39F13",
+    "domain" : "appDataContainer",
+    "domainIdentifier" : "com.liuyuxin.privatelisten",
+    "files" : [
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-30T04:35:21.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "07c1dddbdc684968b69199ad4f32e86b",
+        "relativePath" : "07c1dddbdc684968b69199ad4f32e86b",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-07T08:39:43.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "16e71f3faaf54ef9ae8a774150e7db2d",
+        "relativePath" : "16e71f3faaf54ef9ae8a774150e7db2d",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-05T05:33:25.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 192
+        },
+        "name" : "1809f81e9ff74e458fe3aa7a7a12305b",
+        "relativePath" : "1809f81e9ff74e458fe3aa7a7a12305b",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:55:02.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "1cfb87b8adb04f8d8221650fe335f9b8",
+        "relativePath" : "1cfb87b8adb04f8d8221650fe335f9b8",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T10:32:49.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "212b4b658f624818bb473f500a2b4864",
+        "relativePath" : "212b4b658f624818bb473f500a2b4864",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-30T12:24:42.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "2281903f0b104bda801cd7589e324573",
+        "relativePath" : "2281903f0b104bda801cd7589e324573",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-02T08:12:34.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "2744245cfc8045db8fd7d52e732e2d72",
+        "relativePath" : "2744245cfc8045db8fd7d52e732e2d72",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-03T10:55:49.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "329041d3b6564cd4a1de10bb63f38ba3",
+        "relativePath" : "329041d3b6564cd4a1de10bb63f38ba3",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-04T01:51:37.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 192
+        },
+        "name" : "3734417139214388bd03e758365b7718",
+        "relativePath" : "3734417139214388bd03e758365b7718",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-07T08:39:43.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "3c0ad02ac5d64974a1a151fc9443d861",
+        "relativePath" : "3c0ad02ac5d64974a1a151fc9443d861",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-09T11:44:50.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 320
+        },
+        "name" : "42786039aaf346a1bf851613199e260a",
+        "relativePath" : "42786039aaf346a1bf851613199e260a",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:53:32.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "46e12d4b0df84e0497e12cb0dbf348d3",
+        "relativePath" : "46e12d4b0df84e0497e12cb0dbf348d3",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-08T11:42:38.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "477ad7c161f0489a8d8c9a73d729355b",
+        "relativePath" : "477ad7c161f0489a8d8c9a73d729355b",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T15:17:39.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "494d3d5c954346c380e769873a442513",
+        "relativePath" : "494d3d5c954346c380e769873a442513",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-29T12:19:09.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "4a56820e04564a768fe7b356ccb23a27",
+        "relativePath" : "4a56820e04564a768fe7b356ccb23a27",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-07T08:39:42.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "4a7cbfb91450493d927e600314211283",
+        "relativePath" : "4a7cbfb91450493d927e600314211283",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:53:37.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "4df9d4f7182e4449a681ae2c65da5467",
+        "relativePath" : "4df9d4f7182e4449a681ae2c65da5467",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-03T10:56:05.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "5682f75d9ec94898aec8090dd385c10f",
+        "relativePath" : "5682f75d9ec94898aec8090dd385c10f",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-07T08:39:42.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "582c9e489be440e1876f2c7532082876",
+        "relativePath" : "582c9e489be440e1876f2c7532082876",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T15:23:30.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "604d4755775b48f4810dab8c811598e9",
+        "relativePath" : "604d4755775b48f4810dab8c811598e9",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-03T07:38:09.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "6125528b448846be8f88e8cb0010a8c1",
+        "relativePath" : "6125528b448846be8f88e8cb0010a8c1",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T15:56:10.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "6158ddfe05c347cfa26ef927819dcaa3",
+        "relativePath" : "6158ddfe05c347cfa26ef927819dcaa3",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T14:07:05.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "6505953979434e0ca05a966448edec99",
+        "relativePath" : "6505953979434e0ca05a966448edec99",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T14:07:08.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "6d898d4192de495fafcec86b9c938430",
+        "relativePath" : "6d898d4192de495fafcec86b9c938430",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:53:44.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "72951a4e9bce452485f98eb02671aaa7",
+        "relativePath" : "72951a4e9bce452485f98eb02671aaa7",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T01:13:36.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 320
+        },
+        "name" : "72e3bd4ae492416c807a96641db44e41",
+        "relativePath" : "72e3bd4ae492416c807a96641db44e41",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-02T01:40:10.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 320
+        },
+        "name" : "758a917090fd4cda8d328a74644d04d7",
+        "relativePath" : "758a917090fd4cda8d328a74644d04d7",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T13:41:34.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "761256ef69bd400d90bbb6283974ccc7",
+        "relativePath" : "761256ef69bd400d90bbb6283974ccc7",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-02T08:35:19.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "765b750cdeae4beab54ee696dfa7f483",
+        "relativePath" : "765b750cdeae4beab54ee696dfa7f483",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T06:31:20.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "825df9e739f64b52b03592cf68224f2f",
+        "relativePath" : "825df9e739f64b52b03592cf68224f2f",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-08T11:42:09.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "8940c08f52de4f289f14b4dd59a4c75e",
+        "relativePath" : "8940c08f52de4f289f14b4dd59a4c75e",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T15:28:27.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "8cd62a9fe2cc4890a9e8c5813bd77f29",
+        "relativePath" : "8cd62a9fe2cc4890a9e8c5813bd77f29",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:53:51.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "8e2008616a92405897a721e2fe5d4797",
+        "relativePath" : "8e2008616a92405897a721e2fe5d4797",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-03T10:56:15.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "910ecc0ca73149fe844842fae7e2c853",
+        "relativePath" : "910ecc0ca73149fe844842fae7e2c853",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-05T10:13:34.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 192
+        },
+        "name" : "954ae716a603497caa1ad704817900cc",
+        "relativePath" : "954ae716a603497caa1ad704817900cc",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:53:53.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "a0be0071c62146d287996da9318de10c",
+        "relativePath" : "a0be0071c62146d287996da9318de10c",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-08T11:42:42.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "a16815fed4f74af59b5b6999c8b64e6c",
+        "relativePath" : "a16815fed4f74af59b5b6999c8b64e6c",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T10:32:03.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 320
+        },
+        "name" : "aa63f842fb974e0ea0f3ad9949828ccb",
+        "relativePath" : "aa63f842fb974e0ea0f3ad9949828ccb",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T15:30:09.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "ad73edba01c44518a80922ed45bed5c4",
+        "relativePath" : "ad73edba01c44518a80922ed45bed5c4",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-04T08:52:14.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 192
+        },
+        "name" : "c04ff7a8db6e449f9c571fce8a998c54",
+        "relativePath" : "c04ff7a8db6e449f9c571fce8a998c54",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-02T00:35:44.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "c179ecf510dc4bcc9292573304e53789",
+        "relativePath" : "c179ecf510dc4bcc9292573304e53789",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T12:05:31.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 288
+        },
+        "name" : "c83eb24669b241aca7ee78dba6cc8e48",
+        "relativePath" : "c83eb24669b241aca7ee78dba6cc8e48",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T12:05:08.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 320
+        },
+        "name" : "cbdcf0e5a0464538b8f6f926ce76389b",
+        "relativePath" : "cbdcf0e5a0464538b8f6f926ce76389b",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-04T02:08:24.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 192
+        },
+        "name" : "cd10305c84154d0788067de0fe62a753",
+        "relativePath" : "cd10305c84154d0788067de0fe62a753",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-03T10:56:44.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 160
+        },
+        "name" : "d1416ade981f443da65ef560ac8fb968",
+        "relativePath" : "d1416ade981f443da65ef560ac8fb968",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T14:07:01.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "d70f51471a5746638aceb872d7efdbb5",
+        "relativePath" : "d70f51471a5746638aceb872d7efdbb5",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T14:07:06.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "deb408fe0ec145089b9e9f30cb21d0a3",
+        "relativePath" : "deb408fe0ec145089b9e9f30cb21d0a3",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-07T08:39:42.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "e1a7ade74b7245cabd0446b96c3bba5d",
+        "relativePath" : "e1a7ade74b7245cabd0446b96c3bba5d",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-02T05:45:37.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 352
+        },
+        "name" : "eb38f88e7291407ea226c169d9d0a284",
+        "relativePath" : "eb38f88e7291407ea226c169d9d0a284",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T03:54:04.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 256
+        },
+        "name" : "f3a3ea048a7d4d66bb41e241a9f90278",
+        "relativePath" : "f3a3ea048a7d4d66bb41e241a9f90278",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-11-01T06:20:55.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 320
+        },
+        "name" : "fa43b9c3ab6e4531a190e44c7ae9d798",
+        "relativePath" : "fa43b9c3ab6e4531a190e44c7ae9d798",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      },
+      {
+        "metadata" : {
+          "extendedAttributes" : {
+
+          },
+          "lastModDate" : "2026-10-31T15:55:44.000Z",
+          "ownerGid" : 501,
+          "ownerUid" : 501,
+          "permissions" : 493,
+          "size" : 192
+        },
+        "name" : "fd5af9f45c3d40b8bb4c61b243ee5a52",
+        "relativePath" : "fd5af9f45c3d40b8bb4c61b243ee5a52",
+        "resources" : {
+          "isDirectory" : true,
+          "isHidden" : false,
+          "isReadable" : true,
+          "isSymbolicLink" : false,
+          "isWritable" : true
+        }
+      }
+    ]
+  }
+}

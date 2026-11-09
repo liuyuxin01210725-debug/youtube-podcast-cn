@@ -1,0 +1,13 @@
+{
+  "session_id": "01a1c018-5dc2-7fd2-bdb2-7a9419f88a0e",
+  "source": "current session turn_context",
+  "contexts": [
+    {
+      "model": "gpt-6.1-sol",
+      "effort": "xhigh",
+      "cwd": "/Users/liuyuxin/Desktop/音频/youtube-podcast-cn"
+    }
+  ],
+  "model_changed": false,
+  "cloudagent_used": false
+}

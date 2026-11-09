@@ -1,0 +1,87 @@
+{
+  "work_id": "42786039aaf346a1bf851613199e260a",
+  "packet_id": "42786039aaf346a1bf851613199e260a-spine-v1-live-20261103T134310Z",
+  "transcript_hash": "16962cd5c25558ff",
+  "audio_sha256": "fcb337634866181e6107eb6cb519006fe9102c756b35f83bb8d1410a04749f25",
+  "timeline": "output.mp3.seconds",
+  "viewpoints": [
+    {
+      "id": "claim-s1",
+      "viewpoint_text": "主持人认为，错误信息利用了威胁优先、模式与意图归因，以及故事的情绪力量；这些解释中有一部分是缺少直接数据的个人判断。",
+      "span": "但其中一些东西没有直接数据。",
+      "t_start": 435.4,
+      "t_end": 438.9,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "s1"
+    },
+    {
+      "id": "claim-s2",
+      "viewpoint_text": "主持人认为，负面内容、恐惧营销与推荐反馈会相互强化，放大原有偏见、形成信息孤岛并消耗注意力。",
+      "span": "更多符合你偏见的内容，更少不符合的内容。这会让你陷入信息孤岛。",
+      "t_start": 2816.0,
+      "t_end": 2837.7,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "s2"
+    },
+    {
+      "id": "claim-s3",
+      "viewpoint_text": "主持人强调，聪明不等于免疫偏见，合理化能力、身份认同和沉没成本可能阻碍纠错。",
+      "span": "智力并不能消除偏见。聪明人更擅长合理化。他们能更好地为自己错误的信念辩护。",
+      "t_start": 2887.4,
+      "t_end": 2904.9,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "s3"
+    },
+    {
+      "id": "claim-i3",
+      "viewpoint_text": "人工甜味剂案例中，主持人区分观察性关联与饮料替代试验，并以基线体脂和节食选择解释可能的反向因果，不能由关联直接推出致胖。",
+      "span": "而是体脂更高的人更可能做节食尝试，也更可能使用人工甜味剂。",
+      "t_start": 1187.4,
+      "t_end": 1194.1,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "i3"
+    },
+    {
+      "id": "claim-i8",
+      "viewpoint_text": "主持人提醒，感觉改善不等于正确归因，结果可能来自其他变化或期待效应，且安慰剂作用存在边界。",
+      "span": "也就戒掉了超加工食品，那你感觉好多了我一点也不意外。",
+      "t_start": 783.7,
+      "t_end": 788.1,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "i8"
+    },
+    {
+      "id": "claim-i9",
+      "viewpoint_text": "主持人认为，饮食社群的成功故事可能有幸存者偏差，因为失败者沉默、离开或负面反馈被压低，且这适用于不同饮食社群。",
+      "span": "这适用于任何饮食部落。",
+      "t_start": 2156.5,
+      "t_end": 2158.1,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "i9"
+    },
+    {
+      "id": "claim-i11",
+      "viewpoint_text": "主持人认为，存在逐利或维护投资的经济动机并不自动证明预谋致病，且其行业动机和游说解释属于个人判断。",
+      "span": "我确信那时他们进行了游说，试图捍卫他们的投资。",
+      "t_start": 1513.8,
+      "t_end": 1544.0,
+      "index_include": true,
+      "source_kind": "claim",
+      "source_point_id": "i11"
+    }
+  ],
+  "provenance": {
+    "anchor_source": "existing extract.json t_start/t_end; unchanged",
+    "duration_gate_seconds": 3809.112,
+    "note": "时间取自现有 extract 锚点且已做时长门禁；未重抽、未全库发布；时长门禁不证明语义落点或时间轴正确，待真机实测。",
+    "reextracted": false,
+    "full_library_published": false,
+    "semantic_landing_verified": false
+  }
+}
