@@ -207,6 +207,8 @@ bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标
   --tts qwen3-api --style conversation
 ```
 
+Qwen 多人播客默认使用三个经过实际调用验证的男性音色：`male_1=Vincent`、`male_2=Neil`、`male_3=Eldric Sage`。程序会在付费调用前检查已知系统音色的性别槽与模型兼容性；不兼容时必须停止并修正配置，不能带错音色继续生成。
+
 文章、论文或单人知识讲解的千问语音使用 `--style documentary`。用 `run_in_background: true` 跑,然后用 Monitor 看进度,不要阻塞。脚本自动:清理文本 → 按序列贴标签 → 语音合成 → pydub 拼接 → ffmpeg 修 mp3 header → 输出 `<中文标题>.mp3`。
 
 成功片段会缓存到输出目录的 `.tts-cache/` 并在重跑时复用。删除缓存是安全的，但千问语音会重新合成并再次消耗额度。只要有片段缺失、为空或无法解码，脚本就不会发布或覆盖最终 MP3。
@@ -260,7 +262,7 @@ bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标
 
 格式:`[主持人-女]` / `[嘉宾-男]`。也可以真名 + 性别:`[Rhonda-女]` / `[Brady-男]`。
 
-**多嘉宾(2 人以上)** 用甲乙丙丁区分,每个带自己的性别:`[嘉宾甲-男]` `[嘉宾乙-女]`。TTS 自动给同性别的多个 speaker 轮换声音(男声池/女声池各 2 个),同性别 ≤ 2 人时听感是不同人。
+**多嘉宾(2 人以上)** 用甲乙丙丁区分,每个带自己的性别:`[嘉宾甲-男]` `[嘉宾乙-女]`。TTS 自动给同性别的多个 speaker 轮换声音；男声池有 3 个音色、女声池有 2 个音色。
 
 **性别判断信号(强 → 弱)**:
 1. 明确人名:Rhonda Patrick(女)、Brady Holmer(男)、Peter Attia(男)、Kelly Starrett(男)、Andrew Huberman(男)、Sara Gottfried(女)
@@ -311,6 +313,8 @@ bash "__PODCAST_TRANSLATE_ROOT__/bin/tts-cn.sh" "$HOME/Desktop/音频/<中文标
 | `VOICE_DEFAULT` | `= VOICE_FEMALE_1` | 无 speaker 标记时用 |
 
 千问语音可用 `QWEN_TTS_MODEL`、`QWEN_TTS_BASE_URL`、`QWEN_TTS_CONCURRENCY` 和 `QWEN_TTS_VOICE_MALE_1` 等变量覆盖默认配置；只在用户明确要求调整时使用。
+
+千问默认音色：`QWEN_TTS_VOICE_MALE_1=Vincent`、`QWEN_TTS_VOICE_MALE_2=Neil`、`QWEN_TTS_VOICE_MALE_3=Eldric Sage`、`QWEN_TTS_VOICE_FEMALE_1=Cherry`、`QWEN_TTS_VOICE_FEMALE_2=Serena`。不要把 `Dylan` 配给默认的 `qwen3-tts-instruct-flash`；该组合不在官方支持范围内，程序也会拒绝。
 
 `TTS_CONCURRENCY`(默认 8)、`TTS_RETRIES`(默认 3)、`PAUSE_SAME_MS`(200)、`PAUSE_SWITCH_MS`(500)。
 

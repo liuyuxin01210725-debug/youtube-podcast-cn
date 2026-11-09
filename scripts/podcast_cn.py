@@ -359,6 +359,13 @@ _TRANSLATION_SYSTEM_PROMPT = """你是英文播客的忠实中文翻译。
 只返回 JSON,不要解释。"""
 
 
+_TITLE_SYSTEM_PROMPT = """你给中文播客私人听起单集标题。
+把用户给的英文主题译成自然、好懂的简体中文，让人一眼知道这一集在讲什么。
+人名、主持人、节目名和品牌保持原文，不要音译或意译，例如 Huberman、All-In、The Diary Of A CEO、DOAC。
+不要在译文里追加节目名，不要加书名号，不要解释。
+只返回 JSON：{"title":"中文主题"}。"""
+
+
 class OpenAICompatibleTranslationClient:
     """OpenAI-compatible translation client with strict ID validation."""
 
@@ -401,20 +408,10 @@ class OpenAICompatibleTranslationClient:
     def translation_identity(self) -> str:
         return f"{self.provider}|{self.model}|{self.base_url}"
 
-    def translate(self, segments: list[SubtitleSegment]) -> dict[str, str]:
-        expected_ids = [segment.id for segment in segments]
-        source_payload = [
-            {"id": segment.id, "text": segment.text} for segment in segments
-        ]
+    def _chat_json(self, messages: list[dict[str, str]], timeout: float = 120) -> dict[str, Any]:
         body = {
             "model": self.model,
-            "messages": [
-                {"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(source_payload, ensure_ascii=False),
-                },
-            ],
+            "messages": messages,
             "response_format": {"type": "json_object"},
             "temperature": 0.2,
         }
@@ -428,7 +425,7 @@ class OpenAICompatibleTranslationClient:
             method="POST",
         )
         try:
-            with self._opener(request, timeout=120) as response:
+            with self._opener(request, timeout=timeout) as response:
                 response_bytes = response.read()
         except Exception:
             raise PodcastPipelineError(
@@ -443,13 +440,55 @@ class OpenAICompatibleTranslationClient:
                 raise TypeError("content is not text")
             cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.I)
             cleaned = re.sub(r"\s*```$", "", cleaned)
-            translation_payload = json.loads(cleaned)
+            payload = json.loads(cleaned)
         except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
             raise TranslationValidationError(
                 f"{self.config.display_name} 返回的翻译 JSON 无法解析"
             ) from None
+        if not isinstance(payload, dict):
+            raise TranslationValidationError(
+                f"{self.config.display_name} 返回的翻译 JSON 无法解析"
+            )
+        return payload
 
+    def translate(self, segments: list[SubtitleSegment]) -> dict[str, str]:
+        expected_ids = [segment.id for segment in segments]
+        source_payload = [
+            {"id": segment.id, "text": segment.text} for segment in segments
+        ]
+        translation_payload = self._chat_json(
+            [
+                {"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": json.dumps(source_payload, ensure_ascii=False),
+                },
+            ]
+        )
         return validate_translation_payload(translation_payload, expected_ids)
+
+    def translate_title(self, text: str) -> str:
+        """Translate one episode topic into Simplified Chinese.
+
+        Show and brand names that appear inside the topic stay in their
+        original spelling. Callers append the channel separately.
+        """
+        topic = text.strip()
+        if not topic:
+            raise TranslationValidationError("标题为空")
+        payload = self._chat_json(
+            [
+                {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
+                {"role": "user", "content": topic},
+            ],
+            timeout=45,
+        )
+        title = payload.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise TranslationValidationError(
+                f"{self.config.display_name} 返回的节目标题为空"
+            )
+        return title.strip()[:500]
 
 
 class DeepSeekClient(OpenAICompatibleTranslationClient):

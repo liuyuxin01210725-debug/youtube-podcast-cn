@@ -184,12 +184,94 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     )
 
 
+def _speaker_cap(bounds: SpeakerBounds) -> int:
+    """Configured speaker ceiling. exact wins; the default maximum stays 6."""
+    return bounds.exact if bounds.exact is not None else bounds.maximum
+
+
 def _validate_chunk_turns(
     turns: list[DiarizationTurn], bounds: SpeakerBounds
 ) -> None:
-    maximum = bounds.exact if bounds.exact is not None else bounds.maximum
-    if len({turn.speaker_id for turn in turns}) > maximum:
+    if len({turn.speaker_id for turn in turns}) > _speaker_cap(bounds):
         raise DiarizationRuntimeError("声纹分块检测到的说话人数超出配置范围")
+
+
+def _fit_turns_to_speaker_budget(
+    turns: list[DiarizationTurn],
+    embeddings: dict[str, list[float]],
+    bounds: SpeakerBounds,
+) -> tuple[list[DiarizationTurn], dict[str, list[float]]]:
+    """Merge extra cluster IDs down to the configured cap before validation.
+
+    Sherpa can emit more than six IDs in one chunk even when the worker was
+    passed ``--max-speakers``. Rejecting those IDs before folding aborts the
+    episode (the chunk-count error). Fold the turns stitching will actually
+    see, including the first chunk, and keep embedding keys on the survivors.
+    The cap is the existing exact count or maximum (6). It is not raised.
+    """
+    cap = _speaker_cap(bounds)
+    duration: dict[str, int] = {}
+    for turn in turns:
+        duration[turn.speaker_id] = duration.get(turn.speaker_id, 0) + (
+            turn.end_ms - turn.start_ms
+        )
+    if cap < 1 or len(duration) <= cap:
+        return turns, embeddings
+
+    vectors = {speaker_id: list(vector) for speaker_id, vector in embeddings.items()}
+    alias = {speaker_id: speaker_id for speaker_id in duration}
+
+    def nearest_or_longest(donor: str, others: list[str]) -> str:
+        donor_vector = vectors.get(donor) or []
+        best_id: str | None = None
+        best_key: tuple[float, int, str] | None = None
+        if donor_vector:
+            for candidate in others:
+                score = _cosine_similarity(donor_vector, vectors.get(candidate) or [])
+                if score <= -1.0:
+                    continue
+                key = (score, duration[candidate], candidate)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_id = candidate
+        if best_id is not None:
+            return best_id
+        return max(others, key=lambda speaker_id: (duration[speaker_id], speaker_id))
+
+    while len(duration) > cap:
+        donor = min(duration, key=lambda speaker_id: (duration[speaker_id], speaker_id))
+        others = [speaker_id for speaker_id in duration if speaker_id != donor]
+        target = nearest_or_longest(donor, others)
+        duration[target] += duration.pop(donor)
+        donor_vector = vectors.pop(donor, None)
+        target_vector = vectors.get(target)
+        if donor_vector is not None:
+            if target_vector is None:
+                vectors[target] = donor_vector
+            elif len(target_vector) == len(donor_vector):
+                vectors[target] = [
+                    (left + right) / 2
+                    for left, right in zip(target_vector, donor_vector, strict=True)
+                ]
+        for original, current in list(alias.items()):
+            if current == donor:
+                alias[original] = target
+
+    fitted = [
+        DiarizationTurn(
+            turn.start_ms,
+            turn.end_ms,
+            alias.get(turn.speaker_id, turn.speaker_id),
+        )
+        for turn in turns
+    ]
+    surviving = set(alias.values())
+    fitted_embeddings = {
+        speaker_id: vectors[speaker_id]
+        for speaker_id in surviving
+        if speaker_id in vectors
+    }
+    return fitted, fitted_embeddings
 
 
 def _speaker_mapping(
@@ -258,7 +340,56 @@ def _speaker_mapping(
         mapping.update(fallback_mapping)
         used_global_ids.update(fallback_mapping.values())
 
-    maximum = bounds.exact if bounds.exact is not None else bounds.maximum
+    # Soft closed-world for long audio: when overlap/prototype evidence is
+    # weak, prefer remapping onto existing globals over inventing new IDs.
+    # Inventing across many chunks exhausts the speaker budget and then fails
+    # with "无法安全映射说话人" on interviews that are only 2–3 talkers.
+    unmatched_local = [item for item in local_ids if item not in mapping]
+    for local_id in unmatched_local:
+        if local_id not in incoming_vectors:
+            continue
+        best_global: str | None = None
+        best_score = float("-inf")
+        for global_id in global_ids:
+            if global_id not in existing_vectors:
+                continue
+            score = _cosine_similarity(
+                incoming_vectors[local_id], existing_vectors[global_id]
+            )
+            unused = global_id not in used_global_ids
+            if score > best_score or (
+                score == best_score
+                and unused
+                and (best_global is None or best_global in used_global_ids)
+            ):
+                best_score = score
+                best_global = global_id
+        if best_global is not None and best_score > -1.0:
+            mapping[local_id] = best_global
+            used_global_ids.add(best_global)
+
+    # When a chunk local has no voice print, inventing a new global ID is how
+    # long interviews grow ghost speakers (SPEAKER_02/04/…). With no exact
+    # count, attach those leftovers to the dominant existing talker instead.
+    unmatched_local = [item for item in local_ids if item not in mapping]
+    if (
+        unmatched_local
+        and bounds.exact is None
+        and len(global_ids) >= 2
+    ):
+        duration_by: dict[str, int] = {}
+        for turn in existing:
+            duration_by[turn.speaker_id] = duration_by.get(turn.speaker_id, 0) + (
+                turn.end_ms - turn.start_ms
+            )
+        dominant = max(global_ids, key=lambda sid: (duration_by.get(sid, 0), sid))
+        for local_id in unmatched_local:
+            if local_id in incoming_vectors:
+                continue
+            mapping[local_id] = dominant
+            used_global_ids.add(dominant)
+
+    maximum = _speaker_cap(bounds)
     all_used_ids = set(global_ids)
     for local_id in local_ids:
         if local_id in mapping:
@@ -273,6 +404,54 @@ def _speaker_mapping(
             "声纹分块缺少可靠的重叠或声纹证据，无法安全映射说话人"
         )
     return mapping
+
+
+
+def _collapse_minor_speakers(
+    turns: list[DiarizationTurn],
+    prototypes: dict[str, list[float]],
+    *,
+    min_ms: int = 20_000,
+) -> list[DiarizationTurn]:
+    """Merge speakers shorter than min_ms into the nearest lasting voice.
+
+    Sherpa clustering on interview chunks often emits tiny ghost IDs alongside
+    the real talkers. Collapsing them after stitch keeps voice slots usable
+    without raising the global cluster threshold (which collapses real guests).
+    """
+    if not turns or min_ms <= 0:
+        return turns
+    duration_by: dict[str, int] = {}
+    for turn in turns:
+        duration_by[turn.speaker_id] = duration_by.get(turn.speaker_id, 0) + (
+            turn.end_ms - turn.start_ms
+        )
+    majors = {sid for sid, total in duration_by.items() if total >= min_ms}
+    minors = [sid for sid in duration_by if sid not in majors]
+    if not minors or not majors:
+        return turns
+    remap: dict[str, str] = {}
+    dominant = max(majors, key=lambda sid: (duration_by[sid], sid))
+    for minor in minors:
+        best = dominant
+        best_score = float("-inf")
+        if minor in prototypes:
+            for major in majors:
+                if major not in prototypes:
+                    continue
+                score = _cosine_similarity(prototypes[minor], prototypes[major])
+                if score > best_score:
+                    best_score = score
+                    best = major
+        remap[minor] = best
+    return [
+        DiarizationTurn(
+            turn.start_ms,
+            turn.end_ms,
+            remap.get(turn.speaker_id, turn.speaker_id),
+        )
+        for turn in turns
+    ]
 
 
 def _next_speaker_id(used_ids: set[str]) -> str:
@@ -427,7 +606,11 @@ def backend_fingerprint(manifest: dict[str, object]) -> dict[str, object]:
         "min_duration_off": 0.5,
         "chunk_duration_ms": DEFAULT_CHUNK_DURATION_MS,
         "chunk_overlap_ms": DEFAULT_CHUNK_OVERLAP_MS,
-        "stitching_version": 2,
+        # 3 invalidates CLI turn caches from stitching_version 2 so soft
+        # closed-world, <20s ghost collapse, and per-chunk budget fit rerun.
+        # cluster_threshold here is the CLI default. Studio YouTube jobs pass
+        # 0.9 on the worker argv and do not read this cache.
+        "stitching_version": 3,
         "speaker_prototype_max_seconds": 30,
         "speaker_prototype_similarity": 0.35,
     }
@@ -729,8 +912,14 @@ def _run_worker_chunk(
             if progress_matches:
                 report(max(int(value) for value in progress_matches))
         result = _read_worker_output(output_path)
-        _validate_chunk_turns(result.turns, bounds)
-        return result
+        # Fit before the hard count check. The first chunk is stitched as-is,
+        # so the folded turns and embeddings are what later chunks map against.
+        turns, embeddings = _fit_turns_to_speaker_budget(
+            result.turns, result.embeddings, bounds
+        )
+        fitted = WorkerChunk(turns, embeddings)
+        _validate_chunk_turns(fitted.turns, bounds)
+        return fitted
     finally:
         try:
             output_path.unlink()
@@ -820,4 +1009,4 @@ def run_sherpa_backend(
                         for left, right in zip(previous, vector, strict=True)
                     ]
         previous_end_ms = end_ms
-    return stitched
+    return _collapse_minor_speakers(stitched, prototypes)

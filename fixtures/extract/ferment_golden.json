@@ -1,0 +1,78 @@
+{
+  "packet_id": "fixture-ferment-deep-2026-10-29T074453+0000",
+  "work_id": "fixture-ferment",
+  "schema_id": "ferment",
+  "mode": "deep",
+  "status": "ready",
+  "created_at": "2026-10-29T07:44:53+00:00",
+  "model_meta": {
+    "provider": "mock",
+    "version": "mvp-1"
+  },
+  "cost_units": 1,
+  "summary_line": "抽出盐曲工艺与米曲原料",
+  "transcript_hash": "b36e43de68bc2b06",
+  "claims": [
+    {
+      "id": "c-flavor-1",
+      "kind": "claim",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "高盐比会压住杂菌风味更干净。勿用碘盐。",
+      "t_start": 100.0,
+      "t_end": 120.0,
+      "point_type": "claim_flavor",
+      "text": "短时高盐比会压住杂菌、风味更干净。",
+      "stance": "neutral",
+      "default_action": "debate"
+    }
+  ],
+  "methods": [
+    {
+      "id": "m-craft-1",
+      "kind": "method",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "今天讲盐曲。盐曲按两斤盐一斤曲，密封室温发酵七天。米曲",
+      "t_start": 40.0,
+      "t_end": 75.0,
+      "point_type": "method_craft",
+      "title": "盐曲工艺",
+      "steps": [
+        "称盐与曲",
+        "按 2:1 混合",
+        "密封室温放置"
+      ],
+      "params": {
+        "盐比": "2:1",
+        "温度": "室温",
+        "时长": "7天"
+      },
+      "cautions": [
+        "勿用碘盐"
+      ],
+      "default_action": "ferment_note"
+    }
+  ],
+  "entities": [
+    {
+      "id": "e-prod-1",
+      "kind": "entity",
+      "status": "candidate",
+      "confidence": 0.82,
+      "span": "封室温发酵七天。米曲是小众原料可用于家用发酵。短时高盐比会压住杂",
+      "t_start": 80.0,
+      "t_end": 95.0,
+      "point_type": "product_niche",
+      "type": "Product",
+      "name_src": "koji",
+      "name_zh": "米曲",
+      "default_action": "try_later"
+    }
+  ],
+  "quotes": [],
+  "open_questions": [],
+  "actions": [],
+  "degraded_from": null,
+  "pending_confirm_count": 3
+}

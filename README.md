@@ -1,3 +1,38 @@
+# 中文播客工作台
+
+双击 [bin/中文播客工作台.command](bin/中文播客工作台.command)，在浏览器打开本机中文界面。支持批量 YouTube 链接及本地音频/视频，完整英文识别、说话人区分、中文翻译、译稿编辑、可辨系统音色（默认）、可选原声克隆、短试听与完整 MP3。任务串行执行，适合 Apple Silicon / 16 GB Mac。
+
+## 工作台使用
+
+1. 粘贴每行一个 YouTube 链接，或选择本地音视频（每个最多 2 GB）。
+2. 新建任务声明真实说话人数（对谈默认 2、单口默认 1，可覆盖，当前支持 1–5）；默认使用「可辨音色」（系统声槽，每人一槽可改）；原声克隆为可选。选择「准备译稿」，校对左右对应的英文和中文，必要时调整说话人或音色槽；也可直接完整转换。现有任务可在可辨音色与克隆之间切换，保留译稿与来源。
+3. 保存后试听（优先覆盖不同说话人），再生成完整 MP3。试听和完整成品分别展示与下载，双语稿也可下载。**验收：** 音色数必须等于真实说话人数，且逐人可辨；每位说话人固定一个不同声槽。若说话人切分不准，界面会提示待核对段落，改正并保存后再生成（不会悄悄混声）。
+4. 取消后可继续；重启后中断任务会保留，手动继续。修改译稿或切换声音后旧音频仍保留，并按试听/完整成品分别标记上一版；重新准备译稿也会重新核对音频版本。删除任务会删除上传副本、声音参考、缓存与成品。
+
+任务默认保存在 `~/Desktop/音频/中文播客工作台/jobs`。界面只使用本机 `127.0.0.1:8765`，关闭启动窗口会停止服务；不需要浏览器账号。YouTube 可能返回 429 或要求登录，此时请等待或导入自己已下载的文件。工具不自动读取浏览器 cookies。
+
+**首次安装：** 先安装 Python 3.12 和 ffmpeg（例如 `brew install python@3.12 ffmpeg`），运行 `bash bin/setup-studio.sh`。安装脚本创建独立运行环境并下载固定版本的 MLX Whisper small.en 与 Qwen3-TTS 0.6B Base 8bit 模型，首次需要网络、数 GB 磁盘及等待时间；正常启动不会重复安装。翻译密钥使用现有 `bin/setup-podcast-deepseek.sh` 或 `bin/setup-podcast-qwen.sh` 配置，只保存在环境或 macOS 钥匙串，不进入网页或任务配置。
+
+本地识别和克隆不按次收费；翻译需联网且可能产生供应商费用。默认可辨系统音色（Edge）也需联网。长音频通常需较长时间，界面显示真实阶段和已处理段数，不承诺实时速度。模型能力、原声质量与分段均影响效果，不保证与专业播客相同。完整转换不做摘要或自行增加对话。说话人编号是匿名槽位，系统声音名称不是身份或性别推断。原声参考会持久保存在任务中以便断点复用；仅处理你有权使用的素材。
+
+开发启动：`.venv/bin/python scripts/studio_server.py`。可用 `--jobs /absolute/path` 指定任务根目录，`--port 8765` 指定端口。引擎接口见 [docs/STUDIO-ENGINE.md](docs/STUDIO-ENGINE.md)。工作台不提供任意本地文件读取接口。
+
+## 私人听（只给自己的 iPhone）
+
+完整 MP3 生成成功后，工作台会把这一期复制到 iCloud Drive 的「中文播客私人库」。试听不会发布。复制失败只打日志，任务仍然算成功。如果这时 iPhone 正连着 Mac（数据线，或已配对的同一网络），还会用 `xcrun devicectl` 顺手把这一期拷进 App 的 `Documents/中文播客私人库`，手机下拉就能看到，不用手动推。没连手机就跳过，不影响任务和 iCloud 发布。路径、清单格式和补发命令见 [docs/private-listen.md](docs/private-listen.md)。
+
+在 Mac 上打开 [ios/PrivateListen/PrivateListen.xcodeproj](ios/PrivateListen/PrivateListen.xcodeproj)：
+
+1. PrivateListen 和 ShareExtension 两个目标都用同一个个人团队签名。不要加 iCloud 或 App Groups，个人团队签不上。
+2. 运行目标选这台 iPhone「不取经的小刘」，然后 Run。模拟器只用来确认工程能编译；收听和分享用这台手机。
+3. 第一次打开点「选择资料库」，在 iCloud Drive 里选中「中文播客私人库」。这一步决定能不能不插线收到新节目：列表顶上如果写着「现在只显示连 Mac 时拷进来的本机副本」，说明还没选，点那里选一次。从 Safari / YouTube / Substack 分享到「私人听」时，再选一次同一个文件夹，之后分享会写入 `inbox/`。Mac 上跑 `python3 scripts/studio_inbox.py`，用默认可辨音色排队转换。锁屏封面和签名步骤见 [docs/private-listen.md](docs/private-listen.md)。
+
+已有成品（例如 Creatine，任务 `6d898d4192de495fafcec86b9c938430`）不用重跑合成，按文档里的命令补发一次即可。
+
+以下为保留的旧版命令行 / Agent Skill 文档，其字幕回退策略不代表工作台引擎；工作台的说话人区分失败会明确停止，避免悄悄改变声音方案。
+
+---
+
 # YouTube 英文播客转中文音频
 
 给一个带英文字幕的 YouTube 播客链接，自动完成：
@@ -27,7 +62,7 @@
 - 翻译分块落盘，中断后重跑只补未完成部分。
 - 切换供应商、模型或接口地址时自动隔离旧缓存。
 - API Key 隐藏输入并保存到 macOS 钥匙串，不写入仓库或任务文件。
-- EdgeTTS 默认免费合成，也可显式选择 Qwen3-TTS 高质量语音；任一音频片段失败时不发布残缺成品。
+- EdgeTTS 默认免费合成，也可显式选择 Qwen3-TTS 高质量语音；Qwen 会在付费调用前校验音色性别和模型兼容性，任一音频片段失败时不发布残缺成品。
 
 ## 系统要求
 
@@ -132,6 +167,8 @@ bash bin/tts-cn.sh article.md --tts qwen3-api --style documentary
 
 `--provider qwen` 只选择千问翻译，`--tts qwen3-api` 只选择千问语音，两者相互独立。比如“用千问翻译这个播客”会使用千问翻译和默认 Edge 语音；只有同时明确选择两个参数，翻译和语音才都会走千问。
 
+多人播客的 Qwen 默认男性音色为 `Vincent`、`Neil`、`Eldric Sage`，分别用于男声 1、2、3。三者均已用默认 `qwen3-tts-instruct-flash` 实际调用验证，并会额外使用明确的成年男性表达指令。已知女性系统音色不能配置到男性音色槽；已知不受当前模型支持的音色会在调用前报错，避免生成整期后才发现声音不对。
+
 成功的音频片段会保存在最终输出目录的 `.tts-cache/`，重跑时自动复用，避免重复等待和重复计费。删除 `.tts-cache/` 是安全的，但之后再次运行会重新合成，并可能再次消耗额度。任何片段缺失、为空或无法解码时，程序都不会发布最终 MP3，也不会覆盖已有的完整音频。
 
 ## 模型配置
@@ -140,7 +177,7 @@ bash bin/tts-cn.sh article.md --tts qwen3-api --style documentary
 |---|---|---|---|---|
 | 翻译 | DeepSeek | `deepseek-chat` | `DEEPSEEK_API_KEY` | `DEEPSEEK_MODEL`、`DEEPSEEK_BASE_URL` |
 | 翻译 | 通义千问 | `qwen-plus` | `DASHSCOPE_API_KEY` | `QWEN_MODEL`、`QWEN_BASE_URL` |
-| 语音 | Qwen3-TTS | `qwen3-tts-instruct-flash` | `DASHSCOPE_API_KEY` | `QWEN_TTS_MODEL`、`QWEN_TTS_BASE_URL` |
+| 语音 | Qwen3-TTS | `qwen3-tts-instruct-flash` | `DASHSCOPE_API_KEY` | `QWEN_TTS_MODEL`、`QWEN_TTS_BASE_URL`、`QWEN_TTS_VOICE_*` |
 
 翻译参数只允许经过测试的 `deepseek` 和 `qwen`，语音参数只允许 `edge` 和 `qwen3-api`；不接受任意第三方接口。
 

@@ -78,7 +78,7 @@ class PublicPackageTests(unittest.TestCase):
         requirements = (ROOT / "requirements-podcast.txt").read_text(
             encoding="utf-8"
         )
-        self.assertIn("yt-dlp==2026.7.4", requirements)
+        self.assertIn("yt-dlp==2026.8.19", requirements)
 
     def test_gitignore_excludes_tts_cache_and_wave_fragments(self) -> None:
         ignored_patterns = {
