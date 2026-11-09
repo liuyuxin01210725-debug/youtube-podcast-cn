@@ -1,0 +1,75 @@
+{
+  "source_directory": "/Users/liuyuxin/Desktop/音频/shengjian-library-staging/episodes/42786039aaf346a1bf851613199e260a",
+  "duration_seconds": 3809.112,
+  "audio_sha256": "fcb337634866181e6107eb6cb519006fe9102c756b35f83bb8d1410a04749f25",
+  "transcript_hash": "16962cd5c25558ff",
+  "viewpoint_count": 7,
+  "excluded": [
+    {
+      "source_kind": "claim",
+      "id": "s4",
+      "t_start": 4014.9,
+      "t_end": 4038.1,
+      "reason": "outside_output_duration"
+    },
+    {
+      "source_kind": "claim",
+      "id": "i4",
+      "t_start": 4188.6,
+      "t_end": 4204.1,
+      "reason": "outside_output_duration"
+    },
+    {
+      "source_kind": "claim",
+      "id": "i5",
+      "t_start": 4001.1,
+      "t_end": 4010.0,
+      "reason": "outside_output_duration"
+    },
+    {
+      "source_kind": "claim",
+      "id": "i6",
+      "t_start": 4080.0,
+      "t_end": 4101.2,
+      "reason": "outside_output_duration"
+    },
+    {
+      "source_kind": "method",
+      "id": "s5",
+      "t_start": 4538.9,
+      "t_end": 4584.4,
+      "reason": "method_title_not_main_viewpoint"
+    },
+    {
+      "source_kind": "method",
+      "id": "i1",
+      "t_start": 4138.4,
+      "t_end": 4145.8,
+      "reason": "method_title_not_main_viewpoint"
+    },
+    {
+      "source_kind": "method",
+      "id": "i2",
+      "t_start": 4334.5,
+      "t_end": 4337.8,
+      "reason": "method_title_not_main_viewpoint"
+    },
+    {
+      "source_kind": "method",
+      "id": "i7",
+      "t_start": 4626.7,
+      "t_end": 4633.3,
+      "reason": "method_title_not_main_viewpoint"
+    },
+    {
+      "source_kind": "method",
+      "id": "i10",
+      "t_start": 2340.0,
+      "t_end": 2362.6,
+      "reason": "method_title_not_main_viewpoint"
+    }
+  ],
+  "unchanged_extract_sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0",
+  "model_verified": "gpt-6.1-sol",
+  "session_id": "01a1c018-5dc2-7fd2-bdb2-7a9419f88a0e"
+}

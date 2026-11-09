@@ -13,12 +13,30 @@ struct PrivateListenApp: App {
             // Option A: single primary surface = 资料库 (chips filter owned content).
             // Discover mall tab removed; lenses appear as progressive Library chips.
             // DiscoverView.swift / DiscoverCatalog.swift remain in the target unused by TabView.
-            LibraryView()
+            Group {
+                #if DEBUG && targetEnvironment(simulator)
+                if PointListenProbe.previewEnabled {
+                    PointListenPreview()
+                } else {
+                    LibraryView()
+                }
+                #else
+                LibraryView()
+                #endif
+            }
                 .environmentObject(library)
                 .environmentObject(player)
                 .environmentObject(extracts)
                 .environmentObject(pointStars)
                 .environmentObject(listenNotes)
+                .task {
+                    #if DEBUG && !targetEnvironment(simulator)
+                    await NortonDeviceFourProbe.runIfNeeded(player: player, library: library)
+                    #endif
+                    #if DEBUG && targetEnvironment(simulator)
+                    await PointListenProbe.runIfNeeded(player: player, library: library)
+                    #endif
+                }
                 .onOpenURL { url in
                     library.acceptIncoming(url)
                 }

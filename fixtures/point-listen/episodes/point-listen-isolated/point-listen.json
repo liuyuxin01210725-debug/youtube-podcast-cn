@@ -1,0 +1,52 @@
+{
+  "work_id": "point-listen-isolated",
+  "packet_id": "point-listen-isolated-manual-v1",
+  "transcript_hash": "e3aa61c2838c5d81",
+  "audio_sha256": "7b6eb0eb1735a6a9a7c22d952b4d4ce5e7c7d1a8a4779a8af7ce37cf6cd3f46c",
+  "output_version": "isolated-tone-v1",
+  "timeline": "output.mp3.seconds",
+  "viewpoints": [
+    {
+      "id": "v1",
+      "viewpoint_text": "跳播应从成片的秒数落点开始，连续越过本条终点。",
+      "span": "跳播应从成片的秒数落点开始，连续越过本条终点。",
+      "t_start": 3.25,
+      "t_end": 3.75
+    },
+    {
+      "id": "v2",
+      "viewpoint_text": "短播三至五秒退出，续听卡是否指向刚才跳到的本集？",
+      "span": "短播三至五秒退出，续听卡是否指向刚才跳到的本集？",
+      "t_start": 18.5,
+      "t_end": 19.0
+    },
+    {
+      "id": "v3",
+      "viewpoint_text": "在同一集再次点另一句，播放头应随新落点继续前进。",
+      "span": "在同一集再次点另一句，播放头应随新落点继续前进。",
+      "t_start": 37.125,
+      "t_end": 37.625
+    },
+    {
+      "id": "greeting",
+      "viewpoint_text": "你好，欢迎。",
+      "index_include": false,
+      "t_start": 50.0,
+      "t_end": 51.0
+    },
+    {
+      "id": "v4",
+      "viewpoint_text": "缺少成片绑定时只能阅读观点，不能凭字幕时间猜测跳转。",
+      "span": "缺少成片绑定时只能阅读观点，不能凭字幕时间猜测跳转。",
+      "t_start": 68.0,
+      "t_end": 68.5
+    },
+    {
+      "id": "v5",
+      "viewpoint_text": "末十五秒内点击不等于完成，实际播放后仍沿用原完成规则。",
+      "span": "末十五秒内点击不等于完成，实际播放后仍沿用原完成规则。",
+      "t_start": 76.0,
+      "t_end": 76.5
+    }
+  ]
+}

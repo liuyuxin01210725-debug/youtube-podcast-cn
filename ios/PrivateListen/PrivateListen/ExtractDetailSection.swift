@@ -1,76 +1,40 @@
 import SwiftUI
 
-/// 详情提炼区：点星深抽后直接展示要点结果（方法/观点/实体/金句/开放问题）。
-/// status 字段仍保留在模型里；UI 不做「待确认→确认/丢掉」主交互。
-/// 切片 A「听这段」+ 切片 B 要点星（与整集星分层）。
+/// One primary list: actual statements/questions. Legacy extraction slots remain internal inputs.
 struct ExtractDetailSection: View {
     let episode: Episode
     @ObservedObject var extracts: ExtractStore
-    @EnvironmentObject private var player: PlayerModel
-    @EnvironmentObject private var pointStars: PointStarStore
     @State private var showSchemaPicker = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
             if let packet = extracts.packet(for: episode.id) {
-                if extracts.refreshing.contains(episode.id) && ExtractDisplay.isShowable(packet) {
-                    Text("正在更新提炼…")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                Text(ExtractDisplay.detailStatusLabel(packet))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if extracts.refreshing.contains(episode.id) {
+                    Text("正在更新提炼…").font(.caption).foregroundStyle(.secondary)
                 }
-                statusLine(packet)
-                if packet.mode == .light {
-                    Text(packet.summaryLine ?? "听完轻摘")
+                if ExtractDisplay.isShowable(packet) {
+                    PointListenRows(episode: episode, packet: packet)
+                } else {
+                    Text(packet.failureReason == ExtractDisplay.mockNotOfficialReason
+                         ? ExtractDisplay.missingLiveKeySummary
+                         : packet.summaryLine ?? "观点索引尚未就绪")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    Text("轻摘一览；点星可深抽更多要点")
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                    resultBlocks(packet)
-                } else {
-                    switch packet.status {
-                    case .queued, .running:
-                        Text(packet.summaryLine ?? "正在提炼本集要点…")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    case .failed:
-                        Text(packet.summaryLine ?? packet.failureReason ?? "提炼失败，可改主题重抽")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    case .ready, .stale:
-                        if ExtractDisplay.isPlaceholderDeep(packet) {
-                            Text(ExtractDisplay.missingLiveKeySummary)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        } else if resultIsEmpty(packet) {
-                            Text("暂无要点。可从菜单改主题重抽。")
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            resultBlocks(packet)
-                        }
-                    }
                 }
             } else {
-                switch ExtractDisplay.emptyCaption(isStarred: extracts.isStarred(episode.id)) {
-                case .promptToStar:
-                    Text("点星开始提炼")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                case .syncingStarred:
-                    Text("已收藏，提炼结果同步中")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
+                Text(extracts.isStarred(episode.id) ? "已收藏，提炼结果同步中" : "点星开始提炼")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
             }
         }
         .padding(.top, 8)
         .confirmationDialog("本集改主题重抽", isPresented: $showSchemaPicker, titleVisibility: .visible) {
             ForEach(ExtractSchemaID.allCases, id: \.self) { schema in
-                Button(schema.labelZH) {
-                    extracts.reextract(episode: episode, schema: schema)
-                }
+                Button(schema.labelZH) { extracts.reextract(episode: episode, schema: schema) }
             }
             Button("取消", role: .cancel) {}
         }
@@ -78,12 +42,9 @@ struct ExtractDetailSection: View {
 
     private var header: some View {
         HStack {
-            Text("提炼")
-                .font(.headline)
+            Text("点段跳听").font(.headline)
             Spacer()
-            Button {
-                extracts.toggleStar(episode: episode)
-            } label: {
+            Button { extracts.toggleStar(episode: episode) } label: {
                 Image(systemName: extracts.isStarred(episode.id) ? "star.fill" : "star")
             }
             .accessibilityLabel(extracts.isStarred(episode.id) ? "取消星标" : "星标并深抽")
@@ -94,222 +55,106 @@ struct ExtractDetailSection: View {
                         Label("导出 Markdown", systemImage: "square.and.arrow.up")
                     }
                 }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-            }
+            } label: { Image(systemName: "ellipsis.circle") }
             .accessibilityLabel("提炼菜单")
         }
     }
+}
 
-    private func statusLine(_ packet: ExtractionPacket) -> some View {
-        HStack(spacing: 8) {
-            Text(packet.schemaId.labelZH)
-                .font(.caption)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(Color.primary.opacity(0.08), in: Capsule())
-            Text(statusLabel(packet))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            if packet.status == .stale {
-                Text("需重抽")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
-            Spacer()
-        }
-    }
+private struct PointListenRows: View {
+    let episode: Episode
+    let packet: ExtractionPacket
+    @EnvironmentObject private var player: PlayerModel
+    @EnvironmentObject private var pointStars: PointStarStore
+    @State private var index: PointListenIndex?
+    @State private var audio: PointListenAudio?
+    @State private var verificationText = "正在核对本集成片…"
 
-    private func statusLabel(_ packet: ExtractionPacket) -> String {
-        ExtractDisplay.detailStatusLabel(packet)
-    }
-
-    private func resultIsEmpty(_ packet: ExtractionPacket) -> Bool {
-        packet.visiblePointCount == 0
-    }
-
-    /// 直接列出 schema 有的槽；丢弃项不展；低置信仍展（便于查漏）。
-    private func resultBlocks(_ packet: ExtractionPacket) -> some View {
+    var body: some View {
+        let rows = PointListening.rows(packet: packet, index: index)
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(packet.methods.filter { $0.status != .discarded }, id: \.id) { method in
-                methodCard(method, packet: packet)
+            Text("点一句，从这里继续往后听")
+                .font(.caption).foregroundStyle(.secondary)
+            if rows.isEmpty {
+                Text("本集暂无一句话观点或问题索引；仍可完整收听。")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
-            ForEach(packet.claims.filter { $0.status != .discarded }, id: \.id) { claim in
-                claimCard(claim, packet: packet)
+            if audio == nil {
+                Text(verificationText).font(.caption).foregroundStyle(.secondary)
             }
-            ForEach(packet.entities.filter { $0.status != .discarded }, id: \.id) { entity in
-                entityCard(entity, workId: packet.workId)
-            }
-            ForEach(packet.quotes.filter { $0.status != .discarded }, id: \.id) { quote in
-                quoteCard(quote, workId: packet.workId)
-            }
-            ForEach(packet.openQuestions.filter { $0.status != .discarded }, id: \.id) { q in
-                openCard(q, workId: packet.workId)
-            }
-        }
-    }
-
-    private func methodCard(_ method: ExtractMethod, packet: ExtractionPacket) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("方法")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                pointStarButton(workId: packet.workId, pointId: method.id, kind: "method")
-                seekButton(tStart: method.tStart, tEnd: method.tEnd)
-            }
-            Text(method.title)
-                .font(.subheadline.weight(.semibold))
-            if let steps = method.steps, !steps.isEmpty {
-                ForEach(Array(steps.enumerated()), id: \.offset) { idx, step in
-                    Text("\(idx + 1). \(step)")
-                        .font(.footnote)
+            ForEach(rows) { row in
+                let reason = refusal(row)
+                HStack(alignment: .top, spacing: 8) {
+                    Button {
+                        guard let audio, let index else { return }
+                        if !player.jumpContinue(episode: episode, row: row, index: index, packet: packet, audio: audio) {
+                            self.audio = nil
+                            verificationText = "成片已变化或无法定位，请重新打开本集核对。"
+                        }
+                    } label: {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(row.viewpointText).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                            if let reason {
+                                Text(reason).font(.caption2).foregroundStyle(.secondary)
+                            } else if let start = row.tStart {
+                                Label("\(listenClock(start)) 起继续听", systemImage: "play.fill")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(reason != nil)
+                    .accessibilityIdentifier("point-listen-\(row.id)")
+                    .accessibilityHint(reason ?? "跳到这一句对应处，连续往后播放")
+                    Button {
+                        pointStars.toggle(workId: episode.id, pointId: row.sourcePointId ?? row.id, kind: row.sourceKind ?? "viewpoint")
+                    } label: {
+                        Image(systemName: pointStars.isStarred(workId: episode.id, pointId: row.sourcePointId ?? row.id) ? "star.fill" : "star")
+                            .font(.caption).frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("收藏要点")
                 }
-            }
-            if let params = method.params, !params.isEmpty {
-                Text(params.map { "\($0.key)=\($0.value)" }.joined(separator: " · "))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if let disclaimer = method.disclaimer, !disclaimer.isEmpty {
-                Text(disclaimer)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            } else if packet.schemaId == .health && method.pointType == "method_dose" {
-                Text("非诊断、非处方，仅作记录")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            if method.lowConfidence == true {
-                Text("低置信 · 可改主题重抽")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
+                .padding(12)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+        .task(id: Source(packet: packet, url: episode.audioURL)) { await verify() }
     }
 
-    private func claimCard(_ claim: ExtractClaim, packet: ExtractionPacket) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("观点")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                pointStarButton(workId: packet.workId, pointId: claim.id, kind: "claim")
-                seekButton(tStart: claim.tStart, tEnd: claim.tEnd)
-            }
-            Text(claim.text)
-                .font(.subheadline)
-            // §13.5 biz_invest：主视觉不展示看多/看空
-            if packet.schemaId != .biz_invest, let stance = claim.stance, !stance.isEmpty, stance != "bullish", stance != "bearish" {
-                Text(stance)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            if claim.lowConfidence == true {
-                Text("低置信 · 可改主题重抽")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
-        }
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+    private struct Source: Hashable {
+        let packet: ExtractionPacket
+        let url: URL
     }
 
-    private func entityCard(_ entity: ExtractEntity, workId: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("实体")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Text("\(entity.type) · \(entity.nameZh ?? entity.nameSrc)")
-                    .font(.subheadline)
-                if entity.lowConfidence == true {
-                    Text("低置信")
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                }
-            }
-            Spacer(minLength: 0)
-            pointStarButton(workId: workId, pointId: entity.id, kind: "entity")
-            seekButton(tStart: entity.tStart, tEnd: entity.tEnd)
-        }
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+    private func refusal(_ row: ListenViewpoint) -> String? {
+        if let audio, !audio.isCurrent { return "成片已变化，请重新打开本集核对" }
+        return PointListening.refusal(row: row, index: index, packet: packet, episodeID: episode.id,
+            audioHash: audio?.sha256, duration: audio?.duration ?? 0)
     }
 
-    private func quoteCard(_ quote: ExtractQuote, workId: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("金句")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                pointStarButton(workId: workId, pointId: quote.id, kind: "quote")
-                seekButton(tStart: quote.tStart, tEnd: quote.tEnd)
-            }
-            Text(quote.text)
-                .font(.subheadline)
-            if quote.lowConfidence == true {
-                Text("低置信")
-                    .font(.caption2)
-                    .foregroundStyle(.orange)
-            }
+    @MainActor
+    private func verify() async {
+        index = nil
+        audio = nil
+        let url = episode.audioURL.deletingLastPathComponent().appendingPathComponent(PointListening.indexFileName)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            verificationText = "尚无成片绑定索引，以下仅供阅读。"
+            return
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    private func openCard(_ q: ExtractOpenQuestion, workId: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .center, spacing: 8) {
-                Text("开放问题")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Spacer(minLength: 0)
-                pointStarButton(workId: workId, pointId: q.id, kind: "open")
-                seekButton(tStart: q.tStart, tEnd: q.tEnd)
-            }
-            Text(q.text)
-                .font(.subheadline)
+        do {
+            let loaded = try JSONDecoder().decode(PointListenIndex.self, from: Data(contentsOf: url))
+            index = loaded
+            verificationText = "正在核对本集成片…"
+            guard LocalAudio.isPlayable(episode.audioURL) else { throw CocoaError(.fileReadNoSuchFile) }
+            let verified = try await PointListenAudio.load(episode.audioURL)
+            guard !Task.isCancelled else { return }
+            audio = verified
+        } catch {
+            guard !Task.isCancelled else { return }
+            verificationText = "本集索引或成片尚无法核实，跳转已停用。"
         }
-        .padding(10)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
-    }
-
-    /// 切片 B：要点卡独立小星；与整集大星视觉/语义分离（取消要点星不撤深抽）。
-    private func pointStarButton(workId: String, pointId: String, kind: String) -> some View {
-        let on = pointStars.isStarred(workId: workId, pointId: pointId)
-        return Button {
-            pointStars.toggle(workId: workId, pointId: pointId, kind: kind)
-        } label: {
-            Image(systemName: on ? "star.fill" : "star")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(on ? Color.orange : Color.secondary)
-                .frame(width: 28, height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(on ? "取消收藏要点" : "收藏要点")
-        .accessibilityHint("与整集星标无关")
-    }
-
-    /// 切片 A「听这段」：扩窗后 seek → 播一小段后暂停；§13.2 不写 ListenMark。
-    private func seekButton(tStart: Double?, tEnd: Double?) -> some View {
-        Button {
-            guard let tStart else { return }
-            player.playClip(from: tStart, to: tEnd)
-        } label: {
-            Label("听这段", systemImage: "headphones")
-                .font(.caption.weight(.semibold))
-                .labelStyle(.titleAndIcon)
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .accessibilityLabel("听这段")
-        .disabled(tStart == nil)
     }
 }

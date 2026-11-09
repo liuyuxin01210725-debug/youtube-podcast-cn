@@ -1,0 +1,32 @@
+{
+  "head": "3752757afb4b20347a42a0bcc05e1de5d077ac93",
+  "app_source_commit": "3752757afb4b20347a42a0bcc05e1de5d077ac93",
+  "pr": {
+    "baseRefName": "feature/shengjian-point-clip-tend",
+    "headRefName": "feature/shengjian-point-listen-jump-continue",
+    "isDraft": true,
+    "number": 31,
+    "state": "OPEN",
+    "title": "feat(shengjian): 一句话观点导航与 jump_continue 续听",
+    "url": "https://github.com/liuyuxin01210725-debug/youtube-podcast-cn/pull/31"
+  },
+  "installed_bundle_unchanged_since_verified": true,
+  "manual_four_probes_performed": true,
+  "claim_phone_listenable": false,
+  "head_scope": "App source checkpoint; acceptance documentation is in the subsequent evidence commit",
+  "manual_four_mode": "physical-device equivalent self-driven playback; ListenNote source assertion",
+  "actual_hand_taps_performed": false,
+  "manual_four_report": "manual-four/manual-four-report.json",
+  "device_report": "manual-four/device-report.json",
+  "manual_four_results": {
+    "P-Play": "PASS",
+    "P-Continue": "PASS",
+    "P-Merge": "PASS",
+    "P-ListenNote": "PASS"
+  },
+  "semantic_landing_verified": false,
+  "claim_restriction": "未听辨音频语义落点；时长门禁与实际时钟定位不代表语义正确，继续禁止宣称可听。",
+  "installed_app": "dist/PrivateListen-norton-device-four-2026-11-09-3752757-iphoneos.app",
+  "remaining_user_steps_for_four_probe": "无用户步骤",
+  "pr_remote_state_evidence": "manual-four/pr-after.json"
+}

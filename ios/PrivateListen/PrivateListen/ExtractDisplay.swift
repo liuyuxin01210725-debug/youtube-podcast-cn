@@ -173,7 +173,8 @@ enum ExtractDisplay {
 /// `extract.json` 严格 Codable 失败时的兜底（透镜 id 写进 schema、缺数组、params 不是字符串）。
 enum ExtractPacketDecoding {
     static func decode(_ data: Data) -> ExtractionPacket? {
-        if let packet = try? JSONDecoder().decode(ExtractionPacket.self, from: data) {
+        if var packet = try? JSONDecoder().decode(ExtractionPacket.self, from: data) {
+            packet.transcriptHash = TranscriptFingerprint.normalized(packet.transcriptHash)
             return packet
         }
         return decodeLoose(data)
@@ -200,7 +201,7 @@ enum ExtractPacketDecoding {
             status: status,
             createdAt: string(obj["created_at"]) ?? "",
             summaryLine: string(obj["summary_line"]),
-            transcriptHash: string(obj["transcript_hash"]),
+            transcriptHash: TranscriptFingerprint.normalized(string(obj["transcript_hash"])),
             costUnits: int(obj["cost_units"]),
             failureReason: string(obj["failure_reason"]),
             degradedFrom: string(obj["degraded_from"]),

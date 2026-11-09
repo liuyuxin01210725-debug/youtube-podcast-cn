@@ -1,0 +1,15 @@
+{
+  "run_id": "norton-four-3752757-20261109-a",
+  "device_checks_pass": true,
+  "extra_cold_restart_check": "FAIL: later persisted mark differs from probe final sample",
+  "probe_done_at": "2026-11-09T12:38:22Z",
+  "probe_last_saved": 2160.882845329,
+  "later_persisted_mark": {
+    "seconds": 1193.675768008,
+    "finished": false
+  },
+  "later_mark_touched_at": "2026-11-09T12:38:35.340504+00:00",
+  "interpretation": "The later write is 13 seconds after probe completion and near a different real anchor. This is evidence of a subsequent progress write; its initiator is not established. Not proof of a persistence bug. Re-run b with immediate cold restart passed.",
+  "raw_files": "Retained locally in attempt-a; preferences are not committed.",
+  "claim_phone_listenable": false
+}

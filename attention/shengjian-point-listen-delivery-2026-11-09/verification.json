@@ -1,0 +1,13 @@
+{
+  "model": "gpt-6.1-sol",
+  "base_tip": "7d8403d4bda32e201c308701dc89a6b03bf57563",
+  "branch": "feature/shengjian-point-listen-jump-continue",
+  "xcode": "27.2 (27B52)",
+  "runtime": "iOS 27.2 Simulator",
+  "runtime_checks": 14,
+  "runtime_pass": true,
+  "fixture_audio_sha256": "7b6eb0eb1735a6a9a7c22d952b4d4ce5e7c7d1a8a4779a8af7ce37cf6cd3f46c",
+  "device_tested": false,
+  "production_audio_binding": "UNKNOWN",
+  "production_publish_performed": false
+}

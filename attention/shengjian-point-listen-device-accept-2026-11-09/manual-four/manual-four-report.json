@@ -1,0 +1,144 @@
+{
+  "schema": "shengjian.norton-device-four.acceptance.v1",
+  "pass": true,
+  "run_id": "norton-four-3752757-20261109-b",
+  "app_source_commit": "3752757afb4b20347a42a0bcc05e1de5d077ac93",
+  "device_udid": "00008160-001639DA3480000A",
+  "device_report": "device-report.json",
+  "groups": {
+    "P-Play": "PASS",
+    "P-Continue": "PASS",
+    "P-Merge": "PASS",
+    "P-ListenNote": "PASS"
+  },
+  "checks": [
+    {
+      "name": "physical_done_current_run",
+      "pass": true
+    },
+    {
+      "name": "device_checks_all_pass",
+      "pass": true
+    },
+    {
+      "name": "device-install.json",
+      "pass": true
+    },
+    {
+      "name": "device-launch.json",
+      "pass": true
+    },
+    {
+      "name": "copy-device-report.json",
+      "pass": true
+    },
+    {
+      "name": "copy-library-before.json",
+      "pass": true
+    },
+    {
+      "name": "copy-library-after.json",
+      "pass": true
+    },
+    {
+      "name": "normal-relaunch.json",
+      "pass": true
+    },
+    {
+      "name": "copy-preferences.json",
+      "pass": true
+    },
+    {
+      "name": "explicit_device_probe_launch",
+      "pass": true
+    },
+    {
+      "name": "normal_relaunch_has_no_probe",
+      "pass": true
+    },
+    {
+      "name": "installed_source_hashes_match",
+      "pass": true
+    },
+    {
+      "name": "installed_app_hashes_match",
+      "pass": true
+    },
+    {
+      "name": "signed_Debug_iphoneos_build",
+      "pass": true
+    },
+    {
+      "name": "installed_before_claim_gate",
+      "pass": true
+    },
+    {
+      "name": "P-ListenNote_unconditional_player_entry_and_accessible_editor",
+      "pass": true
+    },
+    {
+      "name": "P-Merge_52_retained_and_bytes_match_prior_verification",
+      "pass": true
+    },
+    {
+      "name": "P-Continue_after_real_process_restart",
+      "pass": true
+    },
+    {
+      "name": "two_distinct_real_windows_crossed",
+      "pass": true
+    }
+  ],
+  "manual_four_probes_performed": true,
+  "actual_hand_taps_performed": false,
+  "acceptance_mode": "physical-device equivalent self-driven playback; ListenNote source assertion",
+  "listen_note": {
+    "visibility_pass": true,
+    "mode": "source assertion; no note written",
+    "player_source": "ios/PrivateListen/PrivateListen/PlayerView.swift",
+    "player_line": 96,
+    "section_source": "ios/PrivateListen/PrivateListen/ListenNoteSection.swift",
+    "automatic_note_write": false
+  },
+  "merge": {
+    "scope": "单集已落盘、library.json 未整库盖、基线 52 保留",
+    "prior_evidence": "../device-file-verification.json",
+    "prior_evidence_sha256": "a7dc457188f922a1501070573bbfaf614d3c7efd61acc396fc51db9fc4efe1d8",
+    "before_count": 52,
+    "after_count": 52,
+    "library_sha256": "02b30ed0aa18aecac9ce00ead967ddc28c7eac31baf8b6d66f1e2adcbcb7966e",
+    "byte_identical": true
+  },
+  "after_process_restart": {
+    "preferences_sha256": "8148cb84007e4ff59024638f9ed2c33d7c5e7ec12bf9359de9f4441479864902",
+    "Norton_mark": {
+      "seconds": 2160.658535271,
+      "finished": false
+    },
+    "continue_card_id": "42786039aaf346a1bf851613199e260a"
+  },
+  "samples": [
+    {
+      "heard_clock": 439.84679606,
+      "id": "claim-s1",
+      "landed_clock": 435.4,
+      "landing_delta_seconds": 0,
+      "saved": 439.847329181,
+      "t_end": 438.9,
+      "t_start": 435.4
+    },
+    {
+      "heard_clock": 2160.658197561,
+      "id": "claim-i9",
+      "landed_clock": 2156.5,
+      "landing_delta_seconds": 0,
+      "saved": 2160.658268602,
+      "t_end": 2158.1,
+      "t_start": 2156.5
+    }
+  ],
+  "semantic_landing_verified": false,
+  "claim_phone_listenable": false,
+  "remaining_user_steps_for_four_probe": "无用户步骤",
+  "remaining_limit": "未做音频语义听辨；时长门禁和 seek 偏差不证明语义正确，继续禁止宣称可听。"
+}

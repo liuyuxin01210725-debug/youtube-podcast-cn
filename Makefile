@@ -1,8 +1,8 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
-.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux shengjian-source-gate shengjian-before-claim-ready
+.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen shengjian-source-gate shengjian-before-claim-ready
 
-test: test-public test-podcast test-tts test-extract-display test-continue-ux shengjian-source-gate
+test: test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen shengjian-source-gate
 	@$(PYTHON) -m unittest tests.test_studio_engine tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
 	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh bin/setup-studio.sh bin/中文播客工作台.command
 	@echo "All tests passed."
@@ -75,10 +75,28 @@ test-continue-ux:
 		/tmp/library-list-probe; \
 	fi
 
-# 声间装机 / 宣称可听之前必须跑（没有手机 UI 自动化时，单测 + 源码/dylib 字符串即门禁）。
-# 继续播放短播旅程、播放页听后感仍在提炼前、mock 不得写成 ready。没有 swiftc 则失败，不能跳过。
+# 点段跳听：实际本地音频绑定 + PL-D* + seek/播放完成边界；AVFoundation 验证需要 macOS。
+test-point-listen:
+	@if [ "$$(uname -s)" != Darwin ] || ! command -v swiftc >/dev/null 2>&1; then \
+		if [ "$${SHENGJIAN_REQUIRE_SWIFTC:-}" = 1 ]; then \
+			echo "point-listen checks require macOS + swiftc; 装机门禁不能跳过" >&2; exit 1; \
+		fi; \
+		echo "skip point-listen audio checks (requires macOS + swiftc)"; \
+	else \
+		swiftc -parse-as-library -o /tmp/point-listen-checks \
+		ios/PrivateListen/PrivateListen/ExtractionModels.swift \
+		ios/PrivateListen/PrivateListen/ExtractSchemaMap.swift \
+		ios/PrivateListen/PrivateListen/MockExtractor.swift \
+		ios/PrivateListen/PrivateListen/ExtractDisplay.swift \
+		ios/PrivateListen/PrivateListen/ContinueListening.swift \
+		ios/PrivateListen/PrivateListen/PointListening.swift \
+		ios/PrivateListen/PrivateListenTests/PointListenChecks.swift && \
+		/tmp/point-listen-checks; \
+	fi
+
+# 声间装机 / 宣称可听前必须跑。没有平台/编译器则失败，不能跳过；真机 UI 四连另验。
 shengjian-before-claim-ready:
-	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display shengjian-source-gate
+	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display test-point-listen shengjian-source-gate
 	@echo "声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + mock 不冒充 ready）。"
 
 shengjian-source-gate:

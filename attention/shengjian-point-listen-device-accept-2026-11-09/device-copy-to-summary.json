@@ -1,0 +1,74 @@
+[
+  {
+    "file": "output.mp3",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/output.mp3",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/output.mp3\nURL Resources: Writable, Readable\nFile Size: 58.1 MB\nLast modification date: 2026/11/3, 17:04\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [\"com.apple.dataprotection.policy.exception-applied-by\": \"com.apple.containermanagerd\"]\n",
+    "stderr": "",
+    "bytes": 60946989,
+    "sha256": "fcb337634866181e6107eb6cb519006fe9102c756b35f83bb8d1410a04749f25"
+  },
+  {
+    "file": "cover.png",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/cover.png",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/cover.png\nURL Resources: Writable, Readable\nFile Size: 195 bytes\nLast modification date: 2026/11/3, 17:04\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [\"com.apple.dataprotection.policy.exception-applied-by\": \"com.apple.containermanagerd\"]\n",
+    "stderr": "",
+    "bytes": 195,
+    "sha256": "4b058ca75d71c5cfcf369017f4c3af06532870bf85a6c433d1c7be0b9ba65025"
+  },
+  {
+    "file": "transcript_zh.json",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/transcript_zh.json",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/transcript_zh.json\nURL Resources: Writable, Readable\nFile Size: 244 KB\nLast modification date: 2026/11/3, 17:04\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [:]\n",
+    "stderr": "",
+    "bytes": 250175,
+    "sha256": "2579dc788334bb4ae5c6556e2498973d75945992059a4fb4966d19ca7bd0bdef"
+  },
+  {
+    "file": "extract.live.json",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/extract.live.json",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/extract.live.json\nURL Resources: Writable, Readable\nFile Size: 57 KB\nLast modification date: 2026/11/3, 21:43\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [\"com.apple.dataprotection.policy.exception-applied-by\": \"com.apple.containermanagerd\"]\n",
+    "stderr": "",
+    "bytes": 58542,
+    "sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0"
+  },
+  {
+    "file": "extract.lkg.json",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/extract.lkg.json",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/extract.lkg.json\nURL Resources: Writable, Readable\nFile Size: 57 KB\nLast modification date: 2026/11/3, 21:43\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [\"com.apple.dataprotection.policy.exception-applied-by\": \"com.apple.containermanagerd\"]\n",
+    "stderr": "",
+    "bytes": 58542,
+    "sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0"
+  },
+  {
+    "file": "extract.json",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/extract.json",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/extract.json\nURL Resources: Writable, Readable\nFile Size: 57 KB\nLast modification date: 2026/11/3, 21:43\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [\"com.apple.dataprotection.policy.exception-applied-by\": \"com.apple.containermanagerd\"]\n",
+    "stderr": "",
+    "bytes": 58542,
+    "sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0"
+  },
+  {
+    "file": "point-listen.json",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/point-listen.json",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/point-listen.json\nURL Resources: Writable, Readable\nFile Size: 4 KB\nLast modification date: 2026/11/9, 19:42\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [:]\n",
+    "stderr": "",
+    "bytes": 3833,
+    "sha256": "c4e0ec24448941d857032814e0515ada28dd777c37e02b40dee17dad9af421ad"
+  },
+  {
+    "file": "episode.json",
+    "destination": "Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/episode.json",
+    "exit_code": 0,
+    "stdout": "File on Device\nPath: /private/var/mobile/Containers/Data/Application/5825D1FA-3AD1-4F39-8EAF-304EA2661E19/Documents/中文播客私人库/episodes/42786039aaf346a1bf851613199e260a/episode.json\nURL Resources: Writable, Readable\nFile Size: 419 bytes\nLast modification date: 2026/11/3, 17:07\nPermissions: UID: 501, GID: 501, Permissions: 420\nExtended Attributes: [:]\n",
+    "stderr": "",
+    "bytes": 419,
+    "sha256": "23053f7f577071a49c9041e76e682942efefecfd95ed6b1322845e7fd3edb621"
+  }
+]

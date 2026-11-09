@@ -1,0 +1,43 @@
+{
+  "source_commit": "f4b3c474f389f0bf8216e79c5b9caeffcb899f97",
+  "branch": "feature/shengjian-point-listen-jump-continue",
+  "app_path": "/Users/liuyuxin/Desktop/音频/youtube-podcast-cn/dist/PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app",
+  "device_udid": "00008160-001639DA3480000A",
+  "build_configuration": "Debug-iphoneos",
+  "development_team": "3CK4AMUHH5",
+  "codesign_verified": true,
+  "xcode_version": "Xcode 27.2\nBuild version 27B52",
+  "bundle": "com.liuyuxin.privatelisten",
+  "file_sha256": {
+    "AppIcon60x60@2x.png": "0095676289a2ec72fe79317dc4642c6bd7e5c9c2620ee2111764b33780b886a1",
+    "AppIcon76x76@2x~ipad.png": "a5cdff51c23505aaf230c6810cba67f74403693dfb42663754b68923ab492684",
+    "Assets.car": "9eb44d05c656f90f790dcacee40079d3043a75b570c0d949d7c1a3985155fe79",
+    "ExtractDesign.md": "0dd97988ad404b3416a9f4982b3f0b9d489f03e6a1776f38a104185a131be2e9",
+    "Info.plist": "0dbf7a071f0a696812e2f96ad8cabb4223cfd77adc6e8b5e9176493c0c11dbd4",
+    "PkgInfo": "82502191c9484b04d685374f9879a0066069c49b8acae7a04b01d38d07e8eca0",
+    "PlugIns/ShareExtension.appex/Info.plist": "60b2fcc0933808bfbcc7a48b1b460ad27887dd1a20cc9c6b8aa064be66d2c9b8",
+    "PlugIns/ShareExtension.appex/ShareExtension": "19b1b4d2fd4961baf9facdd8fd368eabc19e06a0ea18980e62a22b5f204145d3",
+    "PlugIns/ShareExtension.appex/ShareExtension.debug.dylib": "859ea7623400c40121a5a28cea9d39d3a52151ce2267d445db3997e1e37ae745",
+    "PlugIns/ShareExtension.appex/_CodeSignature/CodeResources": "f162f9d31e2a46af21ebd417973a1d82e929872b23ba97c4470b3406a0ea2ad5",
+    "PlugIns/ShareExtension.appex/__preview.dylib": "107b2462a8815702cd33dee62fc2c7cd974f816dbfdc80aa08cf1163db6dec1b",
+    "PlugIns/ShareExtension.appex/embedded.mobileprovision": "db8071404c340c93875c3cc46a92b301911fb5c26542b8ab6dbce8b8b6518b21",
+    "PrivateListen": "f5f43828141208ac646d1ca0be62b03e1931f7b3ed11c26d1b257e84c7efb26b",
+    "PrivateListen.debug.dylib": "04c6e3341ed39c915f4f412b93e3cef4f8f5af79fb1a425f735560f8dba961f9",
+    "_CodeSignature/CodeResources": "a26a86f9bdfd3f1e4dd47bbd19c553b5f228c23fbce7f186504f5cecdeec288e",
+    "__preview.dylib": "c4b6219de40852114b75de65e2ddd0e8bc57ccfc5ba9b8cdd78d3d7c370504cd",
+    "embedded.mobileprovision": "2ca1273d537c209404b584c57177c38bac2af6fea8025a3ec4b3dc0a8aacf237",
+    "lenses.json": "2b64755cc036b81d0a82b5b309b97395ec725f8ef353ace7bd0b5d424309c23f"
+  },
+  "sandbox_codesign_verification": {
+    "exit_code": 1,
+    "output": "/Users/liuyuxin/Desktop/音频/youtube-podcast-cn/dist/PrivateListen-point-listen-norton-2026-11-09-f4b3c47-iphoneos.app: CSSMERR_TP_NOT_TRUSTED\nIn architecture: arm64\n"
+  },
+  "codesign_verification": {
+    "exit_code": 0,
+    "execution": "normal local trust service (outside sandbox)",
+    "log": "codesign-verify.log"
+  },
+  "build_result": "BUILD SUCCEEDED",
+  "build_exit_code": 0,
+  "configuration_command": "xcodebuild -project ios/PrivateListen/PrivateListen.xcodeproj -scheme PrivateListen -configuration Debug -sdk iphoneos -destination generic/platform=iOS -derivedDataPath /tmp/shengjian-point-listen-device-build-20261109 DEVELOPMENT_TEAM=3CK4AMUHH5 build"
+}

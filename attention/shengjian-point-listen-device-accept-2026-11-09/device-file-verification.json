@@ -1,0 +1,74 @@
+{
+  "schema": "shengjian.point-listen.device-file-verification.v1",
+  "pass": true,
+  "device_udid": "00008160-001639DA3480000A",
+  "remote_scope": "App Documents container readback; no OSS/iCloud publish",
+  "episode_id": "42786039aaf346a1bf851613199e260a",
+  "files": [
+    {
+      "file": "output.mp3",
+      "bytes": 60946989,
+      "sha256": "fcb337634866181e6107eb6cb519006fe9102c756b35f83bb8d1410a04749f25",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "cover.png",
+      "bytes": 195,
+      "sha256": "4b058ca75d71c5cfcf369017f4c3af06532870bf85a6c433d1c7be0b9ba65025",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "transcript_zh.json",
+      "bytes": 250175,
+      "sha256": "2579dc788334bb4ae5c6556e2498973d75945992059a4fb4966d19ca7bd0bdef",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "extract.live.json",
+      "bytes": 58542,
+      "sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "extract.lkg.json",
+      "bytes": 58542,
+      "sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "extract.json",
+      "bytes": 58542,
+      "sha256": "73fd605a9fe7b081cc425f46dd515c93f90a2a22346159c4bbcc5bbe72c87ae0",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "point-listen.json",
+      "bytes": 3833,
+      "sha256": "c4e0ec24448941d857032814e0515ada28dd777c37e02b40dee17dad9af421ad",
+      "matches_uploaded_source": true
+    },
+    {
+      "file": "episode.json",
+      "bytes": 419,
+      "sha256": "23053f7f577071a49c9041e76e682942efefecfd95ed6b1322845e7fd3edb621",
+      "matches_uploaded_source": true
+    }
+  ],
+  "library_before_count": 52,
+  "library_after_count": 52,
+  "baseline_episode_ids_preserved": true,
+  "unrelated_episode_directory_records_unchanged": 51,
+  "library_json_byte_identical": true,
+  "library_json_sha256": "02b30ed0aa18aecac9ce00ead967ddc28c7eac31baf8b6d66f1e2adcbcb7966e",
+  "ui_taps_performed": false,
+  "semantic_landing_verified": false,
+  "original_span_substrings_present": {
+    "claim-s1": true,
+    "claim-s2": true,
+    "claim-s3": true,
+    "claim-i3": true,
+    "claim-i8": true,
+    "claim-i9": true,
+    "claim-i11": true
+  }
+}

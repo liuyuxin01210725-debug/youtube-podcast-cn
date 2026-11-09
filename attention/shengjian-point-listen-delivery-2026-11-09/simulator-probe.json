@@ -1,0 +1,73 @@
+{
+  "checks" : [
+    {
+      "name" : "click_v1_does_not_write",
+      "pass" : true
+    },
+    {
+      "name" : "P-Play_v1_continues_past_t_end",
+      "pass" : true,
+      "playhead" : 7.284143458,
+      "t_end" : 3.75,
+      "t_start" : 3.25
+    },
+    {
+      "name" : "P-Continue_v1_real_saved_head",
+      "pass" : true,
+      "saved" : 7.284143458
+    },
+    {
+      "name" : "click_v2_does_not_write",
+      "pass" : true
+    },
+    {
+      "name" : "P-Play_v2_continues_past_t_end",
+      "pass" : true,
+      "playhead" : 22.556503843000002,
+      "t_end" : 19,
+      "t_start" : 18.5
+    },
+    {
+      "name" : "P-Continue_v2_real_saved_head",
+      "pass" : true,
+      "saved" : 22.556503843000002
+    },
+    {
+      "name" : "rapid_taps_latest_seek_wins",
+      "pass" : true,
+      "playhead" : 40.500104045999997
+    },
+    {
+      "name" : "clip_window_stop_and_exit_do_not_write",
+      "pass" : true
+    },
+    {
+      "name" : "jump_after_clip_restores_continue_writes",
+      "pass" : true
+    },
+    {
+      "name" : "tail_seek_lands_paused_without_finishing",
+      "pass" : true
+    },
+    {
+      "name" : "tail_click_does_not_finish",
+      "pass" : true
+    },
+    {
+      "name" : "tail_real_play_keeps_original_finished_rule",
+      "pass" : true
+    },
+    {
+      "name" : "PL-D2_player_refuses_mismatched_binding",
+      "pass" : true
+    },
+    {
+      "name" : "cross_episode_cancels_old_seek",
+      "pass" : true
+    }
+  ],
+  "device" : "simulator",
+  "done" : true,
+  "pass" : true,
+  "schema" : "shengjian.point-listen.probe.v1"
+}

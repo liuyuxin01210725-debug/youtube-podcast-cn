@@ -1,0 +1,39 @@
+{
+  "info" : {
+    "arguments" : [
+      "devicectl",
+      "device",
+      "install",
+      "app",
+      "--device",
+      "00008160-001639DA3480000A",
+      "dist/PrivateListen-norton-device-four-2026-11-09-3752757-iphoneos.app",
+      "--timeout",
+      "60",
+      "--json-output",
+      "attention/shengjian-point-listen-device-accept-2026-11-09/manual-four/device-install.json"
+    ],
+    "commandType" : "devicectl.device.install.app",
+    "environment" : {
+      "TERM" : "dumb"
+    },
+    "jsonVersion" : 5,
+    "outcome" : "success",
+    "version" : "651.32"
+  },
+  "result" : {
+    "deviceIdentifier" : "C57A23AA-BF28-5853-89E1-DF79DEB39F13",
+    "installedApplications" : [
+      {
+        "bundleID" : "com.liuyuxin.privatelisten",
+        "databaseSequenceNumber" : 3824,
+        "databaseUUID" : "321C54A2-FA72-4ED6-8D22-673984D28D93",
+        "installationURL" : "file:///private/var/containers/Bundle/Application/B23BA7FC-5D3F-4BCA-BA61-B5FF03A6461A/PrivateListen-norton-device-four-2026-11-09-3752757-iphoneos.app/",
+        "launchServicesIdentifier" : "unknown",
+        "options" : {
+
+        }
+      }
+    ]
+  }
+}

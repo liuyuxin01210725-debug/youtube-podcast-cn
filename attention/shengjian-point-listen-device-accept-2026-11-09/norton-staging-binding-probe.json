@@ -1,0 +1,58 @@
+{
+  "audio_sha256" : "fcb337634866181e6107eb6cb519006fe9102c756b35f83bb8d1410a04749f25",
+  "checks" : [
+    {
+      "id" : "claim-s1",
+      "pass" : true,
+      "t_end" : 438.89999999999998,
+      "t_start" : 435.39999999999998
+    },
+    {
+      "id" : "claim-s2",
+      "pass" : true,
+      "t_end" : 2837.6999999999998,
+      "t_start" : 2816
+    },
+    {
+      "id" : "claim-s3",
+      "pass" : true,
+      "t_end" : 2904.9000000000001,
+      "t_start" : 2887.4000000000001
+    },
+    {
+      "id" : "claim-i3",
+      "pass" : true,
+      "t_end" : 1194.0999999999999,
+      "t_start" : 1187.4000000000001
+    },
+    {
+      "id" : "claim-i8",
+      "pass" : true,
+      "t_end" : 788.10000000000002,
+      "t_start" : 783.70000000000005
+    },
+    {
+      "id" : "claim-i9",
+      "pass" : true,
+      "t_end" : 2158.0999999999999,
+      "t_start" : 2156.5
+    },
+    {
+      "id" : "claim-i11",
+      "pass" : true,
+      "t_end" : 1544,
+      "t_start" : 1513.8
+    }
+  ],
+  "duration_difference_seconds" : 0.047999999999774445,
+  "duration_seconds" : 3809.1599999999999,
+  "execution_platform" : "macOS",
+  "ffprobe_duration_seconds" : 3809.1120000000001,
+  "input_directory" : "\/Users\/liuyuxin\/Desktop\/音频\/shengjian-library-staging\/episodes\/42786039aaf346a1bf851613199e260a",
+  "packet_id" : "42786039aaf346a1bf851613199e260a-spine-v1-live-20261103T134310Z",
+  "pass" : true,
+  "schema" : "shengjian.point-listen.binding-probe.v1",
+  "semantic_landing_verified" : false,
+  "transcript_hash" : "16962cd5c25558ff",
+  "ui_taps_performed" : false
+}

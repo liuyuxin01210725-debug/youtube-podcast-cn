@@ -70,9 +70,17 @@ final class PlayerModel: ObservableObject {
     private var clipStopAt: Double?
     /// While true, checkpoint/onProgress must not write ListenMark (§13.2 clip path).
     private var clipSuppressListenMark = false
+    private var jumpProgress = JumpContinueProgress()
 
     /// 「听这段」 owns the playhead. The continue pill seeks back to ListenMark instead of toggling.
     var isClipPlayback: Bool { clipSuppressListenMark }
+
+    #if DEBUG
+    /// Read-only device evidence; never substitutes a requested seek for AVPlayer's clock.
+    var pointListenProbeClock: (seconds: Double, playing: Bool) {
+        (player.currentTime().seconds, player.timeControlStatus == .playing)
+    }
+    #endif
 
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
@@ -112,6 +120,7 @@ final class PlayerModel: ObservableObject {
         positionTrusted = false
         resumeSeekInFlight = false
         resumeSeekID += 1
+        jumpProgress.reset()
         clearClipPlayback(restoreListenMarkWrites: true)
         currentID = episode.id
         title = episode.title
@@ -253,11 +262,12 @@ final class PlayerModel: ObservableObject {
     }
 
     func pause() {
+        _ = jumpProgress.observe(seconds: player.currentTime().seconds, isPlaying: player.timeControlStatus == .playing)
         playWhenReady = false
         player.pause()
         isPlaying = false
         let suppress = clipSuppressListenMark
-        clearClipPlayback(restoreListenMarkWrites: true)
+        clearClipPlayback(restoreListenMarkWrites: !suppress)
         if !suppress {
             checkpoint()
         }
@@ -342,28 +352,66 @@ final class PlayerModel: ObservableObject {
         ).end
     }
 
-    func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true) {
+    /// Main point-listen path: exact final-audio seconds, no clip window, no mark on click.
+    @discardableResult
+    func jumpContinue(
+        episode: Episode, row: ListenViewpoint, index: PointListenIndex,
+        packet: ExtractionPacket, audio: PointListenAudio
+    ) -> Bool {
+        guard audio.url == episode.audioURL, audio.url.lastPathComponent == "output.mp3", audio.isCurrent,
+              PointListening.refusal(row: row, index: index, packet: packet, episodeID: episode.id,
+                  audioHash: audio.sha256, duration: audio.duration) == nil,
+              let start = row.tStart else { return false }
+        open(episode, resumeAt: 0)
+        guard errorText == nil else { return false }
+        duration = audio.duration
+        seek(to: start, autoplay: true, waitForPlaybackAdvance: true)
+        return true
+    }
+
+    func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true, waitForPlaybackAdvance: Bool = false) {
+        guard seconds.isFinite, player.currentItem != nil else { return }
         if clearClip {
             clearClipPlayback(restoreListenMarkWrites: true)
         }
+        jumpProgress.reset()
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
-        let shouldPlay = autoplay ?? isPlaying
+        playWhenReady = autoplay ?? isPlaying
+        player.pause()
+        isPlaying = false
+        positionTrusted = false
         pendingResume = nil
         resumeSeekID += 1
-        resumeSeekInFlight = false
+        resumeSeekInFlight = true
+        let seekID = resumeSeekID
+        let generation = openGeneration
         player.seek(
             to: CMTime(seconds: targetSeconds, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
-        ) { [weak self] _ in
+        ) { [weak self] finished in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.openGeneration == generation, self.resumeSeekID == seekID else { return }
+                self.resumeSeekInFlight = false
+                let landed = self.player.currentTime().seconds
+                guard finished, landed.isFinite, landed >= 0, abs(landed - targetSeconds) < 1 else {
+                    self.playWhenReady = false
+                    self.errorText = "未能定位到这一段，请重新打开音频。"
+                    self.updateNowPlaying()
+                    return
+                }
                 self.dropPrematureZero = false
                 self.positionTrusted = true
-                self.current = targetSeconds
-                self.checkpoint()
-                if shouldPlay {
+                self.current = landed
+                if waitForPlaybackAdvance {
+                    self.jumpProgress.didLand(at: landed)
+                    self.lastSaved = -1
+                } else {
+                    self.checkpoint()
+                }
+                if self.playWhenReady {
+                    try? AVAudioSession.sharedInstance().setActive(true)
                     self.player.playImmediately(atRate: self.speed.rate)
                     self.isPlaying = true
                 }
@@ -390,6 +438,7 @@ final class PlayerModel: ObservableObject {
 
     func checkpoint() {
         guard !clipSuppressListenMark else { return }
+        guard jumpProgress.observe(seconds: player.currentTime().seconds, isPlaying: player.timeControlStatus == .playing) else { return }
         guard positionTrusted, let currentID else { return }
         // Observer ticks are 0.5s apart. Leaving must store the clock the
         // listener reached, including a short play that has not crossed 5s.
@@ -410,13 +459,14 @@ final class PlayerModel: ObservableObject {
             duration = itemDuration
         }
         isPlaying = player.timeControlStatus == .playing
+        guard jumpProgress.observe(seconds: seconds, isPlaying: isPlaying) else { return }
         if let stop = clipStopAt, seconds >= stop {
             // Clip end: pause in place; do not write ListenMark (§13.2).
             playWhenReady = false
             player.pause()
             isPlaying = false
             current = stop
-            clearClipPlayback(restoreListenMarkWrites: true)
+            clearClipPlayback(restoreListenMarkWrites: false)
             updateNowPlaying()
             return
         }
@@ -430,7 +480,7 @@ final class PlayerModel: ObservableObject {
 
     private func handleEnded() {
         let suppress = clipSuppressListenMark
-        clearClipPlayback(restoreListenMarkWrites: true)
+        clearClipPlayback(restoreListenMarkWrites: !suppress)
         isPlaying = false
         if duration > 0 { current = duration }
         if !suppress {
