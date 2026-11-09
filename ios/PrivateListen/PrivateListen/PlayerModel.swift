@@ -75,6 +75,13 @@ final class PlayerModel: ObservableObject {
     /// 「听这段」 owns the playhead. The continue pill seeks back to ListenMark instead of toggling.
     var isClipPlayback: Bool { clipSuppressListenMark }
 
+    #if DEBUG
+    /// Read-only device evidence; never substitutes a requested seek for AVPlayer's clock.
+    var pointListenProbeClock: (seconds: Double, playing: Bool) {
+        (player.currentTime().seconds, player.timeControlStatus == .playing)
+    }
+    #endif
+
     init() {
         speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
         let session = AVAudioSession.sharedInstance()

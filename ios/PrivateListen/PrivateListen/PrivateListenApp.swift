@@ -30,6 +30,9 @@ struct PrivateListenApp: App {
                 .environmentObject(pointStars)
                 .environmentObject(listenNotes)
                 .task {
+                    #if DEBUG && !targetEnvironment(simulator)
+                    await NortonDeviceFourProbe.runIfNeeded(player: player, library: library)
+                    #endif
                     #if DEBUG && targetEnvironment(simulator)
                     await PointListenProbe.runIfNeeded(player: player, library: library)
                     #endif
