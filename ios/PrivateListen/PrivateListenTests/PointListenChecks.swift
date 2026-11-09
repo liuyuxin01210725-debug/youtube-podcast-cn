@@ -33,6 +33,37 @@ struct PointListenChecks {
         precondition(audio.sha256 == index.audioSHA256 && audio.isCurrent && abs(audio.duration - 90) < 1)
         print("ok  bound isolated output.mp3 decoded; semantic order and question text; span stays String?")
 
+        // Production packets carry full SHA-256; navigation uses its 16-hex fingerprint.
+        func decodedPacket(hash: String, loose: Bool = false) throws -> ExtractionPacket {
+            var object = try JSONSerialization.jsonObject(with: JSONEncoder().encode(packet)) as! [String: Any]
+            object["transcript_hash"] = hash
+            if loose { object["schema_id"] = "health-longevity" }
+            return ExtractPacketDecoding.decode(try JSONSerialization.data(withJSONObject: object))!
+        }
+        let fingerprint = index.transcriptHash
+        for hash in [fingerprint, fingerprint.uppercased(), fingerprint + String(repeating: "a", count: 48),
+                     fingerprint.uppercased() + String(repeating: "A", count: 48)] {
+            for loose in [false, true] {
+                let production = try decodedPacket(hash: hash, loose: loose)
+                precondition(production.transcriptHash == fingerprint, "packet decode must normalize 16/64 hex to lowercase 16")
+                precondition(!refused(rows[0], index, production), "matching production fingerprint must allow jump")
+            }
+            var rawPacket = packet; rawPacket.transcriptHash = hash
+            var rawIndex = index; rawIndex.transcriptHash = hash
+            precondition(!refused(rows[0], rawIndex, rawPacket))
+            let decodedIndex = try JSONDecoder().decode(PointListenIndex.self, from: JSONEncoder().encode(rawIndex))
+            precondition(decodedIndex.transcriptHash == fingerprint)
+            precondition(!refused(rows[0], decodedIndex, rawPacket))
+        }
+        for hash in ["deadbeefdeadbeef", "deadbeefdeadbeef" + String(repeating: "a", count: 48),
+                     fingerprint + "z", fingerprint + String(repeating: "z", count: 48), ""] {
+            let production = try decodedPacket(hash: hash)
+            precondition(refused(rows[0], index, production), "mismatched or malformed transcript must refuse jump")
+            var invalidIndex = index; invalidIndex.transcriptHash = hash
+            precondition(refused(rows[0], invalidIndex))
+        }
+        print("ok  PL-D3 production 64→16 and uppercase normalize on strict/loose decode and comparison; wrong 16/malformed denied")
+
         var missing = rows[0]; missing.tStart = nil
         var changed = index; changed.viewpoints[0] = missing
         precondition(refused(missing, changed))

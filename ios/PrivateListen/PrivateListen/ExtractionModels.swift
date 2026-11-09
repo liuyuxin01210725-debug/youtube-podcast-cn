@@ -1,5 +1,16 @@
 import Foundation
 
+/// Extract producers use either a short fingerprint or full SHA-256.
+enum TranscriptFingerprint {
+    static func normalized(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let lower = value.lowercased()
+        guard [16, 64].contains(lower.count),
+              lower.allSatisfy({ "0123456789abcdef".contains($0) }) else { return nil }
+        return String(lower.prefix(16))
+    }
+}
+
 /// 声间抽取对象模型（对齐设计 §2 / §13）。
 enum ExtractMode: String, Codable, Hashable {
     case light, deep, manual

@@ -42,6 +42,20 @@ struct PointListenIndex: Codable, Hashable {
     }
 }
 
+extension PointListenIndex {
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        workId = try values.decode(String.self, forKey: .workId)
+        packetId = try values.decode(String.self, forKey: .packetId)
+        let hash = try values.decode(String.self, forKey: .transcriptHash)
+        transcriptHash = TranscriptFingerprint.normalized(hash) ?? hash
+        audioSHA256 = try values.decode(String.self, forKey: .audioSHA256)
+        outputVersion = try values.decodeIfPresent(String.self, forKey: .outputVersion)
+        timeline = try values.decode(String.self, forKey: .timeline)
+        viewpoints = try values.decode([ListenViewpoint].self, forKey: .viewpoints)
+    }
+}
+
 /// A locally verified final audio file. Never inferred from a packet/document hash.
 struct PointListenAudio {
     let url: URL
@@ -109,7 +123,8 @@ enum PointListening {
         guard let index else { return "尚无成片绑定索引" }
         guard index.workId == episodeID, packet.workId == episodeID,
               !index.packetId.isEmpty, index.packetId == packet.packetId else { return "索引不属于当前提炼包" }
-        guard isHex(index.transcriptHash, count: 16), index.transcriptHash == packet.transcriptHash else { return "索引译稿版本已过期" }
+        guard let fingerprint = TranscriptFingerprint.normalized(index.transcriptHash),
+              fingerprint == TranscriptFingerprint.normalized(packet.transcriptHash) else { return "索引译稿版本已过期" }
         guard index.timeline == "output.mp3.seconds" else { return "索引不是中文成片秒轴" }
         guard Set(index.viewpoints.map(\.id)).count == index.viewpoints.count,
               index.viewpoints.allSatisfy({ !$0.id.isEmpty }) else { return "索引条目标识无效" }
