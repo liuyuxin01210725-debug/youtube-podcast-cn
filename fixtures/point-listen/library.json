@@ -1,0 +1,14 @@
+{
+  "episodes": [
+    {
+      "id": "point-listen-isolated",
+      "title": "点段跳听隔离样包 · 测试音",
+      "show": "本机验证",
+      "guests": [],
+      "lens_ids": [],
+      "created_at": "2026-11-09T00:00:00Z",
+      "duration_sec": 90.0,
+      "file": "output.mp3"
+    }
+  ]
+}
