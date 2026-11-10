@@ -59,6 +59,14 @@ if "playheadToPersist" not in model:
     fail("离开播放器没有把真实播放头写入 ListenMark")
 if "guard !clipSuppressListenMark else { return }" not in model:
     fail("听这段仍必须拦住 checkpoint")
+if "PlayerPlaybackPolicy.shouldRestartFromBeginning" not in model:
+    fail("播放到终点再点播放必须走重头开播策略")
+if "PlayerPlaybackPolicy.progressAfterSeek" not in model:
+    fail("seek 落地后不能再让旧终点时钟盖掉 0")
+
+policy = read("PlayerPlaybackPolicy.swift")
+if "shouldRestartFromBeginning" not in policy or "progressAfterSeek" not in policy:
+    fail("PlayerPlaybackPolicy 缺终点重播 / seek 持久化规则")
 
 store = read("LibraryStore.swift")
 if "entry.seconds >= 5" not in store:
@@ -73,7 +81,15 @@ if "继续播放" not in section:
 note_src = read("ListenNoteSection.swift")
 if "听后感" not in note_src:
     fail("听后感文案丢了")
+if "ListenNoteEditor(" not in note_src:
+    fail("听后感必须用可滚动的 ListenNoteEditor（不能只剩夹在 ScrollView 里的 TextEditor）")
+if "revealEndToken" not in note_src:
+    fail("长听后感重开要能露出文末（revealEndToken）")
 read("ListenNoteStore.swift")
+read("ListenNoteEditor.swift")
+editor_policy = read("ListenNoteEditorPolicy.swift")
+if "shouldRevealEndOnLoad" not in editor_policy or "shouldMoveCaretToEndOnFocus" not in editor_policy:
+    fail("ListenNoteEditorPolicy 缺重开露文末 / 首焦到文末规则")
 
 mock = read("MockExtractor.swift")
 if "enum ExtractorGate" not in mock or "struct MockExtractor" not in mock:

@@ -1,8 +1,8 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
-.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux shengjian-source-gate shengjian-before-claim-ready
+.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux test-player-listen-note-ui shengjian-source-gate shengjian-before-claim-ready
 
-test: test-public test-podcast test-tts test-extract-display test-continue-ux shengjian-source-gate
+test: test-public test-podcast test-tts test-extract-display test-continue-ux test-player-listen-note-ui shengjian-source-gate
 	@$(PYTHON) -m unittest tests.test_studio_engine tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
 	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh bin/setup-studio.sh bin/中文播客工作台.command
 	@echo "All tests passed."
@@ -75,11 +75,32 @@ test-continue-ux:
 		/tmp/library-list-probe; \
 	fi
 
+# 播放到终点再点播放应重头开播；长听后感重开/首焦应落到文末。无 swiftc 时跑 Python 镜像表。
+test-player-listen-note-ui:
+	@$(PYTHON) -m unittest tests.test_player_listen_note_ui_policy
+	@SWIFTC=$$(command -v swiftc || true); \
+	if [ -z "$$SWIFTC" ] && command -v xcrun >/dev/null 2>&1; then \
+		SWIFTC=$$(xcrun --find swiftc 2>/dev/null || true); \
+	fi; \
+	if [ -z "$$SWIFTC" ]; then \
+		echo "swiftc not found; python mirror already covered player/listen-note UI policy"; \
+	else \
+		"$$SWIFTC" -parse-as-library -o /tmp/player-playback-policy-probe \
+			ios/PrivateListen/PrivateListen/ContinueListening.swift \
+			ios/PrivateListen/PrivateListen/PlayerPlaybackPolicy.swift \
+			ios/PrivateListen/PrivateListenTests/PlayerPlaybackPolicyProbe.swift && \
+		/tmp/player-playback-policy-probe && \
+		"$$SWIFTC" -parse-as-library -o /tmp/listen-note-editor-policy-probe \
+			ios/PrivateListen/PrivateListen/ListenNoteEditorPolicy.swift \
+			ios/PrivateListen/PrivateListenTests/ListenNoteEditorPolicyProbe.swift && \
+		/tmp/listen-note-editor-policy-probe; \
+	fi
+
 # 声间装机 / 宣称可听之前必须跑（没有手机 UI 自动化时，单测 + 源码/dylib 字符串即门禁）。
 # 继续播放短播旅程、播放页听后感仍在提炼前、mock 不得写成 ready。没有 swiftc 则失败，不能跳过。
 shengjian-before-claim-ready:
-	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display shengjian-source-gate
-	@echo "声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + mock 不冒充 ready）。"
+	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display test-player-listen-note-ui shengjian-source-gate
+	@echo "声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + 终点重播/文末追加 + mock 不冒充 ready）。"
 
 shengjian-source-gate:
 	@bash attention/shengjian-pre-claim-ready.sh

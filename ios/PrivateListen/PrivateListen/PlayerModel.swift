@@ -242,7 +242,13 @@ final class PlayerModel: ObservableObject {
             return
         }
         guard player.currentItem != nil else { return }
-        if duration > 1, current >= duration - 0.5 {
+        // AVPlayer playImmediately is a no-op when the item is already at the end.
+        // Restart from 0 so a finished isolate (e.g. 0:08/0:08) still plays on tap.
+        if PlayerPlaybackPolicy.shouldRestartFromBeginning(
+            current: current,
+            duration: duration,
+            liveClock: player.currentTime().seconds
+        ) {
             seek(to: 0, autoplay: true)
             return
         }
@@ -348,22 +354,42 @@ final class PlayerModel: ObservableObject {
         }
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
-        let shouldPlay = autoplay ?? isPlaying
+        // Capture intent in playWhenReady so a play tap during the seek still starts after landing.
+        playWhenReady = autoplay ?? isPlaying
+        player.pause()
+        isPlaying = false
         pendingResume = nil
         resumeSeekID += 1
-        resumeSeekInFlight = false
+        resumeSeekInFlight = true
+        let seekID = resumeSeekID
+        let generation = openGeneration
         player.seek(
             to: CMTime(seconds: targetSeconds, preferredTimescale: 600),
             toleranceBefore: .zero,
             toleranceAfter: .zero
-        ) { [weak self] _ in
+        ) { [weak self] finished in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.openGeneration == generation, self.resumeSeekID == seekID else { return }
+                self.resumeSeekInFlight = false
+                guard finished else {
+                    self.playWhenReady = false
+                    self.updateNowPlaying()
+                    return
+                }
                 self.dropPrematureZero = false
                 self.positionTrusted = true
-                self.current = targetSeconds
-                self.checkpoint()
-                if shouldPlay {
+                let liveClock = self.player.currentTime().seconds
+                let landed = PlayerPlaybackPolicy.progressAfterSeek(
+                    target: targetSeconds,
+                    liveClock: liveClock
+                )
+                self.current = landed
+                self.lastSaved = landed
+                if !self.clipSuppressListenMark, let currentID = self.currentID {
+                    self.onProgress?(currentID, landed, self.duration)
+                }
+                if self.playWhenReady {
+                    try? AVAudioSession.sharedInstance().setActive(true)
                     self.player.playImmediately(atRate: self.speed.rate)
                     self.isPlaying = true
                 }
@@ -432,7 +458,13 @@ final class PlayerModel: ObservableObject {
         let suppress = clipSuppressListenMark
         clearClipPlayback(restoreListenMarkWrites: true)
         isPlaying = false
-        if duration > 0 { current = duration }
+        playWhenReady = false
+        if let itemDuration = player.currentItem?.duration.seconds, itemDuration.isFinite, itemDuration > 0 {
+            duration = itemDuration
+        }
+        if duration > 0 {
+            current = duration
+        }
         if !suppress {
             checkpoint()
         }
