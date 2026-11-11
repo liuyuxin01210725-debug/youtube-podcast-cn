@@ -22,6 +22,17 @@ import Foundation
         var heard = BookMark(reference: r, bookTitle: "A", chapterTitle: "One")
         for i in 1...40 { heard = BookProgressPolicy.record(heard, seconds: Double(i)/2, duration: 20, playedDelta: 0.5, ended: i == 40, at: Double(i)) }
         precondition(heard.finished)
+        var fast = BookMark(reference: r, bookTitle: "A", chapterTitle: "One")
+        var previous: Double? = nil
+        for second in 1...9 {
+            let clock = Double(second)
+            let delta = BookProgressPolicy.actualAdvance(previous: previous, current: clock, playing: true, rate: 2)
+            fast = BookProgressPolicy.record(fast, seconds: clock, duration: 10, playedDelta: delta, ended: false, at: clock)
+            previous = clock
+        }
+        let tail = BookProgressPolicy.actualAdvance(previous: previous, current: 10, playing: true, rate: 2)
+        fast = BookProgressPolicy.record(fast, seconds: 10, duration: 10, playedDelta: tail, ended: true, at: 10)
+        precondition(fast.finished, "2x natural EOF must retain the final played fragment")
         print("BookProgressProbe PASS: short listen, one Continue winner, no seek/note touch, distinct revisions, coverage-based EOF")
     }
 }

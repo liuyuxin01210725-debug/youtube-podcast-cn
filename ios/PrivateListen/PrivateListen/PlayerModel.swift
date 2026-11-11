@@ -494,7 +494,7 @@ final class PlayerModel: ObservableObject {
         isPlaying = player.timeControlStatus == .playing
         if let ref = currentBookReference {
             let delta = BookProgressPolicy.actualAdvance(previous: bookObservedClock, current: seconds, playing: isPlaying, rate: speed.rate)
-            bookObservedClock = seconds
+            if isPlaying { bookObservedClock = seconds }
             if delta > 0 { onBookProgress?(ref, seconds, duration, delta, false) }
             updateNowPlayingProgress()
             return
@@ -530,7 +530,11 @@ final class PlayerModel: ObservableObject {
             current = duration
         }
         if let ref = currentBookReference {
-            onBookProgress?(ref, current, duration, 0, true)
+            // Keep the final genuine fragment at natural EOF (important at 2x).
+            // Explicit seeks clear bookObservedClock, so seek-to-end still earns zero.
+            let endDelta = BookProgressPolicy.actualAdvance(previous: bookObservedClock, current: current, playing: positionTrusted && !resumeSeekInFlight, rate: speed.rate)
+            onBookProgress?(ref, current, duration, endDelta, true)
+            bookObservedClock = nil
         } else if !suppress {
             checkpoint()
         }
