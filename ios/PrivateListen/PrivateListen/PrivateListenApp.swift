@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct PrivateListenApp: App {
     @StateObject private var library = LibraryStore()
+    @StateObject private var books = BookStore()
     @StateObject private var player = PlayerModel()
     @StateObject private var extracts = ExtractStore()
     @StateObject private var pointStars = PointStarStore()
@@ -25,6 +26,7 @@ struct PrivateListenApp: App {
                 #endif
             }
                 .environmentObject(library)
+                .environmentObject(books)
                 .environmentObject(player)
                 .environmentObject(extracts)
                 .environmentObject(pointStars)

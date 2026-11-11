@@ -9,11 +9,13 @@ import UniformTypeIdentifiers
 /// Extract badges and the extract design entry stay as they are.
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var books: BookStore
     @EnvironmentObject private var player: PlayerModel
     @EnvironmentObject private var extracts: ExtractStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
     @State private var picking = false
+    @State private var pickingBook = false
     @State private var showExtractDesign = false
     @State private var filter: LibraryShelf.Chip = LibraryShelf.defaultChip
     @State private var searchText = ""
@@ -24,13 +26,13 @@ struct LibraryView: View {
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if !library.hasCloudFolder && library.episodes.isEmpty {
+                if !library.hasCloudFolder && library.episodes.isEmpty && books.editions.isEmpty {
                     prompt(
                         title: "选择资料库",
                         systemImage: "folder",
                         detail: "在 iCloud 云盘里选中「中文播客私人库」。只需选一次。分享进来的链接和完整生成的节目都在这个文件夹里。"
                     )
-                } else if library.episodes.isEmpty && library.inbox.isEmpty {
+                } else if library.episodes.isEmpty && library.inbox.isEmpty && books.editions.isEmpty {
                     prompt(
                         title: "还没有节目",
                         systemImage: "music.note.list",
@@ -65,6 +67,8 @@ struct LibraryView: View {
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Menu {
+                        Button("导入书包（离线目录）") { pickingBook = true; picking = true }
+                            .disabled(books.importing)
                         Button {
                             Task { @MainActor in
                                 showExtractDesign = true
@@ -83,6 +87,10 @@ struct LibraryView: View {
             }
             .searchable(text: $searchText, isPresented: $searchPresented, prompt: "标题、节目、嘉宾")
             .onAppear {
+                player.onBookProgress = { ref, seconds, duration, delta, ended in
+                    Task { @MainActor in books.remember(ref, seconds: seconds, duration: duration, playedDelta: delta, ended: ended) }
+                }
+                books.reload()
                 player.onProgress = { id, seconds, duration in
                     Task { @MainActor in
                         library.remember(id: id, seconds: seconds, duration: duration)
@@ -119,12 +127,17 @@ struct LibraryView: View {
             .fileImporter(isPresented: $picking, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
-                    if let url = urls.first { library.adopt(url) }
+                    if let url = urls.first {
+                        if pickingBook { Task { await books.importPackage(url) } }
+                        else { library.adopt(url) }
+                    }
+                    pickingBook = false
                 case .failure(let error):
                     if (error as? CocoaError)?.code == .userCancelled { return }
                     library.message = "没有选中资料库文件夹。"
                 }
             }
+            .navigationDestination(for: BookRoute.self) { route in BookDetailView(route: route) }
             .navigationDestination(for: Episode.self) { episode in
                 PlayerView(episode: episode)
             }
@@ -167,7 +180,15 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if showsContinueSection && !continueSectionRows.isEmpty {
+            if let error = books.errorText { Section { Text(error).font(.footnote).foregroundStyle(.secondary) } }
+            if showsContinueSection && bookWinsContinue, let mark = books.continueMark {
+                Section("继续播放") {
+                    NavigationLink(value: BookRoute(bookID: mark.reference.bookID, revision: mark.reference.packageRevision, chapterID: mark.reference.chapterID, play: true)) {
+                        VStack(alignment: .leading) { Text(mark.bookTitle); Text("\(mark.chapterTitle) · 上次 \(Int(mark.seconds)) 秒").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    .swipeActions { Button("隐藏") { books.dismissContinue(mark) } }
+                }
+            } else if showsContinueSection && !continueSectionRows.isEmpty {
                 ContinueListeningSection(
                     rows: continueSectionRows,
                     onPlay: playFromLibrary,
@@ -185,6 +206,19 @@ struct LibraryView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
+                    }
+                }
+            }
+            if !visibleBooks.isEmpty {
+                Section("书籍") {
+                    ForEach(visibleBooks) { edition in
+                        NavigationLink(value: BookRoute(bookID: edition.manifest.bookId, revision: edition.manifest.packageRevision)) {
+                            VStack(alignment: .leading) {
+                                Text(edition.manifest.title)
+                                Text(books.heard(edition) ? "当前章轨已听 · 非整本完整性认证" : "\(edition.manifest.chapters.count) 章 · 独立译本与朗读稿")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
             }
@@ -384,6 +418,16 @@ struct LibraryView: View {
                 filter = LibraryShelf.defaultChip
             }
         }
+    }
+
+    private var visibleBooks: [BookEdition] {
+        guard filter == LibraryShelf.defaultChip || filter == .all || filter == .finished else { return [] }
+        return books.selectedEditions.filter { e in
+            (searchText.isEmpty || e.manifest.title.localizedCaseInsensitiveContains(searchText)) && (filter == .all || (filter == .finished ? books.heard(e) : !books.heard(e)))
+        }
+    }
+    private var bookWinsContinue: Bool {
+        BookProgressPolicy.bookWins(bookTouch: books.continueMark?.lastActuallyListenedAt, podcastTouch: library.continueEntries(in: library.episodes).first?.touchedAt)
     }
 
     private var showsContinueSection: Bool {

@@ -1551,7 +1551,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(
             requirements,
             [
-                "edge-tts==7.2.8",
+                "edge-tts==7.3.1",
                 "pydub==0.25.1",
                 'audioop-lts==0.2.2; python_version >= "3.13"',
                 "yt-dlp==2026.8.19",

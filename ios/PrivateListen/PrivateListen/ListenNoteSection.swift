@@ -16,7 +16,9 @@ struct ListenNoteSection: View {
     @State private var insightSaved = false
     @State private var libraryHit: ListenNoteDownstream.LibraryHit?
     @State private var libraryChecked = false
-    @FocusState private var focused: Bool
+    @State private var isEditing = false
+    /// Bumped on load / episode switch so the editor reveals the end of a long note.
+    @State private var revealEndToken = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -47,12 +49,21 @@ struct ListenNoteSection: View {
                         .padding(.vertical, 16)
                         .allowsHitTesting(false)
                 }
-                TextEditor(text: $draftText)
-                    .frame(minHeight: 88, maxHeight: 160)
-                    .padding(8)
-                    .scrollContentBackground(.hidden)
-                    .focused($focused)
-                    .accessibilityLabel("听后感")
+                // Fixed height + UITextView: scrolls the full body inside the player ScrollView,
+                // and reopens / first-focuses at the end so append is safe.
+                ListenNoteEditor(
+                    text: $draftText,
+                    revealEndToken: revealEndToken
+                ) { editing in
+                    if isEditing, !editing {
+                        commitNow(flash: true)
+                    }
+                    isEditing = editing
+                }
+                .frame(height: 160)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+                .accessibilityLabel("听后感")
             }
             .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
@@ -83,11 +94,6 @@ struct ListenNoteSection: View {
             hideDownstream = false
         }
         .onChange(of: draftText) { _, _ in scheduleCommit() }
-        .onChange(of: focused) { old, new in
-            if old == true, new == false {
-                commitNow(flash: true)
-            }
-        }
         .onDisappear { commit() }
         .onAppear {
             if listenNotes.shouldShowFinishedPrompt(episodeId: episodeId, isFinished: isFinished) {
@@ -331,12 +337,16 @@ struct ListenNoteSection: View {
             if n.hasContent {
                 refreshDownstream(writeInsightIfNeeded: false)
             }
+            if ListenNoteEditorPolicy.shouldRevealEndOnLoad(text: draftText) {
+                revealEndToken += 1
+            }
         } else {
             draftText = ""
             tags = []
             libraryHit = nil
             libraryChecked = false
             insightSaved = false
+            revealEndToken += 1
         }
     }
 

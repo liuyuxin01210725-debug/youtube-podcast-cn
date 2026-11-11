@@ -37,6 +37,9 @@ enum ListenSpeed: String, CaseIterable, Identifiable {
 
 final class PlayerModel: ObservableObject {
     @Published private(set) var currentID: String?
+    @Published private(set) var currentBookReference: BookPlaybackReference?
+    var onBookProgress: ((BookPlaybackReference, Double, Double, Double, Bool) -> Void)?
+    private var bookObservedClock: Double?
     @Published private(set) var title = ""
     @Published private(set) var isPlaying = false
     @Published private(set) var current: Double = 0
@@ -104,10 +107,20 @@ final class PlayerModel: ObservableObject {
     }
 
     func open(_ episode: Episode, resumeAt: Double, force: Bool = false) {
-        if !force, currentID == episode.id, errorText == nil, player.currentItem != nil {
+        openMedia(podcastID: episode.id, book: nil, mediaTitle: episode.title, mediaArtist: Self.showName(in: episode.title), url: episode.audioURL, artwork: ArtworkImage.nowPlayingItem(for: episode), mediaDuration: episode.durationSec ?? 0, resumeAt: resumeAt, force: force)
+    }
+
+    func openBook(reference: BookPlaybackReference, title: String, bookTitle: String, url: URL, duration: Double, resumeAt: Double) {
+        openMedia(podcastID: nil, book: reference, mediaTitle: title, mediaArtist: bookTitle, url: url, artwork: nil, mediaDuration: duration, resumeAt: resumeAt, force: false)
+        // A Continue tap must resume an already-open paused chapter too.
+        resume()
+    }
+
+    private func openMedia(podcastID: String?, book: BookPlaybackReference?, mediaTitle: String, mediaArtist: String, url: URL, artwork: MPMediaItemArtwork?, mediaDuration: Double, resumeAt: Double, force: Bool) {
+        if !force, currentID == podcastID && currentBookReference == book, errorText == nil, player.currentItem != nil {
             // Cover may have arrived after the first open — refresh Now Playing artwork.
-            artist = Self.showName(in: episode.title)
-            nowArtwork = ArtworkImage.nowPlayingItem(for: episode)
+            artist = mediaArtist
+            nowArtwork = artwork
             updateNowPlaying()
             return
         }
@@ -122,24 +135,26 @@ final class PlayerModel: ObservableObject {
         resumeSeekID += 1
         jumpProgress.reset()
         clearClipPlayback(restoreListenMarkWrites: true)
-        currentID = episode.id
-        title = episode.title
-        artist = Self.showName(in: episode.title)
-        nowArtwork = ArtworkImage.nowPlayingItem(for: episode)
+        currentID = podcastID
+        currentBookReference = book
+        bookObservedClock = nil
+        self.title = mediaTitle
+        artist = mediaArtist
+        nowArtwork = artwork
         errorText = nil
         let start = max(0, resumeAt)
         current = start
-        duration = episode.durationSec ?? 0
+        duration = mediaDuration
         lastSaved = -1
-        guard LocalAudio.isPlayable(episode.audioURL) else {
-            try? FileManager.default.startDownloadingUbiquitousItem(at: episode.audioURL)
+        guard LocalAudio.isPlayable(url) else {
+            try? FileManager.default.startDownloadingUbiquitousItem(at: url)
             errorText = "音频还在从 iCloud 下载，稍后再播放。"
             player.replaceCurrentItem(with: nil)
             isPlaying = false
             updateNowPlaying()
             return
         }
-        let item = AVPlayerItem(url: episode.audioURL)
+        let item = AVPlayerItem(url: url)
         itemWatchers.removeAll()
         if start > 1 {
             pendingResume = start
@@ -251,7 +266,13 @@ final class PlayerModel: ObservableObject {
             return
         }
         guard player.currentItem != nil else { return }
-        if duration > 1, current >= duration - 0.5 {
+        // AVPlayer playImmediately is a no-op when the item is already at the end.
+        // Restart from 0 so a finished isolate (e.g. 0:08/0:08) still plays on tap.
+        if PlayerPlaybackPolicy.shouldRestartFromBeginning(
+            current: current,
+            duration: duration,
+            liveClock: player.currentTime().seconds
+        ) {
             seek(to: 0, autoplay: true)
             return
         }
@@ -375,6 +396,7 @@ final class PlayerModel: ObservableObject {
             clearClipPlayback(restoreListenMarkWrites: true)
         }
         jumpProgress.reset()
+        bookObservedClock = nil
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
         playWhenReady = autoplay ?? isPlaying
@@ -403,12 +425,17 @@ final class PlayerModel: ObservableObject {
                 }
                 self.dropPrematureZero = false
                 self.positionTrusted = true
-                self.current = landed
+                self.current = PlayerPlaybackPolicy.progressAfterSeek(target: targetSeconds, liveClock: landed)
                 if waitForPlaybackAdvance {
                     self.jumpProgress.didLand(at: landed)
                     self.lastSaved = -1
-                } else {
-                    self.checkpoint()
+                } else if !self.clipSuppressListenMark {
+                    self.lastSaved = self.current
+                    if let ref = self.currentBookReference {
+                        self.onBookProgress?(ref, self.current, self.duration, 0, false)
+                    } else if let id = self.currentID {
+                        self.onProgress?(id, self.current, self.duration)
+                    }
                 }
                 if self.playWhenReady {
                     try? AVAudioSession.sharedInstance().setActive(true)
@@ -439,6 +466,12 @@ final class PlayerModel: ObservableObject {
     func checkpoint() {
         guard !clipSuppressListenMark else { return }
         guard jumpProgress.observe(seconds: player.currentTime().seconds, isPlaying: player.timeControlStatus == .playing) else { return }
+        if let ref = currentBookReference {
+            guard positionTrusted else { return }
+            current = ContinueListening.playheadToPersist(observed: current, liveClock: player.currentTime().seconds)
+            onBookProgress?(ref, current, duration, 0, false)
+            return
+        }
         guard positionTrusted, let currentID else { return }
         // Observer ticks are 0.5s apart. Leaving must store the clock the
         // listener reached, including a short play that has not crossed 5s.
@@ -459,6 +492,13 @@ final class PlayerModel: ObservableObject {
             duration = itemDuration
         }
         isPlaying = player.timeControlStatus == .playing
+        if let ref = currentBookReference {
+            let delta = BookProgressPolicy.actualAdvance(previous: bookObservedClock, current: seconds, playing: isPlaying, rate: speed.rate)
+            bookObservedClock = seconds
+            if delta > 0 { onBookProgress?(ref, seconds, duration, delta, false) }
+            updateNowPlayingProgress()
+            return
+        }
         guard jumpProgress.observe(seconds: seconds, isPlaying: isPlaying) else { return }
         if let stop = clipStopAt, seconds >= stop {
             // Clip end: pause in place; do not write ListenMark (§13.2).
@@ -482,8 +522,16 @@ final class PlayerModel: ObservableObject {
         let suppress = clipSuppressListenMark
         clearClipPlayback(restoreListenMarkWrites: !suppress)
         isPlaying = false
-        if duration > 0 { current = duration }
-        if !suppress {
+        playWhenReady = false
+        if let itemDuration = player.currentItem?.duration.seconds, itemDuration.isFinite, itemDuration > 0 {
+            duration = itemDuration
+        }
+        if duration > 0 {
+            current = duration
+        }
+        if let ref = currentBookReference {
+            onBookProgress?(ref, current, duration, 0, true)
+        } else if !suppress {
             checkpoint()
         }
         updateNowPlaying()
@@ -531,7 +579,7 @@ final class PlayerModel: ObservableObject {
     }
 
     private func updateNowPlaying() {
-        guard currentID != nil else {
+        guard currentID != nil || currentBookReference != nil else {
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             return
         }
@@ -553,7 +601,7 @@ final class PlayerModel: ObservableObject {
     }
 
     private func updateNowPlayingProgress() {
-        guard currentID != nil else { return }
+        guard currentID != nil || currentBookReference != nil else { return }
         guard var info = MPNowPlayingInfoCenter.default().nowPlayingInfo, !info.isEmpty else {
             updateNowPlaying()
             return

@@ -1,8 +1,8 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
-.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen shengjian-source-gate shengjian-before-claim-ready
+.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books shengjian-source-gate shengjian-before-claim-ready
 
-test: test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen shengjian-source-gate
+test: test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books shengjian-source-gate
 	@$(PYTHON) -m unittest tests.test_studio_engine tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
 	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh bin/setup-studio.sh bin/中文播客工作台.command
 	@echo "All tests passed."
@@ -75,6 +75,27 @@ test-continue-ux:
 		/tmp/library-list-probe; \
 	fi
 
+test-player-listen-note-ui:
+	@$(PYTHON) -m unittest discover -s tests -p test_player_listen_note_ui_policy.py
+	@SWIFTC=$$(command -v swiftc || true); \
+	if [ -z "$$SWIFTC" ] && command -v xcrun >/dev/null 2>&1; then \
+		SWIFTC=$$(xcrun --find swiftc 2>/dev/null || true); \
+	fi; \
+	if [ -z "$$SWIFTC" ]; then \
+		echo "swiftc not found; python mirror already covered player/listen-note UI policy"; \
+	else \
+		"$$SWIFTC" -parse-as-library -o /tmp/player-playback-policy-probe \
+			ios/PrivateListen/PrivateListen/ContinueListening.swift \
+			ios/PrivateListen/PrivateListen/PlayerPlaybackPolicy.swift \
+			ios/PrivateListen/PrivateListenTests/PlayerPlaybackPolicyProbe.swift && \
+		/tmp/player-playback-policy-probe && \
+		"$$SWIFTC" -parse-as-library -o /tmp/listen-note-editor-policy-probe \
+			ios/PrivateListen/PrivateListen/ListenNoteEditorPolicy.swift \
+			ios/PrivateListen/PrivateListenTests/ListenNoteEditorPolicyProbe.swift && \
+		/tmp/listen-note-editor-policy-probe; \
+	fi
+
+
 # 点段跳听：实际本地音频绑定 + PL-D* + seek/播放完成边界；AVFoundation 验证需要 macOS。
 test-point-listen:
 	@if [ "$$(uname -s)" != Darwin ] || ! command -v swiftc >/dev/null 2>&1; then \
@@ -96,8 +117,21 @@ test-point-listen:
 
 # 声间装机 / 宣称可听前必须跑。没有平台/编译器则失败，不能跳过；真机 UI 四连另验。
 shengjian-before-claim-ready:
-	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display test-point-listen shengjian-source-gate
+	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display test-point-listen test-player-listen-note-ui test-books shengjian-source-gate
 	@echo "声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + mock 不冒充 ready）。"
 
 shengjian-source-gate:
 	@bash attention/shengjian-pre-claim-ready.sh
+
+# Isolated, no-provider book tests; native IO runs only against a self-authored draft package.
+test-books:
+	@$(PYTHON) tests/test_book_integration.py
+	@if [ "$$(uname -s)" != Darwin ] || ! command -v swiftc >/dev/null 2>&1; then \
+		if [ "$${SHENGJIAN_REQUIRE_SWIFTC:-}" = 1 ]; then echo "book native probes require macOS + swiftc" >&2; exit 1; fi; \
+		echo "skip book native probes (requires macOS + swiftc)"; \
+	else \
+		tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/shengjian-book-probe.XXXXXX") && \
+		package=$$(PYTHONPATH=scripts $(PYTHON) tests/book_import_fixture.py "$$tmp") && \
+		swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListenTests/BookProgressProbe.swift -o "$$tmp/progress" && "$$tmp/progress" && \
+		swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListen/BookStore.swift ios/PrivateListen/PrivateListenTests/BookImportProbe.swift -o "$$tmp/import" && "$$tmp/import" "$$package" "$$tmp/documents"; \
+	fi

@@ -6,7 +6,7 @@
   1. 本机产品对抗审：`shengjian-extract-adversarial-2026-10-29.md`（裁定：**条件够**）
   2. Cursor 云端对抗审：`docs/adversarial-review-extract-design-2026-10-29.md`（落 [PR#20](https://github.com/liuyuxin01210725-debug/youtube-podcast-cn/pull/20)；裁定：**不够**）
   3. 权威规格：`shengjian-extract-design-v1-2026-10-29.md`（本合并后升 **v1.1**，见 §13）
-- **Codex 轮**：截至合并时 Mac 路径 `/Users/liuyuxin/Desktop/attention-tmp/shengjian-extract-adversarial-codex-2026-10-29.md` **尚不存在** → 跳过；见文末「Codex 轮增补」。
+- **Codex 轮**：截至合并时 Mac 路径 `<attention-tmp>/shengjian-extract-adversarial-codex-2026-10-29.md` **尚不存在** → 跳过；见文末「Codex 轮增补」。
 
 ---
 
@@ -132,7 +132,7 @@
 
 ## 9. Codex 轮增补
 
-**状态（2026-10-29 Asia/Shanghai 合并时）**：Mac 上 `/Users/liuyuxin/Desktop/attention-tmp/shengjian-extract-adversarial-codex-2026-10-29.md` **不存在**（CopyToBox 源文件未找到）。
+**状态（2026-10-29 Asia/Shanghai 合并时）**：Mac 上 `<attention-tmp>/shengjian-extract-adversarial-codex-2026-10-29.md` **不存在**（CopyToBox 源文件未找到）。
 
 → **本轮跳过。** 若后续 Codex 稿到位：只在本节增补风险，**不改已写 §13 五条硬补丁**，除非发现新的合并级 P0（届时另开补丁号，不静默改写已验收条文）。
 

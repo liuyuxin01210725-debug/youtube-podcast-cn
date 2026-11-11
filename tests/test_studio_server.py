@@ -1,4 +1,4 @@
-import http.client, json, sys, tempfile, threading, time, unittest
+import http.client, json, sys, tempfile, threading, time, unittest, os
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
@@ -7,7 +7,7 @@ from studio_server import Studio, Handler, ThreadingHTTPServer, write, read
 class ServerTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory(); self.studio=Studio(self.tmp.name)
-        self.http=ThreadingHTTPServer(('127.0.0.1',0),Handler); self.http.studio=self.studio
+        self.http=ThreadingHTTPServer(('127.0.0.1',int(os.environ.get('SHENGJIAN_TEST_HTTP_PORT','0'))),Handler); self.http.studio=self.studio
         self.metadata_patch=patch('studio_server.lookup_source_metadata', return_value=None)
         self.topic_patch=patch('studio_server.lookup_chinese_topic', return_value=None)
         self.metadata_patch.start(); self.topic_patch.start()

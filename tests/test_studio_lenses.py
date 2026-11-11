@@ -16,9 +16,9 @@ from studio_lenses import (
 
 
 class LensMappingTests(unittest.TestCase):
-    def test_seven_default_lenses_theme_primary(self):
+    def test_seven_default_lenses_library_chips(self):
         data = load_json()
-        self.assertEqual(data.get('ia'), 'theme-primary')
+        self.assertEqual(data.get('ia'), 'option-a-library-chips')
         lenses = lenses_ordered(data)
         self.assertEqual(len(lenses), 7)
         labels = [item['label_zh'] for item in lenses]
