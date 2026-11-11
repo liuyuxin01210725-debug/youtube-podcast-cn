@@ -57,13 +57,20 @@ enum BookFiles {
         while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty { h.update(data: data) }
         return h.finalize().map { String(format: "%02x", $0) }.joined()
     }
-    static func manifest(_ root: URL) throws -> BookManifest {
-        let data = try Data(contentsOf: url("manifest.json", in: root))
+    static func manifestData(_ root: URL) throws -> Data {
+        let h = try FileHandle(forReadingFrom: url("manifest.json", in: root)); defer { try? h.close() }
+        let data = try h.read(upToCount: 16 * 1024 * 1024 + 1) ?? Data()
+        guard data.count <= 16 * 1024 * 1024 else { throw BookFailure(message: "书包目录过大") }
+        return data
+    }
+    static func manifest(_ root: URL, data suppliedData: Data? = nil) throws -> BookManifest {
+        let data = try suppliedData ?? manifestData(root)
         guard data.count <= 16 * 1024 * 1024 else { throw BookFailure(message: "书包目录过大") }
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let m = try decoder.decode(BookManifest.self, from: data)
         guard m.schemaVersion == 1, m.contentType == "book", safeID(m.bookId), revision(m.packageRevision), !m.chapters.isEmpty,
               m.chapters.count <= 2048, m.assets.count <= 4096,
+              m.chapters.enumerated().allSatisfy({ $0.offset == $0.element.order }),
               Set(m.chapters.map(\.id)).count == m.chapters.count,
               !m.scope.expectedBlockIds.isEmpty, Set(m.scope.expectedBlockIds).count == m.scope.expectedBlockIds.count, !m.assets.keys.contains("manifest.json"),
               Set(m.chapters.flatMap(\.sourceBlockIds)) == Set(m.scope.expectedBlockIds),
@@ -91,6 +98,30 @@ enum BookFiles {
                   (try u.resourceValues(forKeys: [.fileSizeKey])).fileSize == asset.bytes,
                   try hash(u) == asset.sha256 else { throw BookFailure(message: "书包校验失败；旧版与笔记保持不变") }
         }
+        if m.wholeBookVerified {
+            func object(_ name: String) throws -> [String: Any] {
+                guard let asset = m.assets[name], asset.bytes <= 16 * 1024 * 1024,
+                      let value = try JSONSerialization.jsonObject(with: Data(contentsOf: url(name, in: root))) as? [String: Any] else { throw BookFailure(message: "书包审核证据缺失或无效") }
+                return value
+            }
+            func text(_ value: Any?) -> Bool { (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
+            let source = try object("source.json"), sr = try object("source-review.json"), tr = try object("review.json"), listening = try object("listening-review.json")
+            guard source["source_revision"] as? String == m.sourceRevision,
+                  source["extraction_revision"] as? String == m.extractionRevision,
+                  sr["source_byte_hash"] as? String == source["source_byte_hash"] as? String,
+                  sr["extraction_revision"] as? String == m.extractionRevision,
+                  sr["expected_block_ids"] as? [String] == m.scope.expectedBlockIds,
+                  sr["verdict"] as? String == "pass", sr["fixture_only"] as? Bool != true,
+                  sr["publication_completeness_verified"] as? Bool == true, text(sr["publication_evidence"]), text(sr["reviewer"]), text(sr["evidence"]),
+                  tr["extraction_revision"] as? String == m.extractionRevision,
+                  tr["translation_revision"] as? String == m.translationRevision, tr["fixture_only"] as? Bool != true,
+                  listening["audio_revision"] as? String == m.audioRevision, listening["fixture_only"] as? Bool != true,
+                  let chapters = listening["chapters"] as? [String: [String: Any]],
+                  let blocks = tr["blocks"] as? [String: [String: Any]],
+                  m.scope.expectedBlockIds.allSatisfy({ id in blocks[id]?["verdict"] as? String == "pass" && text(blocks[id]?["reviewer"]) && text(blocks[id]?["evidence"]) }),
+                  m.chapters.allSatisfy({ c in guard let a=c.audio, let r=chapters[c.id] else { return false }; return r["sha256"] as? String == a.sha256 && r["verdict"] as? String == "pass" && text(r["reviewer"]) && text(r["evidence"]) })
+            else { throw BookFailure(message: "完整译听证据未绑定确切修订/范围/音轨；不授完整标签") }
+        }
     }
 }
 
@@ -104,6 +135,7 @@ enum BookFiles {
     var root: URL { documents.appendingPathComponent("Books", isDirectory: true) }
     private var stateReadable = true
     private var notesReadable = true
+    private var missingSelectionWarning = false
     init(documents: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]) {
         self.documents = documents
         do {
@@ -128,19 +160,26 @@ enum BookFiles {
             }
         }
         editions = found.sorted { $0.id < $1.id }
+        let missing = state.selected.contains { id, revision in !editions.contains { $0.manifest.bookId == id && $0.manifest.packageRevision == revision } }
+        if missing && (errorText == nil || missingSelectionWarning) { errorText = "所选书籍版本暂不可读；原位置与笔记保留，不自动切到另一版"; missingSelectionWarning = true }
+        else if !missing && missingSelectionWarning { errorText = nil; missingSelectionWarning = false }
     }
     var selectedEditions: [BookEdition] {
         Dictionary(grouping: editions, by: { $0.manifest.bookId }).keys.sorted().compactMap { id in
-            editions.first { $0.manifest.bookId == id && $0.manifest.packageRevision == state.selected[id] } ?? editions.first { $0.manifest.bookId == id }
+            if let selected = state.selected[id] { return editions.first { $0.manifest.bookId == id && $0.manifest.packageRevision == selected } }
+            return editions.first { $0.manifest.bookId == id }
         }
     }
     func edition(bookID: String, revision: String) -> BookEdition? { editions.first { $0.manifest.bookId == bookID && $0.manifest.packageRevision == revision } }
     func select(_ edition: BookEdition) { state.selected[edition.manifest.bookId] = edition.manifest.packageRevision; saveState() }
     func importPackage(_ source: URL) async {
-        importing = true; defer { importing = false }
+        guard !importing else { return }
+        importing = true; errorText = nil; missingSelectionWarning = false
+        defer { importing = false }
         let access = source.startAccessingSecurityScopedResource(); defer { if access { source.stopAccessingSecurityScopedResource() } }
         do {
-            let m = try BookFiles.manifest(source); let destination = root.appendingPathComponent(m.bookId).appendingPathComponent(m.packageRevision)
+            let manifestData = try BookFiles.manifestData(source)
+            let m = try BookFiles.manifest(source, data: manifestData); let destination = root.appendingPathComponent(m.bookId).appendingPathComponent(m.packageRevision)
             // Hash/copy away from the UI actor; only the package allowlist is copied.
             try await Task.detached(priority: .userInitiated) {
                 try BookFiles.verifyAssets(m, root: source)
@@ -151,12 +190,15 @@ enum BookFiles {
                 }
                 let staging = destination.deletingLastPathComponent().appendingPathComponent(".incoming-" + UUID().uuidString)
                 try fm.createDirectory(at: staging, withIntermediateDirectories: true)
+                defer { try? fm.removeItem(at: staging) } // only this newly-created incoming directory
                 for name in ["manifest.json"] + m.assets.keys.sorted() {
                     let from = try BookFiles.url(name, in: source); let to = try BookFiles.url(name, in: staging)
                     try fm.createDirectory(at: to.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try fm.copyItem(at: from, to: to)
                 }
-                try BookFiles.verifyAssets(try BookFiles.manifest(staging), root: staging)
+                let copiedManifest = try BookFiles.manifestData(staging)
+                guard copiedManifest == manifestData else { throw BookFailure(message: "导入期间书包清单发生变化；未发布新版本") }
+                try BookFiles.verifyAssets(try BookFiles.manifest(staging, data: copiedManifest), root: staging)
                 try fm.moveItem(at: staging, to: destination)
             }.value
             // New versions do not silently replace an already selected revision.

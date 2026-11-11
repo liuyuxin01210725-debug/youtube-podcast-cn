@@ -126,6 +126,7 @@ shengjian-source-gate:
 # Isolated, no-provider book tests; native IO runs only against a self-authored draft package.
 test-books:
 	@$(PYTHON) tests/test_book_integration.py
+	@$(PYTHON) tests/test_book_preinstall.py
 	@if [ "$$(uname -s)" != Darwin ] || ! command -v swiftc >/dev/null 2>&1; then \
 		if [ "$${SHENGJIAN_REQUIRE_SWIFTC:-}" = 1 ]; then echo "book native probes require macOS + swiftc" >&2; exit 1; fi; \
 		echo "skip book native probes (requires macOS + swiftc)"; \
@@ -135,3 +136,11 @@ test-books:
 		swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListenTests/BookProgressProbe.swift -o "$$tmp/progress" && "$$tmp/progress" && \
 		swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListen/BookStore.swift ios/PrivateListen/PrivateListenTests/BookImportProbe.swift -o "$$tmp/import" && "$$tmp/import" "$$package" "$$tmp/documents"; \
 	fi
+
+# Explicit authorized real-package input; all IO remains inside a fresh temporary probe directory.
+.PHONY: test-book-preinstall
+test-book-preinstall:
+	@test -n "$(BOOK_JOURNEY_PACKAGE)" && test -n "$(BOOK_JOURNEY_DRAFT)" || (echo "Set authorized BOOK_JOURNEY_PACKAGE and BOOK_JOURNEY_DRAFT; no provider is called"; exit 1)
+	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/shengjian-preinstall.XXXXXX") && \
+	swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListen/BookStore.swift ios/PrivateListen/PrivateListenTests/BookPreinstallJourneys.swift -o "$$tmp/journeys" && \
+	"$$tmp/journeys" "$(BOOK_JOURNEY_PACKAGE)" "$(BOOK_JOURNEY_DRAFT)" "$$tmp/data"

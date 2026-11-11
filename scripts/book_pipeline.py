@@ -108,7 +108,9 @@ def translate_job(job, provider, model=None, allowance=None, glossary=None):
     for chapter in source['chapters']:
         for block in chapter['blocks']:
             check_cancel(job);bid=block['id'];prior=result['blocks'].get(bid)
+            if digest(block['text'])!=block['source_text_hash']:raise ValueError('Source block hash changed; new extraction/review required')
             if prior:
+                if digest(prior['text'])!=prior.get('target_hash'):raise ValueError('Cached target hash changed; new translation review required')
                 if prior['source_hash']!=block['source_text_hash']: raise ValueError('Stale translation')
                 previous=[block['text'][-800:],prior['text'][-800:]];continue
             context={'glossary':glossary,'previous_block_for_context_only':previous}
@@ -167,7 +169,8 @@ def apply_review(job, review_file):
 
 def reviewed(source,tr,review,bid):
     t=tr.get('blocks',{}).get(bid,{});r=review.get('blocks',{}).get(bid,{})
-    return bool(t and review.get('translation_revision')==tr.get('translation_revision') and review.get('extraction_revision')==source['extraction_revision'] and not review.get('fixture_only') and r.get('verdict')=='pass' and r.get('source_hash')==t.get('source_hash') and r.get('target_hash')==t.get('target_hash'))
+    source_block=next((b for c in source['chapters'] for b in c['blocks'] if b['id']==bid),None)
+    return bool(t and source_block and digest(t.get('text',''))==t.get('target_hash') and digest(source_block['text'])==source_block['source_text_hash']==t.get('source_hash') and r.get('reviewer') and r.get('evidence') and review.get('translation_revision')==tr.get('translation_revision') and review.get('extraction_revision')==source['extraction_revision'] and not review.get('fixture_only') and r.get('verdict')=='pass' and r.get('source_hash')==t.get('source_hash') and r.get('target_hash')==t.get('target_hash'))
 
 def reading_document(source,tr):
     chapters=[]
@@ -255,12 +258,15 @@ def package_job(job):
     revision=digest([PACKAGE_VERSION,source['book_id'],source['title'],source['rights'],bound,scope,gates,chapters,sr,review,listening]);dest=job/'packages'/revision
     if dest.exists():return dest
     staging=job/'packages'/('.partial-'+uuid.uuid4().hex);staging.mkdir(parents=True)
-    paths=['source.json','reading.json',source['original_file']]+[x for x in ['source-review.json','translations.json','review.json','audio.json','request-ledger.json','listening-review.json'] if (job/x).is_file()]+[c['audio']['path'] for c in chapters if c['audio']]
-    assets={}
-    for name in paths:
-        target=staging/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(job/name,target);assets[name]={'sha256':sha(target),'bytes':target.stat().st_size}
-    manifest={'schema_version':1,'package_builder_version':PACKAGE_VERSION,'content_type':'book','book_id':source['book_id'],'package_revision':revision,'title':source['title'],'created_at':source['created_at'],**bound,'scope':scope,'gates':gates,'chapters':chapters,'assets':assets,'rights':source['rights'],'release_state':'declared_scope_ready' if whole else ('draft' if not ready else 'partial_or_listening_pending'),'ready_chapter_ids':ready,'declared_scope_verified':whole,'whole_book_verified':whole and publication_verified}
-    write(staging/'manifest.json',manifest);os.replace(staging,dest);return dest
+    try:
+        paths=['source.json','reading.json',source['original_file']]+[x for x in ['source-review.json','translations.json','review.json','audio.json','request-ledger.json','listening-review.json'] if (job/x).is_file()]+[c['audio']['path'] for c in chapters if c['audio']]
+        assets={}
+        for name in paths:
+            target=staging/name;target.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(job/name,target);assets[name]={'sha256':sha(target),'bytes':target.stat().st_size}
+        manifest={'schema_version':1,'package_builder_version':PACKAGE_VERSION,'content_type':'book','book_id':source['book_id'],'package_revision':revision,'title':source['title'],'created_at':source['created_at'],**bound,'scope':scope,'gates':gates,'chapters':chapters,'assets':assets,'rights':source['rights'],'release_state':'declared_scope_ready' if whole else ('draft' if not ready else 'partial_or_listening_pending'),'ready_chapter_ids':ready,'declared_scope_verified':whole,'whole_book_verified':whole and publication_verified}
+        write(staging/'manifest.json',manifest);os.replace(staging,dest);return dest
+    finally:
+        if staging.exists():shutil.rmtree(staging) # only this new, unpublished UUID staging tree
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['import','translate','review','synthesize','package','cancel','status']);p.add_argument('--job',type=Path,required=True);p.add_argument('--source',type=Path);p.add_argument('--title',default='');p.add_argument('--book-id');p.add_argument('--rights',type=Path);p.add_argument('--allowance',type=Path);p.add_argument('--provider',choices=['deepseek','qwen'],default='deepseek');p.add_argument('--model');p.add_argument('--tts',choices=['edge','qwen3-api'],default='edge');p.add_argument('--review',type=Path);p.add_argument('--glossary',type=Path)

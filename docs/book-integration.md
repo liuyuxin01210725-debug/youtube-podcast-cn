@@ -20,3 +20,27 @@ Use the existing project Python environment; no additional packages are required
 `make test-books` runs self-authored structural/adversarial fixtures and, on macOS, native progress and isolated folder-import probes. `make test` includes these plus existing podcast regressions. A native probe Documents directory is not the phone library. The exact signed app can be scanned with `SHENGJIAN_APP=... make shengjian-source-gate`.
 
 Deferred: automatic publisher-TOC nesting, OCR/math interpretation, migration of old text anchors, cross-device book state/notes sync, word/sentence alignment, chapter auto-advance, and book insights. A real phone baseline union incremental check and self-run podcast/book playback/Continue/note journey remain mandatory before any claim of phone readiness. A build/signature or mocked test never substitutes for that journey.
+
+
+## Bounded preinstall regression (offline)
+`make test-books` includes malformed resource, cache-integrity, interrupted publication and
+submitted/uncertain reservation tests. Four additional real-response recovery cases run only
+with `BOOK_REAL_CACHE_JOB` explicitly pointing to an authorized existing sample job; they copy
+it to a temporary directory, patch provider HTTP to fail, and never issue a model/TTS request.
+Keep the OS network-deny sandbox too. Missing authorization is not permission to create a new job.
+
+`make test-book-preinstall BOOK_JOURNEY_PACKAGE=<authorized-package-directory>
+BOOK_JOURNEY_DRAFT=<independent-extraction-draft-directory>` compiles the actual BookStore and
+BookProgress components into a fresh Documents-only probe. It exercises duplicate/racing imports,
+prepublication rejection, persisted long notes, revision loss/restoration and typed Continue policy.
+The selected unavailable revision must not silently fall back to a different edition. The
+receiver checks completeness-claim evidence shape/binding; it cannot authenticate a reviewer or
+establish semantic fidelity/listening quality from JSON. Current real sample remains listening-pending.
+
+`BookMediaPreinstallJourney.swift` is an explicit two-process Mac AVPlayer probe: compile alongside
+ContinueListening.swift, BookProgress.swift and BookStore.swift; run `seed <package> <fresh-documents>`
+then `resume <same-package> <same-documents>`. It plays existing media muted, persists real clocks,
+resumes and reaches chapter EOF at 2x, and exercises Continue policy against a self-authored
+podcast transport fixture. It is NOT the iOS PlayerModel/LibraryView, Simulator UI, a physical
+iPhone journey, subjective listening, or a new translation/synthesis. UI routing, background/remote
+controls and the device protection baseline require the separately named device gates.
