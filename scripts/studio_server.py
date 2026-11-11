@@ -12,6 +12,7 @@ TEXT_UPLOAD_EXT=('.txt','.md')
 MAX_BOOK_UPLOAD=8*1024*1024
 
 from studio_preview import preview_limit, select_preview_segments
+from studio_document import split_document_segment
 from diarization_cache import assign_studio_voices
 from studio_speakers import expected_speakers, use_male_slots, validate_speaker_voices
 
@@ -254,6 +255,17 @@ class Studio:
         if not isinstance(doc, dict) or not isinstance(doc.get('segments'), list) or not isinstance(doc.get('speakers'), dict):
             raise ValueError('请先准备译稿')
         return p, state, doc
+    def split_segment(self, ident, payload):
+        with self.lock:
+            p=self.job(ident); self.migrate_assets(p); state=read(p/'state.json',{})
+            if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+            doc=read(p/'document.json',{})
+            if not isinstance(doc, dict) or not isinstance(doc.get('segments'), list) or not isinstance(doc.get('speakers'), dict):
+                raise ValueError('译稿无效')
+            updated, left_id, right_id = split_document_segment(doc, payload)
+            write(p/'document.json', updated); state['stale']=True; state['updated_at']=time.time(); write(p/'state.json',state)
+            return {'ok':True, 'left_id': left_id, 'right_id': right_id}
+
     def confirm_speakers(self, ident):
         """Clear every 待核对 flag without requiring a per-segment edit."""
         with self.lock:
@@ -401,7 +413,7 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
             data=json.loads(self.rfile.read(length))
             if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
-            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|expected-speakers|confirm-speakers|voice-slots|confirm-voices)',path)
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|expected-speakers|confirm-speakers|voice-slots|confirm-voices|split-segment)',path)
             if not m: raise ValueError('操作不存在')
             if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False),data.get('accept_unreviewed',False))
             elif m[2]=='voice': studio.voice(m[1],data['tts'])
@@ -411,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(data, dict) or data.get('scheme')!='male_first': raise ValueError('音色方案无效')
                 studio.reset_voice_slots(m[1])
             elif m[2]=='confirm-voices': studio.confirm_voices(m[1])
+            elif m[2]=='split-segment': return self.send(studio.split_segment(m[1], data))
             else:
                 with studio.lock:
                     p=studio.job(m[1]); studio.migrate_assets(p); state=read(p/'state.json',{})

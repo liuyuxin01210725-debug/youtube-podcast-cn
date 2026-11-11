@@ -412,12 +412,18 @@ def _collapse_minor_speakers(
     prototypes: dict[str, list[float]],
     *,
     min_ms: int = 20_000,
+    bounds: SpeakerBounds | None = None,
 ) -> list[DiarizationTurn]:
     """Merge speakers shorter than min_ms into the nearest lasting voice.
 
     Sherpa clustering on interview chunks often emits tiny ghost IDs alongside
     the real talkers. Collapsing them after stitch keeps voice slots usable
     without raising the global cluster threshold (which collapses real guests).
+
+    When ``bounds.exact`` is set, this fold must not invent speakers and must
+    not reduce the unique count below that exact floor. Extra short IDs above
+    the floor may still be merged (ghosts). Short voices that are required to
+    reach the declared count are kept, even if they are under ``min_ms``.
     """
     if not turns or min_ms <= 0:
         return turns
@@ -430,9 +436,19 @@ def _collapse_minor_speakers(
     minors = [sid for sid in duration_by if sid not in majors]
     if not minors or not majors:
         return turns
+    exact = bounds.exact if bounds is not None else None
+    if exact is not None and len(duration_by) <= exact:
+        return turns
+    if exact is None:
+        victims = list(minors)
+    else:
+        excess = len(duration_by) - exact
+        victims = sorted(minors, key=lambda sid: (duration_by[sid], sid))[:excess]
+    if not victims:
+        return turns
     remap: dict[str, str] = {}
     dominant = max(majors, key=lambda sid: (duration_by[sid], sid))
-    for minor in minors:
+    for minor in victims:
         best = dominant
         best_score = float("-inf")
         if minor in prototypes:
@@ -1009,4 +1025,4 @@ def run_sherpa_backend(
                         for left, right in zip(previous, vector, strict=True)
                     ]
         previous_end_ms = end_ms
-    return _collapse_minor_speakers(stitched, prototypes)
+    return _collapse_minor_speakers(stitched, prototypes, bounds=bounds)
