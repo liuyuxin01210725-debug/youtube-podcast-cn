@@ -141,9 +141,12 @@ class EdgeTTSBackend:
     file_suffix = ".mp3"
     max_chars = 2500
 
-    def __init__(self, voice_map: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, voice_map: dict[str, str] | None = None, *, book_synthesis: bool = False
+    ) -> None:
         self.voice_map = voice_map or _edge_voice_map()
         self.concurrency = int(os.getenv("TTS_CONCURRENCY", "8"))
+        self._book_synthesis = book_synthesis
 
     def resolve_voice(self, voice_slot: str) -> str:
         if voice_slot not in VOICE_SLOTS:
@@ -162,7 +165,8 @@ class EdgeTTSBackend:
         self, request: SynthesisRequest, output: Path
     ) -> SynthesisUsage:
         communicate = edge_tts.Communicate(
-            request.text, self.resolve_voice(request.voice_slot)
+            request.text, self.resolve_voice(request.voice_slot),
+            **({"receive_timeout": 180} if self._book_synthesis else {}),
         )
         try:
             await communicate.save(str(output))
@@ -387,9 +391,11 @@ class Qwen3APIBackend:
         )
 
 
-def build_backend(name: str, api_key: str | None = None) -> TTSBackend:
+def build_backend(
+    name: str, api_key: str | None = None, *, book_synthesis: bool = False
+) -> TTSBackend:
     if name == "edge":
-        return EdgeTTSBackend()
+        return EdgeTTSBackend(book_synthesis=book_synthesis)
     if name == "qwen3-api":
         return Qwen3APIBackend(api_key=api_key or "")
     raise ValueError(f"不支持的 TTS 后端: {name}")

@@ -1,6 +1,7 @@
 """Isolated book jobs. Explicit commands; no production queue or publisher hooks.
 
-CLI: import / translate / review / synthesize / package / cancel / status.
+CLI: import / translate / amend / review / synthesize / abandon-unusable-output / package / cancel / status.
+synthesize --chapter CHAPTER_ID may be repeated; default narrates all chapters.
 Provider requests require a current, evidenced prepaid/zero-incremental-charge
 allowance file. No automatic retries. Uncertain reservations survive restart.
 """
@@ -19,6 +20,7 @@ import shutil
 import subprocess
 import urllib.request
 import uuid
+from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
 from book_import import import_source, digest
@@ -79,6 +81,63 @@ class Ledger:
         self.data['requests'][key].update(state='succeeded',usage=usage,finished_at=now());write(self.path,self.data)
     def uncertain(self,key):
         self.data['requests'][key].update(state='uncertain',reason='remote completion/billing not established; reservation retained',finished_at=now());write(self.path,self.data)
+
+def substitute_request_key(parent_key, attempt):
+    return digest(['book-edge-unusable-output-substitute-v1',parent_key,attempt])
+
+def abandon_unusable_output(job, reconciliation_file):
+    """Authorize one zero-cost Edge substitute; retain all unknown remote facts."""
+    job=Path(job);e=read(reconciliation_file);ledger=Ledger(job,None)
+    if not isinstance(e,dict):raise ValueError('Reconciliation object required')
+    key=e.get('parent_key');records=ledger.data['requests']
+    if not isinstance(key,str) or not re.fullmatch(r'[0-9a-f]{64}',key) or key not in records:raise ValueError('Unknown parent key')
+    parent=records[key]
+    if parent.get('state')!='uncertain' or parent.get('stage')!='tts':raise ValueError('Only an uncertain TTS parent can be abandoned')
+    if (parent.get('provider'),parent.get('model'))!=('edge','edge-tts') or type(parent.get('reserved_cost_microunits')) is not int or parent['reserved_cost_microunits']!=0:
+        raise BudgetBlocked('Only validated zero-cost edge/edge-tts can be abandoned')
+    if type(e.get('attempt')) is not int or e['attempt']!=1:raise ValueError('Only substitute attempt 1 is allowed')
+    substitute=substitute_request_key(key,1)
+    events=parent.get('events',[])
+    if not isinstance(events,list):raise ValueError('Invalid parent events')
+    if substitute==key or substitute in records or 'parent_key' in parent or any(field in parent for field in ['substitute_key','substitute_attempt','authorized_at']) or any(r.get('parent_key')==key or r.get('substitute_key') in {key,substitute} for r in records.values()) or any(isinstance(event,dict) and event.get('type')=='abandon_unusable_output' for event in events):
+        raise ValueError('Substitute already authorized or recorded; at most once')
+    for field in ['editor','reason','evidence','exception']:
+        if not isinstance(e.get(field),str) or not e[field].strip():raise ValueError('Reconciliation '+field+' required')
+    if e.get('parent_record_sha256')!=digest(parent):raise ValueError('Reconciliation parent snapshot differs')
+    try:
+        submitted=dt.datetime.fromisoformat(e['submitted_at']);finished=dt.datetime.fromisoformat(e['finished_at'])
+        times_match=submitted.tzinfo and finished.tzinfo and submitted<=finished and e['submitted_at']==parent['submitted_at'] and e['finished_at']==parent['finished_at']
+    except (KeyError,TypeError,ValueError):times_match=False
+    if not times_match:raise ValueError('Original submitted/finished times required')
+    assertions={'remote_result':'unknown','provider_lookup':'no_per_request_lookup','proof_of_non_completion':False,'refund_claimed':False,'mark_succeeded':False,'no_usable_local_audio':True}
+    if any(type(e.get(k)) is not type(v) or e.get(k)!=v for k,v in assertions.items()):raise ValueError('Explicit unknown remote result and no usable audio assertions required')
+    zero=e.get('zero_cost_evidence',{})
+    facts={'provider':'edge','model':'edge-tts','max_total_cost_microunits':0,'api_key':None,'no_new_charges_verified':True,'paid_tts_blocked':True}
+    if not isinstance(zero,dict) or any(k not in zero or type(zero[k]) is not type(v) or zero[k]!=v for k,v in facts.items()) or not parent.get('allowance_evidence') or zero.get('evidence_ref')!=parent['allowance_evidence']:
+        raise BudgetBlocked('Bound zero-cost allowance, no api_key and paid-TTS block evidence required')
+    outputs=e.get('local_outputs');paths=['audio-fragments/'+key+'.mp3','audio-fragments/'+key+'.partial.mp3']
+    if not isinstance(outputs,list) or len(outputs)!=2 or any(not isinstance(o,dict) for o in outputs) or [o.get('path') for o in outputs]!=paths:raise ValueError('Both parent output paths required')
+    checks=read(job/'fragment-checksums.json') if (job/'fragment-checksums.json').exists() else {}
+    if key in checks:raise ValueError('Checksummed parent fragment exists; inspect rather than abandon')
+    for output,path in zip(outputs,paths):
+        target=job/path
+        if target.is_symlink() or (target.exists() and not target.is_file()):raise ValueError('Output must be a regular file or missing')
+        size=target.stat().st_size if target.exists() else None;checksum=sha(target) if size is not None else None
+        if size not in (None,0) or 'size' not in output or 'sha256' not in output or type(output['size']) is not type(size) or output['size']!=size or output['sha256']!=checksum:raise ValueError('Local output evidence differs or usable bytes exist')
+    authorized=now();snapshot=deepcopy(parent)
+    parent.setdefault('events',[]).append({'type':'abandon_unusable_output','at':authorized,'prior_record':snapshot,'reconciliation':deepcopy(e),'substitute_key':substitute})
+    parent.update(state='abandoned_unusable_output',remote_result='unknown',provider_lookup='no_per_request_lookup',
+                  substitute_key=substitute,substitute_attempt=1,authorized_at=authorized,reconciliation=deepcopy(e))
+    write(ledger.path,ledger.data);return parent
+
+def tts_request_key(ledger, natural_key):
+    parent=ledger.data['requests'].get(natural_key,{})
+    if parent.get('state')!='abandoned_unusable_output':return natural_key
+    key=substitute_request_key(natural_key,1)
+    if parent.get('substitute_attempt')!=1 or parent.get('substitute_key')!=key or not parent.get('authorized_at') or (parent.get('stage'),parent.get('provider'),parent.get('model'),parent.get('reserved_cost_microunits'))!=('tts','edge','edge-tts',0):raise BudgetBlocked('Invalid substitute authorization')
+    prior=ledger.data['requests'].get(key)
+    if prior is not None and prior.get('state')!='succeeded':raise BudgetBlocked('Substitute request '+key+' is '+str(prior.get('state'))+'; stop chapter, no further attempt')
+    return key
 
 def create_job(source, job, *, title='', rights=None, book_id=None):
     job=Path(job)
@@ -159,6 +218,30 @@ def translate_job(job, provider, model=None, allowance=None, glossary=None):
             write(target_path,result);previous=[block['text'][-800:],target[-800:]]
     result['translation_revision']=digest([identity,result['blocks']]);write(target_path,result);return result
 
+def amend_translation(job, amendment_file):
+    job=Path(job);source=read(job/'source.json');result=read(job/'translations.json');amendment=read(amendment_file)
+    if amendment.get('extraction_revision')!=source['extraction_revision']:raise ValueError('Amendment extraction revision differs')
+    if not result.get('translation_revision') or amendment.get('translation_revision')!=result['translation_revision']:raise ValueError('Amendment translation revision differs')
+    editor=amendment.get('editor');blocks=amendment.get('blocks')
+    if not isinstance(editor,str) or not editor.strip():raise ValueError('Amendment editor required')
+    if not isinstance(blocks,dict) or not blocks:raise ValueError('Amendment blocks required')
+    source_blocks={b['id']:b for c in source['chapters'] for b in c['blocks']}
+    amended_at=now()
+    for bid, item in blocks.items():
+        block=source_blocks.get(bid);target=result['blocks'].get(bid)
+        if block is None or target is None:raise ValueError('Unknown amendment block: '+bid)
+        if not isinstance(item,dict):raise ValueError('Invalid amendment block: '+bid)
+        for field in ['text','reason','evidence']:
+            if not isinstance(item.get(field),str) or not item[field].strip():raise ValueError('Amendment '+field+' required: '+bid)
+        if item.get('source_hash')!=block['source_text_hash'] or item.get('source_hash')!=target['source_hash']:raise ValueError('Amendment source hash differs: '+bid)
+        if digest(target['text'])!=target.get('target_hash'):raise ValueError('Current target hash differs: '+bid)
+        if item.get('from_target_hash')!=target['target_hash']:raise ValueError('Amendment from target hash differs: '+bid)
+        if item['text']==target['text']:raise ValueError('Amendment text is unchanged: '+bid)
+        target.update(text=item['text'],target_hash=digest(item['text']),editorial_revision=True,amended_at=amended_at,
+                      editor=editor,reason=item['reason'],evidence=item['evidence'],from_target_hash=target['target_hash'],
+                      provider_target_hash=target.get('provider_target_hash',target['target_hash']),not_a_provider_return=True)
+    result['translation_revision']=digest([result['config_identity'],result['blocks']]);write(job/'translations.json',result);return result
+
 def apply_review(job, review_file):
     job=Path(job);source=read(job/'source.json');tr=read(job/'translations.json');review=read(review_file)
     if review.get('extraction_revision')!=source['extraction_revision'] or review.get('translation_revision')!=tr.get('translation_revision'):raise ValueError('Review revisions differ')
@@ -190,26 +273,131 @@ def duration(path):
     subprocess.run(['ffmpeg','-nostdin','-v','error','-i',str(path),'-f','null','-'],capture_output=True,check=True)
     return v
 
-def synthesize_job(job, backend_name, allowance=None, voice_slot='male_1', style='documentary'):
+def narration_config(backend, voice_slot, style):
+    return {'backend':backend.fingerprint(),'voice_slot':voice_slot,'resolved_voice':backend.resolve_voice(voice_slot),'style':style}
+
+def chapter_manifest(source, tr, chapter, config, backend):
+    blocks={b['id']:b for c in source['chapters'] for b in c['blocks']}
+    return {'schema_version':1,'chapter_id':chapter['id'],'config':config,
+            'chunking':{'max_chars':backend.max_chars,'file_suffix':backend.file_suffix},
+            'blocks':[{'source_block_id':b['source_block_id'],
+                       'source_text_hash':digest(blocks[b['source_block_id']]['text']),
+                       'target_text_hash':digest(tr.get('blocks',{}).get(b['source_block_id'],{}).get('text','')),
+                       'reading_text':b['text']} for b in chapter['blocks']]}
+
+def chapter_parts(chapter, max_chars):
+    for b in chapter['blocks']:
+        for n, offset in enumerate(range(0,len(b['text']),max_chars)):
+            yield b['source_block_id'], n, offset, b['text'][offset:offset+max_chars]
+
+def admit_chapter(job, chapter, manifest, entry, prior_state, checks):
+    """Verify recorded files and exact inputs; legacy keys commit to the old text slices."""
+    admission=digest(manifest);legacy='dependency_manifest' not in entry
+    try:
+        if not legacy:
+            if entry.get('admission_hash')!=digest(entry['dependency_manifest']):raise ValueError('stored admission hash differs from its manifest')
+            if entry['dependency_manifest']!=manifest:return None
+        config=manifest['config'];provenance=entry.get('migration_provenance',{})
+        old_keys=legacy or entry.get('fragment_key_scheme')=='whole-book-v1'
+        prior_revision=prior_state.get('reading_revision') if legacy else provenance.get('prior_reading_revision',entry.get('fragment_reading_revision'))
+        if legacy and (not prior_revision or prior_state.get('config')!=config):raise ValueError('old TTS config/voice cannot be verified')
+        if old_keys:
+            if not prior_revision or entry['audio_revision']!=digest([prior_revision,config,entry['sha256']]):raise ValueError('old chapter revision/config binding differs')
+        elif entry.get('fragment_key_scheme')!='chapter-admission-v1' or entry['audio_revision']!=digest([admission,entry['sha256']]):raise ValueError('chapter audio revision binding differs')
+        if sha(job/entry['path'])!=entry['sha256']:raise ValueError('chapter MP3 checksum differs')
+        parts=list(chapter_parts(chapter,manifest['chunking']['max_chars']));anchors=entry['fragments']
+        if not parts or len(parts)!=len(anchors):raise ValueError('incomplete fragment coverage')
+        verified=[];ledger=Ledger(job,None)
+        for (bid,n,offset,value), anchor in zip(parts,anchors):
+            if (anchor['source_block_id'],anchor['reading_character_start'],anchor['reading_character_end'])!=(bid,offset,offset+len(value)):raise ValueError('block order/character ranges differ')
+            natural_key=digest([prior_revision,config,bid,n,value]) if old_keys else digest([admission,bid,n,value])
+            key=tts_request_key(ledger,natural_key)
+            if key!=natural_key and ledger.data['requests'].get(key,{}).get('state')!='succeeded':raise ValueError('substitute fragment has not succeeded')
+            path='audio-fragments/'+key+manifest['chunking']['file_suffix']
+            checksum=sha(job/path)
+            if checks.get(key)!=checksum:raise ValueError('fragment checksum differs')
+            if not legacy and (anchor.get('request_key'),anchor.get('path'),anchor.get('sha256'))!=(key,path,checksum):raise ValueError('recorded fragment binding differs')
+            verified.append(dict(anchor,request_key=key,path=path,sha256=checksum))
+        if not legacy:return entry
+        return dict(entry,dependency_manifest=manifest,admission_hash=admission,fragments=verified,
+                    fragment_key_scheme='whole-book-v1',migration_provenance={
+                        'prior_reading_revision':prior_revision,'prior_audio_revision':entry['audio_revision'],
+                        'prior_mp3_sha256':entry['sha256'],'verified_at':now(),
+                        'verified_fields':['reading_texts_via_original_fragment_keys','block_order_and_complete_character_ranges',
+                                           'tts_config_and_resolved_voice','chapter_mp3_sha256','fragment_checksums']})
+    except (KeyError,TypeError,ValueError,OSError,BudgetBlocked) as e:
+        kind='Legacy audio migration' if legacy else 'Audio cache'
+        raise ValueError(kind+' verification failed for '+chapter['id']+': '+str(e)) from e
+
+def current_audio_state(job, source, tr, rd, state, backend, config):
+    """Only chapters with matching dependencies and intact files remain in the ready map."""
+    result=dict(state,config=config,chapters={},reading_revision_snapshot=rd['reading_revision']);errors=dict(state.get('cache_verification_errors',{}))
+    invalidated=list(state.get('invalidated_chapters',[]))
+    checks=read(job/'fragment-checksums.json') if (job/'fragment-checksums.json').exists() else {}
+    chapters={c['id']:c for c in rd['chapters']}
+    for cid,entry in state.get('chapters',{}).items():
+        admitted=None;reason='Chapter narration dependencies changed or chapter removed'
+        if cid in chapters:
+            manifest=chapter_manifest(source,tr,chapters[cid],config,backend)
+            try:admitted=admit_chapter(job,chapters[cid],manifest,entry,state,checks)
+            except ValueError as e:reason=errors[cid]=str(e)
+        if admitted is not None:
+            result['chapters'][cid]=admitted;errors.pop(cid,None)
+        else:invalidated.append({'chapter_id':cid,'reason':reason,'audio':entry,'prior_config':state.get('config'),'prior_reading_revision':state.get('reading_revision')})
+    if invalidated:result['invalidated_chapters']=invalidated
+    if errors:result['cache_verification_errors']=errors
+    else:result.pop('cache_verification_errors',None)
+    return result,errors
+
+def save_audio_state(job, state):
+    state['audio_revision']=digest({k:v for k,v in state.items() if k!='audio_revision'});write(job/'audio.json',state)
+
+def synthesize_job(job, backend_name, allowance=None, voice_slot='male_1', style='documentary', chapter_ids=None):
     job=Path(job);source=read(job/'source.json');tr=read(job/'translations.json');review=read(job/'review.json')
+    if chapter_ids is not None:
+        if not isinstance(chapter_ids,(list,tuple)) or not chapter_ids:raise ValueError('Chapter scope requires a nonempty list of chapter IDs')
+        known={c['id'] for c in source['chapters']};selected=set()
+        for cid in chapter_ids:
+            if not isinstance(cid,str) or not cid.strip():raise ValueError('Chapter ID must be a nonempty string')
+            if cid not in known:raise ValueError('Unknown chapter ID: '+cid)
+            if cid in selected:raise ValueError('Duplicate chapter ID in scope: '+cid)
+            selected.add(cid)
     if not source['rights'].get('external_processing'):raise BudgetBlocked('Source rights do not permit external processing')
     if not allowance or not allowance.get('tts'):raise BudgetBlocked('TTS allowance not verified; no credentials read or requests made')
     if backend_name!='edge':raise BudgetBlocked('Paid TTS cost adapter is not validated for books; no credential read or request made')
-    backend=build_backend(backend_name)
+    backend=build_backend(backend_name,book_synthesis=True)
     ledger=Ledger(job,allowance);rd=reading_document(source,tr);write(job/'reading.json',rd)
-    config={'backend':backend.fingerprint(),'voice_slot':voice_slot,'resolved_voice':backend.resolve_voice(voice_slot),'style':style}
+    config=narration_config(backend,voice_slot,style)
     state=read(job/'audio.json') if (job/'audio.json').exists() else {'config':config,'reading_revision':rd['reading_revision'],'chapters':{}}
-    if state['config']!=config or state['reading_revision']!=rd['reading_revision']:raise ValueError('Narration changed; new revision/job required')
-    for c in rd['chapters']:
+    # reading_revision is retained as the original audit value, including for legacy jobs.
+    state,cache_errors=current_audio_state(job,source,tr,rd,state,backend,config)
+    chapters=rd['chapters']
+    if chapter_ids is not None:chapters=[c for c in chapters if c['id'] in selected]
+    for c in chapters:
         if not all(reviewed(source,tr,review,b['source_block_id']) for b in c['blocks']):raise ValueError('Unreviewed/failed chapter cannot be narrated')
-        check_cancel(job);parts=[];anchors=[];start=0.0
+        check_cancel(job)
+        if c['id'] in cache_errors:raise ValueError(cache_errors[c['id']]+'; inspect retained audio before retrying')
+        if c['id'] in state['chapters']:continue
+        manifest=chapter_manifest(source,tr,c,config,backend);admission=digest(manifest)
+        # An interrupted legacy chapter keeps its original formula, including its unsubmitted tail.
+        prior_revision=state.get('reading_revision');old_keys=False
+        if prior_revision and state.get('config')==config:
+            old_keys=any(digest([prior_revision,config,bid,n,value]) in ledger.data['requests'] for bid,n,offset,value in chapter_parts(c,backend.max_chars))
+        if old_keys and any(digest([admission,bid,n,value]) in ledger.data['requests'] for bid,n,offset,value in chapter_parts(c,backend.max_chars)):
+            raise BudgetBlocked('Mixed legacy and chapter-admission requests; inspect before resuming')
+        if (job/'audio.json').exists():save_audio_state(job,state) # invalidate old ready entries before a new request
+        parts=[];anchors=[];start=0.0
         for b in c['blocks']:
             for n,offset in enumerate(range(0,len(b['text']),backend.max_chars)):
-                value=b['text'][offset:offset+backend.max_chars];key=digest([rd['reading_revision'],config,b['source_block_id'],n,value])
+                value=b['text'][offset:offset+backend.max_chars]
+                natural_key=digest([prior_revision,config,b['source_block_id'],n,value]) if old_keys else digest([admission,b['source_block_id'],n,value])
+                key=tts_request_key(ledger,natural_key)
                 part=job/'audio-fragments'/(key+backend.file_suffix);part.parent.mkdir(exist_ok=True)
-                if part.exists() and (job/'fragment-checksums.json').exists() and read(job/'fragment-checksums.json').get(key)==sha(part):pass
+                if part.exists() and (job/'fragment-checksums.json').exists() and read(job/'fragment-checksums.json').get(key)==sha(part) and (key==natural_key or ledger.data['requests'].get(key,{}).get('state')=='succeeded'):pass
                 else:
                     ledger.begin('tts',key,len(value),backend.name,backend.model)
+                    if key!=natural_key:
+                        ledger.data['requests'][key].update(parent_key=natural_key,substitute_attempt=1);write(ledger.path,ledger.data)
                     temp=part.with_name(part.stem+'.partial'+part.suffix)
                     try:
                         usage=asyncio.run(backend.synthesize(SynthesisRequest(value,voice_slot,style),temp))
@@ -220,21 +408,29 @@ def synthesize_job(job, backend_name, allowance=None, voice_slot='male_1', style
                         if ledger.data['requests'][key]['state'] not in {'succeeded','reconciliation_required'}:ledger.uncertain(key)
                         raise
                 seconds=duration(part);parts.append(part)
-                anchors.append({'source_block_id':b['source_block_id'],'reading_character_start':offset,'reading_character_end':offset+len(value),'media_start_seconds':start,'duration_seconds':seconds,'alignment':'measured audio fragment only; not word/sentence alignment'})
+                anchors.append({'source_block_id':b['source_block_id'],'reading_character_start':offset,'reading_character_end':offset+len(value),'media_start_seconds':start,'duration_seconds':seconds,'alignment':'measured audio fragment only; not word/sentence alignment','request_key':key,'path':str(part.relative_to(job)),'sha256':sha(part)})
                 start+=seconds
         audio_dir=job/'chapter-audio';audio_dir.mkdir(exist_ok=True)
-        listing=audio_dir/(c['id']+'.concat.txt');listing.write_text(''.join("file '"+os.path.relpath(p.resolve(),audio_dir.resolve()).replace("'","'\\''")+"'\n" for p in parts))
-        target=audio_dir/(c['id']+'.mp3');temp=target.with_suffix('.partial.mp3')
+        stem=c['id'] if not (audio_dir/(c['id']+'.mp3')).exists() else c['id']+'-'+admission
+        if (audio_dir/(stem+'.mp3')).exists():stem+='-'+uuid.uuid4().hex
+        listing=audio_dir/(stem+'.concat.txt');listing.write_text(''.join("file '"+os.path.relpath(p.resolve(),audio_dir.resolve()).replace("'","'\\''")+"'\n" for p in parts))
+        target=audio_dir/(stem+'.mp3');temp=target.with_suffix('.partial.mp3')
         subprocess.run(['ffmpeg','-nostdin','-v','error','-y','-f','concat','-safe','0','-i',str(listing.resolve()),'-c:a','libmp3lame','-b:a','96k',str(temp.resolve())],cwd=audio_dir,check=True,capture_output=True)
         seconds=duration(temp);os.replace(temp,target)
-        state['chapters'][c['id']]={'path':str(target.relative_to(job)),'sha256':sha(target),'duration_seconds':seconds,'audio_revision':digest([rd['reading_revision'],config,sha(target)]),'fragments':anchors,'audibility_review':'not_yet_listened'}
-        write(job/'audio.json',state)
-    state['audio_revision']=digest({k:v for k,v in state.items() if k!='audio_revision'});write(job/'audio.json',state);return state
+        state['chapters'][c['id']]={'path':str(target.relative_to(job)),'sha256':sha(target),'duration_seconds':seconds,'audio_revision':digest([admission,sha(target)]),'fragments':anchors,'audibility_review':'not_yet_listened','dependency_manifest':manifest,'admission_hash':admission,'fragment_key_scheme':'chapter-admission-v1','reading_revision_at_synthesis':rd['reading_revision']}
+        if old_keys:state['chapters'][c['id']].update(fragment_key_scheme='whole-book-v1',fragment_reading_revision=prior_revision,audio_revision=digest([prior_revision,config,sha(target)]))
+        save_audio_state(job,state)
+    save_audio_state(job,state);return state
 
 def package_job(job):
     job=Path(job);source=read(job/'source.json');tr=read(job/'translations.json') if (job/'translations.json').exists() else {};review=read(job/'review.json') if (job/'review.json').exists() else {};audio=read(job/'audio.json') if (job/'audio.json').exists() else {}
     rd=reading_document(source,tr);write(job/'reading.json',rd)
-    if audio and audio.get('reading_revision')!=rd['reading_revision']:raise ValueError('Audio revision mismatch')
+    if audio:
+        backend=build_backend('edge');config=audio['config']
+        config=narration_config(backend,config['voice_slot'],config['style'])
+        current,_=current_audio_state(job,source,tr,rd,audio,backend,config)
+        if current!=audio:save_audio_state(job,current)
+        audio=current
     chapters=[];ready=[]
     for c,rc in zip(source['chapters'],rd['chapters']):
         ids=[b['id'] for b in c['blocks']];full_review=all(reviewed(source,tr,review,bid) for bid in ids)
@@ -269,15 +465,18 @@ def package_job(job):
         if staging.exists():shutil.rmtree(staging) # only this new, unpublished UUID staging tree
 
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['import','translate','review','synthesize','package','cancel','status']);p.add_argument('--job',type=Path,required=True);p.add_argument('--source',type=Path);p.add_argument('--title',default='');p.add_argument('--book-id');p.add_argument('--rights',type=Path);p.add_argument('--allowance',type=Path);p.add_argument('--provider',choices=['deepseek','qwen'],default='deepseek');p.add_argument('--model');p.add_argument('--tts',choices=['edge','qwen3-api'],default='edge');p.add_argument('--review',type=Path);p.add_argument('--glossary',type=Path)
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('action',choices=['import','translate','amend','review','synthesize','abandon-unusable-output','package','cancel','status']);p.add_argument('--job',type=Path,required=True);p.add_argument('--source',type=Path);p.add_argument('--title',default='');p.add_argument('--book-id');p.add_argument('--rights',type=Path);p.add_argument('--allowance',type=Path);p.add_argument('--provider',choices=['deepseek','qwen'],default='deepseek');p.add_argument('--model');p.add_argument('--tts',choices=['edge','qwen3-api'],default='edge');p.add_argument('--review',type=Path);p.add_argument('--amendment',type=Path);p.add_argument('--glossary',type=Path);p.add_argument('--chapter',action='append');p.add_argument('--reconciliation',type=Path)
     a=p.parse_args()
+    if a.action=='abandon-unusable-output' and not a.reconciliation:p.error('--reconciliation is required for abandon-unusable-output')
     if a.action=='cancel':write(a.job/'cancel',{'at':now(),'reservation_policy':'retain unresolved'});return
     with lock(a.job):
         allowance=read(a.allowance) if a.allowance else None
         if a.action=='import':result=create_job(a.source,a.job,title=a.title,book_id=a.book_id,rights=read(a.rights) if a.rights else None)
         elif a.action=='translate':result=translate_job(a.job,a.provider,a.model,allowance,read(a.glossary) if a.glossary else None)
+        elif a.action=='amend':result=amend_translation(a.job,a.amendment)
+        elif a.action=='abandon-unusable-output':result=abandon_unusable_output(a.job,a.reconciliation)
         elif a.action=='review':result=apply_review(a.job,a.review)
-        elif a.action=='synthesize':result=synthesize_job(a.job,a.tts,allowance)
+        elif a.action=='synthesize':result=synthesize_job(a.job,a.tts,allowance,chapter_ids=a.chapter)
         elif a.action=='package':result=str(package_job(a.job))
         else:result={'ledger':read(a.job/'request-ledger.json') if (a.job/'request-ledger.json').exists() else {},'cancelled':(a.job/'cancel').exists()}
         print(json.dumps(result,ensure_ascii=False,default=str))
