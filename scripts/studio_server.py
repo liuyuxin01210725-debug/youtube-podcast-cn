@@ -12,7 +12,7 @@ TEXT_UPLOAD_EXT=('.txt','.md')
 MAX_BOOK_UPLOAD=8*1024*1024
 
 from studio_preview import preview_limit, select_preview_segments
-from studio_document import split_document_segment
+from studio_document import OFFICIAL_EVIDENCE_FIELDS, SEGMENT_CONFIRM_FIELDS, segment_evidence_hash, split_document_segment
 from diarization_cache import assign_studio_voices
 from studio_speakers import expected_speakers, use_male_slots, validate_speaker_voices
 
@@ -275,6 +275,59 @@ class Studio:
                     segment['ambiguous']=False
             write(p/'document.json', doc)
             state['updated_at']=time.time(); write(p/'state.json', state)
+    def confirm_segments(self, ident, payload):
+        """Confirm only listed same-speaker segments with hash-bound evidence."""
+        if not isinstance(payload, dict) or set(payload)-{'document_sha256', 'items'}:
+            raise ValueError('confirm-segments 仅接受 document_sha256 和逐段 items')
+        with self.lock:
+            p=self.job(ident); state=read(p/'state.json',{})
+            if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+            document_bytes=(p/'document.json').read_bytes()
+            digest=hashlib.sha256(document_bytes).hexdigest()
+            if payload.get('document_sha256')!=digest:
+                raise ValueError('document_sha256 与当前 document.json 不一致；请重新读取译稿')
+            # Parse the exact bytes whose digest was checked, before any writes.
+            doc=json.loads(document_bytes)
+            if not isinstance(doc, dict) or not isinstance(doc.get('segments'), list) or not isinstance(doc.get('speakers'), dict):
+                raise ValueError('译稿无效')
+            items=payload.get('items',[])
+            if not isinstance(items, list): raise ValueError('items 必须是逐段证据列表')
+            if not isinstance(doc.get('segment_confirmations',[]), list): raise ValueError('审核记录无效')
+            segments={s['id']: s for s in doc['segments'] if isinstance(s, dict) and isinstance(s.get('id'), str)}
+            applied=[]; rejected=[]; audits=[]
+            for item in items:
+                segment_id=item.get('id') if isinstance(item, dict) else None
+                reason=None
+                if not isinstance(segment_id, str) or not segment_id:
+                    reason='invalid_item'
+                elif segment_id not in segments:
+                    reason='segment_not_found'
+                elif item.get('speaker_id')!=segments[segment_id].get('speaker_id'):
+                    reason='speaker_id_mismatch'
+                else:
+                    reason=next((f'invalid_{field}' for field in OFFICIAL_EVIDENCE_FIELDS
+                                 if not isinstance(item.get(field), str) or not item[field].strip()), None)
+                if reason:
+                    rejected.append({'id':segment_id, 'reason':reason}); continue
+                segment=segments[segment_id]
+                try:
+                    evidence_hash=segment_evidence_hash(digest, segment, item)
+                except (KeyError, TypeError, ValueError):
+                    rejected.append({'id':segment_id, 'reason':'invalid_segment_fields'}); continue
+                if item.get('evidence_hash')!=evidence_hash:
+                    rejected.append({'id':segment_id, 'reason':'evidence_hash_mismatch'}); continue
+                audit={'hash_version':1, 'confirmed_at':time.time(), 'document_sha256':digest, 'evidence_hash':evidence_hash}
+                audit.update({field:segment[field] for field in SEGMENT_CONFIRM_FIELDS})
+                audit.update({field:item[field] for field in OFFICIAL_EVIDENCE_FIELDS})
+                audits.append(audit); applied.append(segment_id)
+                segment['ambiguous']=False
+            if applied:
+                # Audit and flag changes share one atomic document replacement.
+                doc.setdefault('segment_confirmations',[]).extend(audits)
+                write(p/'document.json',doc)
+                state['updated_at']=time.time(); write(p/'state.json',state)
+                digest=hashlib.sha256((p/'document.json').read_bytes()).hexdigest()
+            return {'ok':True, 'applied':applied, 'rejected':rejected, 'document_sha256':digest}
     def reset_voice_slots(self, ident):
         """Reapply the male-first studio default in first-appearance order."""
         with self.lock:
@@ -413,12 +466,13 @@ class Handler(BaseHTTPRequestHandler):
             if not 0<length<=2*1024*1024: raise ValueError('请求大小无效')
             data=json.loads(self.rfile.read(length))
             if path=='/api/jobs': return self.send({'ids':studio.create(data.get('sources',[]),data.get('options',{}))})
-            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|expected-speakers|confirm-speakers|voice-slots|confirm-voices|split-segment)',path)
+            m=re.fullmatch(r'/api/jobs/([\w-]+)/(action|document|voice|expected-speakers|confirm-speakers|confirm-segments|voice-slots|confirm-voices|split-segment)',path)
             if not m: raise ValueError('操作不存在')
             if m[2]=='action': studio.action(m[1],data['action'],data.get('preview',False),data.get('accept_unreviewed',False))
             elif m[2]=='voice': studio.voice(m[1],data['tts'])
             elif m[2]=='expected-speakers': studio.set_expected_speakers(m[1],data['expected_speakers'])
             elif m[2]=='confirm-speakers': studio.confirm_speakers(m[1])
+            elif m[2]=='confirm-segments': return self.send(studio.confirm_segments(m[1], data))
             elif m[2]=='voice-slots':
                 if not isinstance(data, dict) or data.get('scheme')!='male_first': raise ValueError('音色方案无效')
                 studio.reset_voice_slots(m[1])

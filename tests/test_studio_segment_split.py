@@ -2,6 +2,7 @@
 """Official document split path: stable ids, timeline, translation and render contracts."""
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import sys
@@ -16,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from studio_document import (
     next_segment_id,
     render_contract_errors,
+    segment_evidence_hash,
     split_document_segment,
 )
 from studio_server import Handler, Studio, ThreadingHTTPServer, read, write
@@ -83,6 +85,25 @@ RUSS_MIXED = {
 
 
 class SplitLogicTests(unittest.TestCase):
+    def test_confirmation_hash_uses_all_canonical_binding_fields_verbatim(self):
+        segment = _segment('seg-000099', 10, 1000, 'Hello. 原文。', '你好', 'SPEAKER_02')
+        evidence = {
+            'official_source_sha256': 'a' * 64, 'official_speaker': 'Michael Aquino',
+            'official_locator': 'turn 22', 'official_excerpt': ' Hello. 原文。\n',
+        }
+        binding = {'document_sha256': 'd' * 64, 'id': 'seg-000099', 'speaker_id': 'SPEAKER_02',
+                   'start_ms': 10, 'end_ms': 1000, 'text': 'Hello. 原文。', **evidence}
+        canonical = json.dumps(binding, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        digest = segment_evidence_hash('d' * 64, segment, evidence)
+        self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
+        for field in ('id', 'speaker_id', 'start_ms', 'end_ms', 'text'):
+            changed = {**segment, field: segment[field] + (1 if isinstance(segment[field], int) else ' ')}
+            self.assertNotEqual(segment_evidence_hash('d' * 64, changed, evidence), digest)
+        for field in evidence:
+            self.assertNotEqual(segment_evidence_hash('d' * 64, segment, {**evidence, field: evidence[field] + ' '}), digest)
+        self.assertNotEqual(segment_evidence_hash('e' * 64, segment, evidence), digest)
+        self.assertEqual(segment_evidence_hash('d' * 64, {**segment, 'chinese': '别的译文', 'ambiguous': True}, evidence), digest)
+
     def test_left_keeps_id_right_gets_next_stable_id_others_unchanged(self):
         document = _doc([
             _segment("seg-000141", 800000, 856760, "prev", "前", "SPEAKER_01"),
@@ -242,6 +263,65 @@ class SplitApiTests(unittest.TestCase):
         status = response.status
         conn.close()
         return status, json.loads(body.decode()) if body else {}
+
+    def test_split_halves_require_new_hash_and_current_fields_then_confirm_one_by_one(self):
+        ident = self.studio.create([{'kind': 'youtube', 'value': 'https://youtu.be/abc'}], {'action': 'prepare'})[0]
+        self.studio.action(ident, 'cancel')
+        path = self.studio.job(ident)
+        original = _segment('seg-000001', 0, 1000, 'aaa bbb', '甲 乙', 'SPEAKER_00')
+        neighbor = _segment('seg-000002', 1000, 2000, 'ccc', '丙', 'SPEAKER_01', ambiguous=True)
+        write(path / 'document.json', _doc([original, neighbor]))
+        old_digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        endpoint = f'/api/jobs/{ident}/confirm-segments'
+        evidence = {
+            'official_source_sha256': hashlib.sha256(b'official transcript').hexdigest(),
+            'official_speaker': 'Michael Aquino', 'official_locator': 'turn 22', 'official_excerpt': 'aaa',
+        }
+
+        def item_for(digest, segment):
+            return {'id': segment['id'], 'speaker_id': segment['speaker_id'], **evidence,
+                    'evidence_hash': segment_evidence_hash(digest, segment, evidence)}
+
+        status, body = self.request(f'/api/jobs/{ident}/split-segment', {
+            'id': original['id'], 'cut_ms': 400,
+            'left': {'text': 'aaa', 'chinese': '甲', 'speaker_id': 'SPEAKER_00'},
+            'right': {'text': 'bbb', 'chinese': '乙', 'speaker_id': 'SPEAKER_01'},
+        })
+        self.assertEqual(status, 200)
+        left, right, untouched = read(path / 'document.json')['segments']
+        self.assertTrue(left['ambiguous'] and right['ambiguous'])
+        self.assertEqual(untouched, neighbor)
+        split_bytes = (path / 'document.json').read_bytes()
+        split_digest = hashlib.sha256(split_bytes).hexdigest()
+        self.assertNotEqual(split_digest, old_digest)
+        self.assertEqual(self.request(endpoint, {'document_sha256': old_digest, 'items': [item_for(old_digest, original)]})[0], 400)
+        status, body = self.request(endpoint, {'document_sha256': split_digest, 'items': [item_for(split_digest, original)]})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['rejected'], [{'id': left['id'], 'reason': 'evidence_hash_mismatch'}])
+        self.assertEqual((path / 'document.json').read_bytes(), split_bytes)
+
+        status, body = self.request(endpoint, {'document_sha256': split_digest, 'items': [item_for(split_digest, left)]})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['applied'], [left['id']])
+        document = read(path / 'document.json')
+        self.assertFalse(document['segments'][0]['ambiguous'])
+        self.assertTrue(document['segments'][1]['ambiguous'])
+        first_audit = document['segment_confirmations'][0]
+        current_digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        self.assertEqual(body['document_sha256'], current_digest)
+        self.assertEqual(self.request(endpoint, {'document_sha256': split_digest, 'items': [item_for(split_digest, right)]})[0], 400)
+        status, body = self.request(endpoint, {'document_sha256': current_digest, 'items': [item_for(split_digest, right)]})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['rejected'], [{'id': right['id'], 'reason': 'evidence_hash_mismatch'}])
+        status, body = self.request(endpoint, {'document_sha256': current_digest, 'items': [item_for(current_digest, right)]})
+        self.assertEqual(status, 200)
+        self.assertEqual(body['applied'], [right['id']])
+        document = read(path / 'document.json')
+        self.assertFalse(document['segments'][0]['ambiguous'] or document['segments'][1]['ambiguous'])
+        self.assertEqual(document['segments'][2], neighbor)
+        self.assertEqual(len(document['segment_confirmations']), 2)
+        self.assertEqual(document['segment_confirmations'][0], first_audit)
+        self.assertEqual([audit['document_sha256'] for audit in document['segment_confirmations']], [split_digest, current_digest])
 
     def test_split_endpoint_writes_document_marks_stale_and_document_post_still_requires_full_list(self):
         ident = self.studio.create([{"kind": "youtube", "value": "https://youtu.be/abc"}], {"action": "prepare"})[0]

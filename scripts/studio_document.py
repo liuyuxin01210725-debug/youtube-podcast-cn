@@ -1,11 +1,32 @@
 """Official document mutations that keep segment contracts intact."""
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from copy import deepcopy
 
 SEGMENT_ID_RE = re.compile(r"^seg-(\d+)$")
 MAX_TEXT = 20_000
+SEGMENT_CONFIRM_FIELDS = ("id", "speaker_id", "start_ms", "end_ms", "text")
+OFFICIAL_EVIDENCE_FIELDS = (
+    "official_source_sha256", "official_speaker", "official_locator", "official_excerpt",
+)
+
+
+def segment_evidence_hash(document_sha256: str, segment: dict, evidence: dict) -> str:
+    """SHA-256 of the v1 confirmation binding, serialized as UTF-8 JSON.
+
+    The flat object contains document_sha256, SEGMENT_CONFIRM_FIELDS from the
+    current segment, and OFFICIAL_EVIDENCE_FIELDS from the evidence. Serialize
+    with sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False.
+    Values are used verbatim, without trimming, coercion or Unicode normalization.
+    """
+    binding = {"document_sha256": document_sha256}
+    binding.update({field: segment[field] for field in SEGMENT_CONFIRM_FIELDS})
+    binding.update({field: evidence[field] for field in OFFICIAL_EVIDENCE_FIELDS})
+    canonical = json.dumps(binding, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def normalize_ws(value: str) -> str:

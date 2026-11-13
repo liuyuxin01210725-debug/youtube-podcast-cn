@@ -1,8 +1,10 @@
-import http.client, json, sys, tempfile, threading, time, unittest
+import hashlib, http.client, json, sys, tempfile, threading, time, unittest
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from studio_server import Studio, Handler, ThreadingHTTPServer, write, read
+from studio_document import OFFICIAL_EVIDENCE_FIELDS, segment_evidence_hash
 
 class ServerTests(unittest.TestCase):
     def setUp(self):
@@ -22,6 +24,166 @@ class ServerTests(unittest.TestCase):
         r=c.getresponse(); result=(r.status,r.read()); c.close(); return result
     def create(self):
         return self.studio.create([{'kind':'youtube','value':'https://youtu.be/abc'}],{'action':'prepare'})[0]
+    def review_job(self):
+        ident = self.create()
+        self.studio.action(ident, 'cancel')
+        path = self.studio.job(ident)
+        write(path / 'document.json', {
+            'segments': [
+                {'id': f'seg-{99 + i:06d}', 'speaker_id': 'SPEAKER_02' if i != 1 else 'SPEAKER_00',
+                 'start_ms': i * 1000, 'end_ms': (i + 1) * 1000, 'text': f'Turn {i}',
+                 'chinese': f'第{i}句', 'ambiguous': True}
+                for i in range(3)
+            ],
+            'speakers': {'SPEAKER_02': {'voice_slot': 'male_1'}, 'SPEAKER_00': {'voice_slot': 'male_2'}},
+            'references': {}, 'voices_confirmed': True,
+        })
+        return ident, path
+    def review_item(self, document_sha256, segment):
+        item = {
+            'id': segment['id'], 'speaker_id': segment['speaker_id'],
+            'official_source_sha256': hashlib.sha256(b'official transcript').hexdigest(),
+            'official_speaker': 'Michael Aquino', 'official_locator': 'turn 22',
+            'official_excerpt': 'An official excerpt. 官方原文。',
+        }
+        item['evidence_hash'] = segment_evidence_hash(document_sha256, segment, item)
+        return item
+
+    def test_confirm_segments_applies_only_valid_listed_item_and_records_replayable_audit(self):
+        ident, path = self.review_job()
+        before = read(path / 'document.json')
+        digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        valid = self.review_item(digest, before['segments'][0])
+        invalid = self.review_item(digest, before['segments'][1])
+        invalid['evidence_hash'] = '0' * 64
+        status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', {
+            'document_sha256': digest, 'items': [valid, invalid],
+        })
+        self.assertEqual(status, 200)
+        body = json.loads(raw)
+        self.assertEqual(body['applied'], [valid['id']])
+        self.assertEqual(body['rejected'], [{'id': invalid['id'], 'reason': 'evidence_hash_mismatch'}])
+        after = read(path / 'document.json')
+        expected = deepcopy(before)
+        expected['segments'][0]['ambiguous'] = False
+        self.assertEqual(after['segments'], expected['segments'])
+        self.assertEqual(after['speakers'], before['speakers'])
+        self.assertTrue(after['voices_confirmed'])
+        audit, = after['segment_confirmations']
+        self.assertEqual(audit['document_sha256'], digest)
+        self.assertEqual(audit['evidence_hash'], valid['evidence_hash'])
+        self.assertEqual(audit['hash_version'], 1)
+        for field in OFFICIAL_EVIDENCE_FIELDS:
+            self.assertEqual(audit[field], valid[field])
+        for field in ('id', 'speaker_id', 'start_ms', 'end_ms', 'text'):
+            self.assertEqual(audit[field], before['segments'][0][field])
+        self.assertEqual(segment_evidence_hash(audit['document_sha256'], audit, audit), audit['evidence_hash'])
+        self.assertEqual(body['document_sha256'], hashlib.sha256((path / 'document.json').read_bytes()).hexdigest())
+        self.assertNotEqual(body['document_sha256'], digest)
+        self.studio.action(ident, 'render')
+        state = read(path / 'state.json')
+        self.assertFalse(state['accept_unreviewed'])
+        self.assertNotIn('--accept-unreviewed', self.studio.engine_args(path, state))
+
+    def test_confirm_segments_stale_or_missing_document_hash_changes_nothing(self):
+        ident, path = self.review_job()
+        digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        document = read(path / 'document.json')
+        item = self.review_item(digest, document['segments'][0])
+        # Same JSON data, different bytes: only the exact on-disk digest is valid.
+        (path / 'document.json').write_text(json.dumps(document, ensure_ascii=False))
+        snapshot = {p.name: p.read_bytes() for p in path.iterdir() if p.is_file()}
+        for wrong in (digest, digest.upper(), '0' * 64, None):
+            with self.subTest(document_sha256=wrong):
+                status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', {
+                    'document_sha256': wrong, 'items': [item],
+                })
+                self.assertEqual(status, 400)
+                self.assertIn('document_sha256', json.loads(raw)['error'])
+                self.assertEqual({p.name: p.read_bytes() for p in path.iterdir() if p.is_file()}, snapshot)
+
+    def test_confirm_segments_rejects_wrong_hash_speaker_and_missing_segment(self):
+        ident, path = self.review_job()
+        document = read(path / 'document.json')
+        digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        valid = self.review_item(digest, document['segments'][0])
+        cases = [
+            ({**valid, 'evidence_hash': '0' * 64}, 'evidence_hash_mismatch'),
+            ({**valid, 'speaker_id': 'SPEAKER_00'}, 'speaker_id_mismatch'),
+            ({**valid, 'id': 'seg-999999'}, 'segment_not_found'),
+        ]
+        before = (path / 'document.json').read_bytes()
+        state = (path / 'state.json').read_bytes()
+        for item, reason in cases:
+            with self.subTest(reason=reason):
+                status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', {
+                    'document_sha256': digest, 'items': [item],
+                })
+                self.assertEqual(status, 200)
+                body = json.loads(raw)
+                self.assertEqual(body['applied'], [])
+                self.assertEqual(body['rejected'], [{'id': item['id'], 'reason': reason}])
+                self.assertEqual((path / 'document.json').read_bytes(), before)
+                self.assertEqual((path / 'state.json').read_bytes(), state)
+
+    def test_confirm_segments_requires_each_nonempty_official_evidence_field(self):
+        ident, path = self.review_job()
+        document = read(path / 'document.json')
+        digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        valid = self.review_item(digest, document['segments'][0])
+        before = (path / 'document.json').read_bytes()
+        for field in OFFICIAL_EVIDENCE_FIELDS:
+            for value in (None, '', ' \n ', 22):
+                with self.subTest(field=field, value=value):
+                    item = {**valid, field: value}
+                    if value is None:
+                        del item[field]
+                    else:
+                        # Even a matching hash cannot substitute for required evidence.
+                        item['evidence_hash'] = segment_evidence_hash(digest, document['segments'][0], item)
+                    status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', {
+                        'document_sha256': digest, 'items': [item],
+                    })
+                    self.assertEqual(status, 200)
+                    body = json.loads(raw)
+                    self.assertEqual(body['applied'], [])
+                    self.assertEqual(body['rejected'], [{'id': item['id'], 'reason': f'invalid_{field}'}])
+                    self.assertEqual((path / 'document.json').read_bytes(), before)
+
+    def test_confirm_segments_empty_or_ids_only_cannot_confirm_all(self):
+        ident, path = self.review_job()
+        digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        snapshot = {p.name: p.read_bytes() for p in path.iterdir() if p.is_file()}
+        for payload in ({'document_sha256': digest}, {'document_sha256': digest, 'items': []}):
+            status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', payload)
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(raw), {'ok': True, 'applied': [], 'rejected': [], 'document_sha256': digest})
+        for items in ([{'id': 'seg-000099'}], ['seg-000099'], [None], [{}]):
+            status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', {'document_sha256': digest, 'items': items})
+            self.assertEqual(status, 200)
+            body = json.loads(raw)
+            self.assertEqual(body['applied'], [])
+            self.assertEqual(len(body['rejected']), 1)
+        for payload in ({}, {'document_sha256': digest, 'confirm_all': True},
+                        {'document_sha256': digest, 'items': None}, {'document_sha256': digest, 'items': 'all'}):
+            self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-segments', payload)[0], 400)
+        self.assertEqual({p.name: p.read_bytes() for p in path.iterdir() if p.is_file()}, snapshot)
+
+    def test_confirm_segments_respects_csrf_and_job_editability(self):
+        ident, path = self.review_job()
+        digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
+        item = self.review_item(digest, read(path / 'document.json')['segments'][0])
+        payload = {'document_sha256': digest, 'items': [item]}
+        before = (path / 'document.json').read_bytes()
+        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-segments', payload, {'X-CSRF-Token': 'bad'})[0], 400)
+        for job_status in ('queued', 'running', 'cancelling'):
+            state = read(path / 'state.json')
+            state['status'] = job_status
+            write(path / 'state.json', state)
+            status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', payload)
+            self.assertEqual(status, 400)
+            self.assertIn('等待任务停止', json.loads(raw)['error'])
+            self.assertEqual((path / 'document.json').read_bytes(), before)
     def test_origin_host_csrf_and_traversal(self):
         self.assertEqual(self.request('/api/jobs',{}, {'Origin':'https://evil.example'})[0],400)
         self.assertEqual(self.request('/api/jobs',{}, {'Host':'evil.example'})[0],400)
