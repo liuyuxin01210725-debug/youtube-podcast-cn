@@ -125,43 +125,132 @@ final class LibraryStore: ObservableObject {
 
     private func mediaKey(for id: String) -> String { visibleByID[id]?.mediaKey ?? id }
 
+    /// Prefer the current media key. Fall back to the bare catalog id only when
+    /// no revision-qualified key exists yet (same-bytes gen2 promotion). A later
+    /// unmapped audio revision must not inherit that bare-id cursor.
+    nonisolated static func hasRevisionQualifiedKey(in progress: [String: ListenMark], episodeID: String) -> Bool {
+        let prefix = episodeID + "."
+        return progress.keys.contains { $0.hasPrefix(prefix) }
+    }
+
+    nonisolated static func resolvedListenMark(
+        in progress: [String: ListenMark],
+        mediaKey: String,
+        episodeID: String
+    ) -> ListenMark? {
+        if let mark = progress[mediaKey] { return mark }
+        if mediaKey != episodeID, Self.hasRevisionQualifiedKey(in: progress, episodeID: episodeID) {
+            return nil
+        }
+        return progress[episodeID]
+    }
+
+    nonisolated static func resolvedTouch(
+        in touched: [String: TimeInterval],
+        progress: [String: ListenMark],
+        mediaKey: String,
+        episodeID: String
+    ) -> TimeInterval {
+        if let value = touched[mediaKey] { return value }
+        if mediaKey != episodeID, Self.hasRevisionQualifiedKey(in: progress, episodeID: episodeID) {
+            return 0
+        }
+        return touched[episodeID] ?? 0
+    }
+
+    private func listenMark(for id: String) -> ListenMark? {
+        let key = mediaKey(for: id)
+        return Self.resolvedListenMark(in: progress, mediaKey: key, episodeID: id)
+    }
+
+    private func listenMark(for episode: Episode) -> ListenMark? {
+        Self.resolvedListenMark(in: progress, mediaKey: episode.mediaKey, episodeID: episode.id)
+    }
+
+    /// Copy a bare-id mark onto the current media key when that key is still empty
+    /// and no other revision key exists. Never overwrites a newer key; leaves the
+    /// bare-id record in place.
+    private func adoptLegacyListenMarks(in episodes: [Episode]) {
+        var changed = false
+        var touchesChanged = false
+        for episode in episodes {
+            let key = episode.mediaKey
+            guard key != episode.id, progress[key] == nil else { continue }
+            guard !Self.hasRevisionQualifiedKey(in: progress, episodeID: episode.id) else { continue }
+            guard let mark = progress[episode.id] else { continue }
+            progress[key] = mark
+            changed = true
+            if continueTouched[key] == nil, let touched = continueTouched[episode.id] {
+                continueTouched[key] = touched
+                touchesChanged = true
+            }
+        }
+        if changed { saveProgressMap() }
+        if touchesChanged { saveContinueBookkeeping() }
+    }
+
+    private func isContinueDismissed(_ episode: Episode) -> Bool {
+        continueDismissedIDs.contains { key in
+            key == episode.id || key == episode.mediaKey || key.hasPrefix(episode.id + ".")
+        }
+    }
+
+    private func episodeID(fromProgressKey key: String) -> String {
+        key.split(separator: ".", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? key
+    }
+
+    private func dismissKeys(for id: String) -> Set<String> {
+        let current = mediaKey(for: id)
+        var keys: Set<String> = [id, current]
+        for key in continueDismissedIDs where key == id || key.hasPrefix(id + ".") {
+            keys.insert(key)
+        }
+        for key in progress.keys where key == id || key.hasPrefix(id + ".") {
+            keys.insert(key)
+        }
+        for key in continueTouched.keys where key == id || key.hasPrefix(id + ".") {
+            keys.insert(key)
+        }
+        return keys
+    }
+
     func isUnplayed(_ id: String) -> Bool {
-        Self.isUnplayed(progress[mediaKey(for: id)])
+        Self.isUnplayed(listenMark(for: id))
     }
 
     func isFinished(_ id: String) -> Bool {
-        progress[mediaKey(for: id)]?.finished == true
+        listenMark(for: id)?.finished == true
     }
 
     /// In progress: started (≥5s) and not finished.
     func isInProgress(_ id: String) -> Bool {
-        guard let entry = progress[mediaKey(for: id)], !entry.finished else { return false }
+        guard let entry = listenMark(for: id), !entry.finished else { return false }
         return entry.seconds >= 5
     }
 
     /// Label for an unfinished shelf row. Continue displays replay cursors separately.
     func continuePointLabel(for id: String) -> String? {
-        guard let entry = progress[mediaKey(for: id)], !entry.finished, entry.seconds >= 5 else { return nil }
+        guard let entry = listenMark(for: id), !entry.finished, entry.seconds >= 5 else { return nil }
         return "上次听到 \(listenClock(entry.seconds))"
     }
 
     func playedFraction(for episode: Episode) -> Double? {
-        guard let entry = progress[episode.mediaKey], !entry.finished, entry.seconds >= 5 else { return nil }
+        guard let entry = listenMark(for: episode), !entry.finished, entry.seconds >= 5 else { return nil }
         let duration = episode.durationSec ?? 0
         guard duration > 1 else { return nil }
         return min(1, max(0, entry.seconds / duration))
     }
 
     func resumeSeconds(for id: String) -> Double {
-        Self.resumeSeconds(in: progress, id: mediaKey(for: id))
+        Self.resumeSeconds(from: listenMark(for: id))
     }
 
     func resumeSeconds(for episode: Episode) -> Double {
-        Self.resumeSeconds(in: progress, id: episode.mediaKey)
+        Self.resumeSeconds(from: listenMark(for: episode))
     }
 
     func isFinished(_ episode: Episode) -> Bool {
-        progress[episode.mediaKey]?.finished == true
+        listenMark(for: episode)?.finished == true
     }
 
     /// Returns whether this sample changed the episode from unfinished to finished.
@@ -177,8 +266,14 @@ final class LibraryStore: ObservableObject {
 
     private func remember(mediaKey: String, seconds: Double, duration: Double, finished: Bool?) -> Bool {
         guard seconds.isFinite, seconds >= 0, !mediaKey.isEmpty else { return false }
-        let wasFinished = progress[mediaKey]?.finished == true
-        if let next = Self.reducing(progress, id: mediaKey, seconds: seconds, duration: duration, finished: finished) {
+        let episodeID = episodeID(fromProgressKey: mediaKey)
+        let current = Self.resolvedListenMark(in: progress, mediaKey: mediaKey, episodeID: episodeID)
+        let wasFinished = current?.finished == true
+        var map = progress
+        if map[mediaKey] == nil, let inherited = current {
+            map[mediaKey] = inherited
+        }
+        if let next = Self.reducing(map, id: mediaKey, seconds: seconds, duration: duration, finished: finished) {
             progress = next
             saveProgressMap()
         }
@@ -190,8 +285,9 @@ final class LibraryStore: ObservableObject {
     /// Manual archive uses the same finished fact as playback, without inventing progress.
     func markFinished(_ id: String) {
         guard !id.isEmpty else { return }
-        progress[mediaKey(for: id)] = ListenMark(
-            seconds: progress[mediaKey(for: id)]?.seconds ?? 0,
+        let key = mediaKey(for: id)
+        progress[key] = ListenMark(
+            seconds: listenMark(for: id)?.seconds ?? 0,
             finished: true,
             finishedSource: .manual,
             replaySeconds: nil
@@ -204,14 +300,15 @@ final class LibraryStore: ObservableObject {
     /// not glue finished back on.
     func markUnfinished(_ id: String) {
         guard !id.isEmpty else { return }
-        let previous = progress[mediaKey(for: id)]
+        let key = mediaKey(for: id)
+        let previous = listenMark(for: id)
         let seconds: Double
         if let cursor = previous?.replaySeconds, cursor.isFinite, cursor > 0 {
             seconds = cursor
         } else {
             seconds = previous?.seconds ?? 0
         }
-        progress[mediaKey(for: id)] = ListenMark(
+        progress[key] = ListenMark(
             seconds: seconds,
             finished: false,
             finishedSource: nil,
@@ -227,11 +324,16 @@ final class LibraryStore: ObservableObject {
         var marks: [String: ContinueListening.Mark] = [:]
         var durations: [String: Double] = [:]
         for episode in episodes {
-            guard let entry = progress[episode.mediaKey] else { continue }
+            guard let entry = listenMark(for: episode) else { continue }
             marks[episode.id] = ContinueListening.Mark(
                 seconds: entry.seconds,
                 finished: entry.finished,
-                touchedAt: continueTouched[episode.mediaKey] ?? 0,
+                touchedAt: Self.resolvedTouch(
+                    in: continueTouched,
+                    progress: progress,
+                    mediaKey: episode.mediaKey,
+                    episodeID: episode.id
+                ),
                 replaySeconds: entry.replaySeconds
             )
             durations[episode.id] = episode.durationSec ?? 0
@@ -239,13 +341,19 @@ final class LibraryStore: ObservableObject {
         return ContinueListening.items(
             marks: marks,
             durations: durations,
-            dismissed: Set(episodes.filter { continueDismissedIDs.contains($0.mediaKey) }.map(\.id))
+            dismissed: Set(episodes.filter { isContinueDismissed($0) }.map(\.id))
         )
     }
 
     /// Left swipe on a continue row. Does not delete the episode or its ListenMark.
+    /// Records the bare id, the current media key, and any already stored revision
+    /// aliases so a later bare-id fallback cannot resurrect the card.
     func dismissContinue(_ id: String) {
-        let next = ContinueListening.dismissing(continueDismissedIDs, id: mediaKey(for: id))
+        guard !id.isEmpty else { return }
+        var next = continueDismissedIDs
+        for key in dismissKeys(for: id) {
+            next = ContinueListening.dismissing(next, id: key)
+        }
         guard next != continueDismissedIDs else { return }
         continueDismissedIDs = next
         saveContinueBookkeeping()
@@ -261,7 +369,10 @@ final class LibraryStore: ObservableObject {
     }
 
     private func acknowledgeContinue(mediaKey: String) {
-        let next = ContinueListening.acknowledging(continueDismissedIDs, id: mediaKey)
+        let episodeID = episodeID(fromProgressKey: mediaKey)
+        let next = continueDismissedIDs.filter { key in
+            key != episodeID && key != mediaKey && !key.hasPrefix(episodeID + ".")
+        }
         guard next != continueDismissedIDs else { return }
         continueDismissedIDs = next
         saveContinueBookkeeping()
@@ -323,7 +434,11 @@ final class LibraryStore: ObservableObject {
     }
 
     nonisolated static func resumeSeconds(in progress: [String: ListenMark], id: String) -> Double {
-        guard let entry = progress[id] else { return 0 }
+        resumeSeconds(from: progress[id])
+    }
+
+    nonisolated static func resumeSeconds(from entry: ListenMark?) -> Double {
+        guard let entry else { return 0 }
         if entry.finished {
             if let cursor = entry.replaySeconds, cursor.isFinite, cursor > 0 {
                 return cursor
@@ -385,6 +500,7 @@ final class LibraryStore: ObservableObject {
         visibleByID = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, $0) })
         episodes = visible
         waitingOnCloud = loaded.waiting || visible.contains { $0.downloading }
+        adoptLegacyListenMarks(in: visible)
     }
 
     /// The Documents catalog switch is serialized with reads and other commits

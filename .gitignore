@@ -24,3 +24,6 @@ __pycache__/
 .diarization-venv
 .speech-venv
 .speech-venv/
+
+# Generated from a local non-exportable sanitized library. Do not commit.
+ios/PrivateListen/PrivateListenUITests/RealLibraryIDs.swift

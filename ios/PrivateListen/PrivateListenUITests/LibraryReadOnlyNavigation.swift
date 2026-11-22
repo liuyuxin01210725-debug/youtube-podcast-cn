@@ -69,7 +69,7 @@ extension XCTestCase {
     }
 
     @MainActor
-    private func episodeRow(_ episodeID: String, in app: XCUIApplication) -> XCUIElement {
+    func episodeRow(_ episodeID: String, in app: XCUIApplication) -> XCUIElement {
         app.descendants(matching: .any)["library.episode.\(episodeID)"]
     }
 
@@ -86,7 +86,7 @@ extension XCTestCase {
     }
 
     @MainActor
-    private func openEpisodeFromFilter(_ filter: String, episodeID: String, in app: XCUIApplication) -> Bool {
+    func openEpisodeFromFilter(_ filter: String, episodeID: String, in app: XCUIApplication) -> Bool {
         let chip = app.buttons[filter]
         guard chip.waitForExistence(timeout: 5), chip.isHittable else { return false }
         chip.tap()
@@ -101,7 +101,7 @@ extension XCTestCase {
     }
 
     @MainActor
-    private func revealListenNote(in app: XCUIApplication) {
+    func revealListenNote(in app: XCUIApplication) {
         let heading = app.staticTexts["听后感"]
         let editor = app.textViews["听后感"]
         let placeholder = app.staticTexts["这期对你真正想记住的是什么？"]

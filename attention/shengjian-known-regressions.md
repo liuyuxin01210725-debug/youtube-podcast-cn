@@ -8,6 +8,7 @@
 | 2026-10起 | 女嘉宾听感男声 | 人数闸过但无声学性别硬闸 | 发布闸+人听 | 上架前人听 30s 性别可辨 |
 | 2026-11-03 | 入队后合成未过闸仍可能叙事成「可听」 | 盯合成未绑 E2E 手机可听成功标准 | E2E·C–E | job≠complete 或 OSS/库 0 hit → 禁称可听/E2E成功；同型须先补闸再重入 |
 | 2026-11-04 | 听后感输入区从 tip/真机消失 | **未进 Git 的 UI 源文件会被 tip 丢掉**（ListenNote* untracked + 编包 silent aside `/tmp` 未还原） | listennote-anti-regress-gate · D5 | tip 含 ListenNote*；CURRENT 无静默遗漏或已备注；真机播放页见「听后感」+占位句；编包无 aside 残留 |
+| 2026-11-22 | 真实库短播后 Continue 不出现刚听的未完成集 | gen2 后 ListenMark 仍在裸 id，继续轨道只读 id.<revision>；migrate 回填不在普通启动执行 | sim 脱敏真实库 · 继续/撤卡旅程 | 裸 id 无版本键时短播 3–5s→Continue=A 且重启仍续；左滑后不打开同集、重启不复活，进度/已听/星/笔记保留（合法推进除外） |
 
 ## 2026-11-04 · Continue 短播不跟最近（同型二次）
 - **现象**：随便打开一集播几秒退出，资料库「继续播放」仍显示别的旧未听完，不是刚听的那集。
