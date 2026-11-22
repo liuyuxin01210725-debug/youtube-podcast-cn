@@ -88,6 +88,38 @@ final class LibraryJourneyUITests: XCTestCase {
         XCTAssertFalse(recent.exists, "The newest card must stay dismissed after relaunch")
     }
 
+    func testShortPlaybackReturnsTheJustPlayedEpisodeToContinue() {
+        let app = XCUIApplication()
+        app.launch()
+        XCTAssertTrue(app.navigationBars["资料库"].waitForExistence(timeout: 5))
+        let cards = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "继续播放 "))
+        XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(cards.count, 1)
+        XCTAssertTrue(cards.firstMatch.label.hasPrefix("继续播放 Layout fixture episode "))
+
+        let episode = app.descendants(matching: .any)["library.episode.ui-search-row-56"]
+        XCTAssertTrue(episode.waitForExistence(timeout: 5))
+        XCTAssertTrue(episode.isHittable)
+        episode.tap()
+        let player = app.navigationBars["正在播放"]
+        XCTAssertTrue(player.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["LibrarySearchNeedle"].exists)
+        XCTAssertTrue(app.buttons["暂停"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["0:03"].waitForExistence(timeout: 5), "Real playback must reach three seconds")
+        player.buttons.element(boundBy: 0).tap()
+
+        let current = continueCard("LibrarySearchNeedle", in: app)
+        XCTAssertTrue(current.waitForExistence(timeout: 5))
+        XCTAssertTrue(current.isHittable)
+        let shortPosition = current.descendants(matching: .any).matching(NSPredicate(
+            format: "label CONTAINS %@ OR label CONTAINS %@", "剩余 0:55", "剩余 0:56"
+        )).firstMatch
+        XCTAssertTrue(shortPosition.exists, "A 60-second fixture should have 55–56 seconds remaining after the short play")
+        XCTAssertEqual(cards.count, 1, "The just-played episode must replace the older card")
+        captureAcceptanceScreenshot("continue-card-after-short-play")
+    }
+
     private func pausedListenNote(in app: XCUIApplication) -> XCUIElement {
         XCTAssertTrue(app.navigationBars["正在播放"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["TEST-ISOLATE UI TEST"].exists)

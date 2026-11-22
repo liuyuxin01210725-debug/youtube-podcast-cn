@@ -157,15 +157,16 @@ test-point-listen:
 	fi
 
 # 声间装机 / 宣称可听前必须跑。没有平台/编译器则失败，不能跳过；真机 UI 四连另验。
+export SHENGJIAN_REMOTE_TIP
+shengjian-before-claim-ready shengjian-require-remote-tip: override SHENGJIAN_REMOTE_TIP := $(or $(value TIP),$(value SHA))
 shengjian-before-claim-ready:
-	@if [ -n "$(or $(TIP),$(SHA))" ]; then $(MAKE) shengjian-require-remote-tip; fi
-	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-library-snapshot test-continue-ux test-extract-display test-point-listen test-player-listen-note-ui test-books shengjian-source-gate
+	@bash attention/shengjian-pre-claim-ready.sh
+	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-library-snapshot test-continue-ux test-extract-display test-point-listen test-player-listen-note-ui test-books
 	@echo "声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + mock 不冒充 ready）。"
 
 shengjian-source-gate:
-	@bash attention/shengjian-pre-claim-ready.sh
+	@bash attention/shengjian-pre-claim-ready.sh --source-only
 
-shengjian-require-remote-tip: export SHENGJIAN_REMOTE_TIP := $(or $(value TIP),$(value SHA))
 shengjian-require-remote-tip:
 	@$(PYTHON) scripts/shengjian_remote_tip.py -- "$$SHENGJIAN_REMOTE_TIP"
 

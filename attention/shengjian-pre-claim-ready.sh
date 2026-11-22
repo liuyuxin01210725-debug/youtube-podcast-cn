@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 声间装机 / 宣称可听前的源码与二进制探针。
-# 单测由 make shengjian-before-claim-ready 先跑（ContinueUXProbe + ExtractDisplayChecks）。
+# 先校验远端构建源及对应的 CURRENT 包；普通源码检查显式用 --source-only。
 # 这里锁会反复回潮的字符串：继续播放、听后感、mock 不得冒充 ready。
 set -euo pipefail
 
@@ -11,6 +11,14 @@ fail() {
   echo "FAIL $*" >&2
   exit 1
 }
+
+if [[ $# -eq 0 ]]; then
+  record=${SHENGJIAN_BUILD_RECORD-dist/CURRENT-iphoneos.sha.txt}
+  python3 scripts/shengjian_remote_tip.py --build-record "$record" -- "${SHENGJIAN_REMOTE_TIP:-}"
+  echo "ok  CURRENT-iphoneos 构建源、远端分支及对应包的二进制探针"
+elif [[ $# -ne 1 || "$1" != --source-only ]]; then
+  fail "未知检查模式"
+fi
 
 python3 - "$root" <<'PY'
 import pathlib, sys
@@ -141,72 +149,3 @@ if "isPlaceholderDeep(packet)" not in chunk:
 
 print("ok  源码探针：继续播放短播 / 听后感在提炼前 / mock 不冒充 ready")
 PY
-
-scan_binary() {
-  local bin="$1"
-  # macOS `strings` often drops UTF-8 Chinese; search raw bytes instead.
-  python3 -c '
-import pathlib, sys
-bin_path = pathlib.Path(sys.argv[1])
-blob = bin_path.read_bytes()
-for token in ("继续播放", "听后感", "mock_not_official"):
-    if token.encode("utf-8") not in blob:
-        print(f"FAIL 二进制缺少「{token}」：{bin_path}", file=sys.stderr)
-        raise SystemExit(1)
-print(f"ok  二进制含继续播放、听后感、mock_not_official：{bin_path}")
-' "$bin" || fail "二进制探针失败：$bin"
-}
-
-shopt -s nullglob
-found=0
-# Only CURRENT tip + DerivedData — historic dist/*.app would false-fail on old builds.
-search_roots=()
-for cand in   "$root/dist/CURRENT-iphoneos"   "$root/dist/PrivateListen-CURRENT-iphoneos.app"   "$root/dist/CURRENT-iphoneos.app"; do
-  if [[ -e "$cand" ]]; then
-    search_roots+=("$cand")
-  fi
-done
-
-if [[ -n "${SHENGJIAN_APP:-}" ]]; then
-  [[ -d "$SHENGJIAN_APP" ]] || fail "指定 App 不存在：$SHENGJIAN_APP"
-  search_roots+=("$SHENGJIAN_APP")
-fi
-# Bash 3.2 treats an empty array expansion as unset under set -u.
-for root_cand in ${search_roots[@]+"${search_roots[@]}"}; do
-  while IFS= read -r -d '' app; do
-    # Debug tip builds put Chinese strings in PrivateListen.debug.dylib (thin stub is ~90KB).
-    dylib="$app/PrivateListen.debug.dylib"
-    exe="$app/PrivateListen"
-    if [[ -f "$dylib" ]]; then
-      scan_binary "$dylib"
-      found=1
-    elif [[ -f "$exe" ]]; then
-      scan_binary "$exe"
-      found=1
-    fi
-  done < <(find "$root_cand" -type d -name 'PrivateListen.app' -print0 2>/dev/null || true)
-  # CURRENT may itself be the .app bundle
-  if [[ -d "$root_cand" && -f "$root_cand/Info.plist" ]]; then
-    dylib="$root_cand/PrivateListen.debug.dylib"
-    exe="$root_cand/PrivateListen"
-    if [[ -f "$dylib" ]]; then
-      scan_binary "$dylib"
-      found=1
-    elif [[ -f "$exe" ]]; then
-      scan_binary "$exe"
-      found=1
-    fi
-  fi
-done
-
-while IFS= read -r -d '' bin; do
-  case "$bin" in
-    *swift-toolchain*|*usr/lib/swift*|*DerivedData/*/SourcePackages/*) continue ;;
-  esac
-  scan_binary "$bin"
-  found=1
-done < <(find "$root/ios" -type f -name '*.dylib' -print0 2>/dev/null || true)
-
-if [[ "$found" -eq 0 ]]; then
-  echo "ok  未发现已编译 App/dylib。没有手机 UI 自动化时，源码探针 + 继续播放/提炼单测就是装机前检查。"
-fi

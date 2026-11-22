@@ -17,6 +17,7 @@ JOURNEY_CASE = "PrivateListenUITests/LibraryJourneyUITests"
 ABSENT_TEST = "testLaunchArgumentLeavesLibraryVisible"
 RECENT_ID = "ui-search-row-55"
 NEXT_ID = "ui-search-row-54"
+SHORT_PLAY_ID = "ui-search-row-56"
 NOTE_APPEND = "\nAdded by acceptance"
 LIBRARY_PATH = Path("Documents/中文播客私人库")
 PREFERENCES_PATH = Path(f"Library/Preferences/{BUNDLE}.plist")
@@ -134,7 +135,7 @@ def snapshot(container):
 
 def seed_journeys(container, episodes, rows, audio):
     for row in rows:
-        if row["id"] in (RECENT_ID, NEXT_ID):
+        if row["id"] in (RECENT_ID, NEXT_ID, SHORT_PLAY_ID):
             folder = episodes / row["id"]
             row["duration_sec"] = 60
             shutil.copyfile(audio, folder / "output.mp3")
@@ -307,6 +308,8 @@ def main():
                         "testLongListenNoteAppendsScrollsAndPersists",
                         "testSwipingContinueCardPromotesNextUnfinishedEpisode")
     assert_journeys(container, journey_before)
+    test("Debug", "debug-short-play-journey", rows, JOURNEY_CASE,
+         "testShortPlaybackReturnsTheJustPlayedEpisodeToContinue")
 
 
 if __name__ == "__main__":
