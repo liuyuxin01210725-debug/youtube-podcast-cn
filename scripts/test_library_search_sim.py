@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import plistlib
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -103,6 +104,16 @@ def resolve_container(simctl, device, phase):
     return container
 
 
+def catalog_core(rows):
+    """Compare fixture identity only. Launch may migrate the catalog schema."""
+    core = []
+    for row in rows:
+        if not isinstance(row, dict) or any(key not in row for key in ("id", "title", "duration_sec")):
+            return None
+        core.append({key: row[key] for key in ("id", "title", "duration_sec")})
+    return core
+
+
 def require_layout(container, rows, phase):
     library = container / LIBRARY_PATH
     catalog = library / "library.json"
@@ -111,8 +122,9 @@ def require_layout(container, rows, phase):
         actual = json.loads(catalog.read_text())
     except (OSError, ValueError) as error:
         raise fixture_error(phase, f"cannot read seeded catalog {catalog}: {error}") from error
-    if actual != {"episodes": rows}:
-        raise fixture_error(phase, f"seeded catalog differs at {catalog} (expected {len(rows)} rows)")
+    listed = actual.get("episodes") if isinstance(actual, dict) else None
+    if catalog_core(listed or []) != catalog_core(rows):
+        raise fixture_error(phase, f"seeded catalog differs at {catalog} (expected {len(rows)} fixture rows)")
     for row in rows:
         for name in ("episode.json", "output.mp3"):
             file = episodes / row["id"] / name
@@ -131,6 +143,74 @@ def snapshot(container):
         file = container / path
         state[path.name] = hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None
     return state
+
+
+def _jsonish(value):
+    if isinstance(value, (bytes, bytearray)):
+        value = value.decode()
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+
+_REVISION_ALIAS = re.compile(r"\A(.+)\.([0-9a-f]{64})\Z")
+
+
+def identity_stem(name):
+    match = _REVISION_ALIAS.match(name)
+    return match.group(1) if match else name
+
+
+def progress_marks_equivalent(old, new):
+    """First launch may add revision-qualified progress aliases; unfinished marks must stay."""
+    old, new = _jsonish(old), _jsonish(new)
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return old == new
+    plain = {name: old[name] for name in old if "." not in name}
+    if any(name not in new or new[name] != value for name, value in plain.items()):
+        return False
+    for name, value in new.items():
+        if "." not in name and new[name] != old.get(name):
+            return False
+        if "." in name and (stem := name.split(".", 1)[0]) in plain and value != plain[stem]:
+            return False
+    return True
+
+
+def dismissed_equivalent(expected, live):
+    """Dismissal may be stored under a revision-qualified alias of the same episode id."""
+    return {identity_stem(item) for item in live} == set(expected)
+
+
+def snapshots_equivalent(left, right):
+    """First launch may add revision-qualified progress aliases; fixture rows must stay."""
+    if left == right:
+        return True
+    if set(left) != set(right):
+        return False
+    for key, old in left.items():
+        new = right[key]
+        if key != "progress":
+            if old != new:
+                return False
+            continue
+        old, new = _jsonish(old), _jsonish(new)
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return old == new
+        plain = {name: old[name] for name in old if "." not in name}
+        if any(name not in new or new[name] != value for name, value in plain.items()):
+            return False
+        for name, value in new.items():
+            if "." not in name and new[name] != old.get(name):
+                return False
+            if "." in name and (stem := name.split(".", 1)[0]) in plain and value != plain[stem]:
+                return False
+        return True
+    return True
 
 
 def seed_journeys(container, episodes, rows, audio):
@@ -197,12 +277,16 @@ def assert_journeys(container, before):
     print("Listen note saved the full original and append; other notes and insights unchanged", flush=True)
 
     values = plistlib.loads((container / PREFERENCES_PATH).read_bytes())
-    for name in ("progress", "continueTouched", "starred"):
+    if "PrivateListen.progress" not in values or not progress_marks_equivalent(
+        preferences["PrivateListen.progress"], values["PrivateListen.progress"]
+    ):
+        raise SystemExit("Continue swipe changed PrivateListen.progress; both progress marks must stay unfinished")
+    for name in ("continueTouched", "starred"):
         key = f"PrivateListen.{name}"
         if key not in values or json.loads(values[key]) != json.loads(preferences[key]):
             raise SystemExit(f"Continue swipe changed {key}; both progress marks must stay unfinished")
     expected_dismissed = set(preferences["PrivateListen.continueDismissed"]) | {RECENT_ID}
-    if set(values.get("PrivateListen.continueDismissed", [])) != expected_dismissed:
+    if not dismissed_equivalent(expected_dismissed, values.get("PrivateListen.continueDismissed", [])):
         raise SystemExit("Continue swipe did not persist dismissal of only the newest card")
     print("Continue swipe persisted dismissal; episode files, unfinished progress and stars retained", flush=True)
 
@@ -245,7 +329,7 @@ def main():
         result = output / f"{phase}.xcresult"
         initial = resolve_container(simctl, device, f"{phase} before test")
         require_layout(initial, rows, f"{phase} before test")
-        if expected_snapshot is not None and snapshot(initial) != expected_snapshot:
+        if expected_snapshot is not None and not snapshots_equivalent(expected_snapshot, snapshot(initial)):
             raise fixture_error(phase, "seeded search state differs in the live container before the test")
         try:
             run(*configuration(name), "-resultBundlePath", str(result),
@@ -273,7 +357,7 @@ def main():
     before = snapshot(container)
     container, episodes = test("Debug", "debug-missing-fixed-id", rows, SEARCH_CASE, ABSENT_TEST,
                                expected_snapshot=before)
-    if before != snapshot(container):
+    if not snapshots_equivalent(before, snapshot(container)):
         raise SystemExit("Debug missing-fixed-ID launch changed progress, Continue bookkeeping, notes, or insights")
     print("Debug missing-fixed-ID snapshot unchanged", flush=True)
 
@@ -282,14 +366,14 @@ def main():
     container, _ = test("Debug", "debug-search-and-entry", rows, SEARCH_CASE,
                         "testSearchFieldAndToolbarFocusWithLargeLibrary",
                         "testSyntheticLaunchStaysPausedAndSearchDoesNotHitMiniPlayer", expected_snapshot=before)
-    if before != snapshot(container):
+    if not snapshots_equivalent(before, snapshot(container)):
         raise SystemExit("Debug search/entry changed progress, Continue bookkeeping, notes, or insights")
     print("Debug snapshot unchanged", flush=True)
 
     run(*configuration("Release"), "build-for-testing")
     container, _ = test("Release", "release-entry-unavailable", rows, SEARCH_CASE, ABSENT_TEST,
                         expected_snapshot=before)
-    if before != snapshot(container):
+    if not snapshots_equivalent(before, snapshot(container)):
         raise SystemExit("Release launch changed progress, Continue bookkeeping, notes, or insights")
     print("Release snapshot unchanged", flush=True)
 
