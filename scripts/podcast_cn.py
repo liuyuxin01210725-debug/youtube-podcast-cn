@@ -11,7 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
-import urllib.request
+import tempfile
 from urllib.parse import urlsplit
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -47,6 +47,18 @@ from podcast_captions import (
     parse_vtt,
     parse_vtt_pieces,
 )
+from studio_recovery import (
+    StudioRecoveryError, TranslationJournal, decode_json_object, require_translation_network,
+)
+from translation_budget import (
+    ENDPOINT,
+    MODEL,
+    TranslationBudget,
+    open_translation_request,
+    request_translation,
+    supports_policy,
+)
+from translation_admission import RuntimeAdmission
 from temporary_audio import (
     TemporaryAudioCleanupError,
     with_temporary_audio,
@@ -359,6 +371,10 @@ _TRANSLATION_SYSTEM_PROMPT = """你是英文播客的忠实中文翻译。
 只返回 JSON,不要解释。"""
 
 
+# Bump when the prompt or generation settings change, independent of pricing.
+_BOUNDED_TRANSLATION_VERSION = "studio-chat-nonthinking-v1"
+
+
 _TITLE_SYSTEM_PROMPT = """你给中文播客私人听起单集标题。
 把用户给的英文主题译成自然、好懂的简体中文，让人一眼知道这一集在讲什么。
 人名、主持人、节目名和品牌保持原文，不要音译或意译，例如 Huberman、All-In、The Diary Of A CEO、DOAC。
@@ -375,15 +391,23 @@ class OpenAICompatibleTranslationClient:
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] = open_translation_request,
+        *,
+        budget: TranslationBudget | None = None,
+        credential_loader: Callable[[], str | None] | None = None,
+        request_journal: TranslationJournal | None = None,
+        admission: RuntimeAdmission | None = None,
     ) -> None:
+        require_translation_network(fake_opener=opener is not open_translation_request)
         config = (
             get_provider_config(provider)
             if isinstance(provider, str)
             else provider
         )
-        resolved_key = api_key or os.getenv(config.api_key_env)
-        if not resolved_key:
+        resolved_key = api_key
+        if credential_loader is None and budget is None:
+            resolved_key = resolved_key or os.getenv(config.api_key_env)
+        if not resolved_key and credential_loader is None and budget is None:
             error_type = (
                 DeepSeekConfigurationError
                 if config.name == "deepseek"
@@ -399,73 +423,59 @@ class OpenAICompatibleTranslationClient:
         )
         self.config = config
         self.provider = config.name
-        self._api_key = resolved_key
+        if resolved_key:
+            self._load_key = lambda: resolved_key
+        else:
+            self._load_key = credential_loader or (lambda: os.getenv(config.api_key_env))
+        self._budget = budget
+        self._request_journal = request_journal
+        self._admission = admission
         self.model = model or os.getenv(config.model_env) or config.default_model
         self.base_url = resolved_base_url.rstrip("/")
         self._opener = opener
 
     @property
     def translation_identity(self) -> str:
-        return f"{self.provider}|{self.model}|{self.base_url}"
+        identity = f"{self.provider}|{self.model}|{self.base_url}"
+        if supports_policy(self.provider, self.model, self.base_url):
+            return f"{identity}|{_BOUNDED_TRANSLATION_VERSION}"
+        return identity
 
-    def _chat_json(self, messages: list[dict[str, str]], timeout: float = 120) -> dict[str, Any]:
-        body = {
-            "model": self.model,
-            "messages": messages,
-            "response_format": {"type": "json_object"},
-            "temperature": 0.2,
-        }
-        request = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with self._opener(request, timeout=timeout) as response:
-                response_bytes = response.read()
-        except Exception:
-            raise PodcastPipelineError(
-                f"{self.config.display_name} 翻译请求失败,可直接重跑继续"
-            ) from None
-
-        try:
-            response_payload = json.loads(response_bytes.decode("utf-8"))
-            choices = response_payload["choices"]
-            content = choices[0]["message"]["content"]
+    def _chat_json(self, messages, stage, timeout, validate, *, segment_ids=None):
+        def validate_content(content):
             if not isinstance(content, str):
                 raise TypeError("content is not text")
             cleaned = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.I)
             cleaned = re.sub(r"\s*```$", "", cleaned)
-            payload = json.loads(cleaned)
-        except (KeyError, IndexError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
-            raise TranslationValidationError(
-                f"{self.config.display_name} 返回的翻译 JSON 无法解析"
-            ) from None
-        if not isinstance(payload, dict):
-            raise TranslationValidationError(
-                f"{self.config.display_name} 返回的翻译 JSON 无法解析"
-            )
-        return payload
+            return validate(decode_json_object(cleaned))
+
+        return request_translation(
+            provider=self.provider, model=self.model, base_url=self.base_url,
+            messages=messages, stage=stage, timeout=timeout, budget=self._budget,
+            load_key=self._load_key, opener=self._opener, validate_content=validate_content,
+            validation_error=TranslationValidationError,
+            journal=self._request_journal if segment_ids is not None else None,
+            segment_ids=segment_ids,
+            admission=self._admission,
+        )
 
     def translate(self, segments: list[SubtitleSegment]) -> dict[str, str]:
         expected_ids = [segment.id for segment in segments]
         source_payload = [
             {"id": segment.id, "text": segment.text} for segment in segments
         ]
-        translation_payload = self._chat_json(
+        return self._chat_json(
             [
                 {"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": json.dumps(source_payload, ensure_ascii=False),
                 },
-            ]
+            ],
+            stage="translation_chunk", timeout=120,
+            validate=lambda payload: validate_translation_payload(payload, expected_ids),
+            segment_ids=expected_ids,
         )
-        return validate_translation_payload(translation_payload, expected_ids)
 
     def translate_title(self, text: str) -> str:
         """Translate one episode topic into Simplified Chinese.
@@ -476,19 +486,20 @@ class OpenAICompatibleTranslationClient:
         topic = text.strip()
         if not topic:
             raise TranslationValidationError("标题为空")
-        payload = self._chat_json(
+
+        def validate(payload):
+            title = payload.get("title")
+            if not isinstance(title, str) or not title.strip():
+                raise TranslationValidationError("返回的节目标题为空")
+            return title.strip()[:500]
+
+        return self._chat_json(
             [
                 {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
                 {"role": "user", "content": topic},
             ],
-            timeout=45,
+            stage="translation_title", timeout=45, validate=validate,
         )
-        title = payload.get("title")
-        if not isinstance(title, str) or not title.strip():
-            raise TranslationValidationError(
-                f"{self.config.display_name} 返回的节目标题为空"
-            )
-        return title.strip()[:500]
 
 
 class DeepSeekClient(OpenAICompatibleTranslationClient):
@@ -499,7 +510,10 @@ class DeepSeekClient(OpenAICompatibleTranslationClient):
         api_key: str | None = None,
         model: str | None = None,
         base_url: str | None = None,
-        opener: Callable[..., Any] = urllib.request.urlopen,
+        opener: Callable[..., Any] = open_translation_request,
+        *,
+        budget: TranslationBudget | None = None,
+        credential_loader: Callable[[], str | None] | None = None,
     ) -> None:
         super().__init__(
             "deepseek",
@@ -507,6 +521,8 @@ class DeepSeekClient(OpenAICompatibleTranslationClient):
             model=model,
             base_url=base_url,
             opener=opener,
+            budget=budget,
+            credential_loader=credential_loader,
         )
 
 
@@ -516,14 +532,26 @@ def create_translation_client(
     api_key: str | None = None,
     model: str | None = None,
     base_url: str | None = None,
-    opener: Callable[..., Any] = urllib.request.urlopen,
+    opener: Callable[..., Any] = open_translation_request,
+    budget: TranslationBudget | None = None,
+    credential_loader: Callable[[], str | None] | None = None,
+    request_journal: TranslationJournal | None = None,
+    admission: RuntimeAdmission | None = None,
 ) -> OpenAICompatibleTranslationClient:
+    if provider == 'deepseek' and budget is not None and admission is None and model is None and base_url is None:
+        admission = RuntimeAdmission.for_job(budget.job)
+        if admission is not None:
+            model, base_url = MODEL, ENDPOINT
     return OpenAICompatibleTranslationClient(
         provider,
         api_key=api_key,
         model=model,
         base_url=base_url,
         opener=opener,
+        budget=budget,
+        credential_loader=credential_loader,
+        request_journal=request_journal,
+        admission=admission,
     )
 
 
@@ -566,30 +594,59 @@ def _load_valid_chunk_cache(
     segments: list[SubtitleSegment],
     source_hash: str,
     translation_identity: str,
+    *,
+    preserve_invalid: bool = False,
 ) -> dict[str, str] | None:
     try:
-        cached = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(cached, dict):
-            return None
+        if path.is_symlink():
+            raise ValueError("Unexpected cache symlink")
+        cached = decode_json_object(path.read_bytes())
         source_ids = [segment.id for segment in segments]
         if (
-            cached.get("schema_version") != 2
-            or cached.get("chunk_index") != chunk_index
+            type(cached.get("schema_version")) is not int
+            or cached["schema_version"] != 2
+            or type(cached.get("chunk_index")) is not int
+            or cached["chunk_index"] != chunk_index
             or cached.get("source_hash") != source_hash
             or cached.get("source_ids") != source_ids
             or cached.get("translation_identity") != translation_identity
         ):
-            return None
+            raise ValueError("Cache identity mismatch")
         return validate_translation_payload(
             {"translations": cached.get("translations")}, source_ids
         )
-    except (OSError, json.JSONDecodeError, TranslationValidationError):
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError, RecursionError, TranslationValidationError):
+        pass
+    message = f"第 {chunk_index} 块翻译缓存无法核验，原文件已保留"
+    if preserve_invalid:
+        raise StudioRecoveryError('translation_cache_mismatch', message) from None
+    raise TranslationValidationError(message) from None
+
+
+def _write_new_chunk(path: Path, payload: object) -> None:
+    # Publish the complete file without replacing a cache created meanwhile.
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=".chunk-", suffix=".tmp",
+        delete=False,
+    ) as output:
+        temporary = Path(output.name)
+        try:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+            output.flush()
+            os.fsync(output.fileno())
+            os.link(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _translate_chunk_with_recovery(
     segments: list[SubtitleSegment],
     translator: Callable[[list[SubtitleSegment]], dict[str, str]],
+    *,
+    allow_split: bool = True,
 ) -> dict[str, str]:
     """Bisect a structurally incomplete model response until it validates."""
     source_ids = [segment.id for segment in segments]
@@ -607,7 +664,7 @@ def _translate_chunk_with_recovery(
             source_ids,
         )
     except TranslationValidationError:
-        if len(segments) <= 1:
+        if len(segments) <= 1 or not allow_split:
             raise
         midpoint = len(segments) // 2
         translated = _translate_chunk_with_recovery(
@@ -633,25 +690,48 @@ def translate_with_resume(
     translator: Callable[[list[SubtitleSegment]], dict[str, str]],
     max_chars: int = 8000,
     translation_identity: str = "custom:test",
+    *,
+    preserve_invalid: bool = False,
+    on_chunk: Callable[[int], None] | None = None,
 ) -> dict[str, str]:
     """Translate chunks with validated, atomic checkpoints for resuming."""
+    def invalid_cache(message):
+        if preserve_invalid:
+            raise StudioRecoveryError('translation_cache_mismatch', message)
+        raise TranslationValidationError(message)
+
+    expected_ids = [segment.id for segment in segments]
+    if chunk_dir.is_symlink() or len(set(expected_ids)) != len(expected_ids):
+        invalid_cache('分段或翻译缓存目录无法核验，原文件已保留')
     chunk_dir.mkdir(parents=True, exist_ok=True)
     merged: dict[str, str] = {}
-    for chunk_index, chunk in enumerate(
-        chunk_segments(segments, max_chars=max_chars), start=1
-    ):
-        source_ids = [segment.id for segment in chunk]
-        source_hash = _source_hash(chunk)
-        cache_path = chunk_dir / f"chunk-{chunk_index:04d}.json"
-        translated = _load_valid_chunk_cache(
-            cache_path,
-            chunk_index,
-            chunk,
-            source_hash,
-            translation_identity,
+    chunks = chunk_segments(segments, max_chars=max_chars)
+    expected = {f"chunk-{index:04d}.json" for index in range(1, len(chunks) + 1)}
+    if any(path.name not in expected for path in chunk_dir.glob("chunk-*.json")):
+        invalid_cache('发现多余翻译缓存，原文件已保留')
+
+    def cached(path, index, chunk, source_hash):
+        return _load_valid_chunk_cache(
+            path, index, chunk, source_hash, translation_identity, preserve_invalid=preserve_invalid,
         )
+
+    # A later mismatched cache must stop before an earlier gap can submit.
+    plans = []
+    for index, chunk in enumerate(chunks, 1):
+        path = chunk_dir / f"chunk-{index:04d}.json"
+        source_hash = _source_hash(chunk)
+        plans.append((chunk, path, source_hash, cached(path, index, chunk, source_hash)))
+    for chunk_index, (chunk, path, source_hash, translated) in enumerate(plans, 1):
+        source_ids = [segment.id for segment in chunk]
         if translated is None:
-            translated = _translate_chunk_with_recovery(chunk, translator)
+            try:
+                translated = _translate_chunk_with_recovery(chunk, translator, allow_split=not preserve_invalid)
+            except TranslationValidationError:
+                if preserve_invalid:
+                    raise StudioRecoveryError(
+                        'translation_response_invalid', f'第 {chunk_index} 块响应结构无法核验，需先核对原请求',
+                    ) from None
+                raise
             cache_payload = {
                 "schema_version": 2,
                 "chunk_index": chunk_index,
@@ -663,10 +743,16 @@ def translate_with_resume(
                     for segment_id in source_ids
                 ],
             }
-            _write_json_atomic(cache_path, cache_payload)
+            try:
+                _write_new_chunk(path, cache_payload)
+            except FileExistsError:
+                translated = cached(path, chunk_index, chunk, source_hash)
+                if translated is None:
+                    invalid_cache('翻译缓存并发写入后无法核验，原文件已保留')
         merged.update(translated)
+        if on_chunk is not None:
+            on_chunk(len(merged))
 
-    expected_ids = [segment.id for segment in segments]
     if list(merged) != expected_ids:
         raise TranslationValidationError("合并后的翻译顺序与原字幕不一致")
     return merged
@@ -724,10 +810,12 @@ def _render_chinese_transcript(
 
 def _transcript_is_complete(path: Path, segments: list[SubtitleSegment]) -> bool:
     try:
+        if path.is_symlink():
+            return False
         text = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeError):
         return False
-    return all(f"<!-- {segment.id} -->" in text for segment in segments)
+    return re.findall(r"^<!-- (seg-\d+) -->$", text, re.M) == [segment.id for segment in segments]
 
 
 def _translation_metadata_matches(
@@ -736,12 +824,14 @@ def _translation_metadata_matches(
     translation_identity: str,
 ) -> bool:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        if path.is_symlink():
+            return False
+        payload = decode_json_object(path.read_bytes())
+    except (OSError, ValueError, RecursionError):
         return False
     return (
-        isinstance(payload, dict)
-        and payload.get("schema_version") == 1
+        type(payload.get("schema_version")) is int
+        and payload["schema_version"] == 1
         and payload.get("source_hash") == source_hash
         and payload.get("translation_identity") == translation_identity
     )
@@ -751,7 +841,7 @@ def _translation_metadata_payload(
     source_hash: str,
     translation_identity: str,
 ) -> dict[str, str | int | None]:
-    identity_parts = translation_identity.split("|", 2)
+    identity_parts = translation_identity.split("|", 3)
     provider = identity_parts[0] if identity_parts else "custom"
     model = identity_parts[1] if len(identity_parts) >= 2 else None
     base_url = identity_parts[2] if len(identity_parts) >= 3 else None
@@ -1018,7 +1108,10 @@ def prepare_episode(
 
     client: OpenAICompatibleTranslationClient | None = None
     if translator is None:
-        client = create_translation_client(provider)
+        client = create_translation_client(
+            provider, budget=TranslationBudget(job_dir),
+            credential_loader=lambda: os.getenv(get_provider_config(provider).api_key_env),
+        )
         effective_translator = client.translate
         effective_identity = client.translation_identity
     else:
@@ -1027,14 +1120,16 @@ def prepare_episode(
 
     source_hash = _source_hash(segments)
     translation_metadata_path = job_dir / "translation-metadata.json"
-    if (
-        _transcript_is_complete(transcript_path, segments)
-        and _translation_metadata_matches(
-            translation_metadata_path,
-            source_hash,
-            effective_identity,
-        )
-    ):
+    metadata_matches = _translation_metadata_matches(
+        translation_metadata_path, source_hash, effective_identity,
+    )
+    prior_transcript = transcript_path.exists() or transcript_path.is_symlink()
+    prior_metadata = translation_metadata_path.exists() or translation_metadata_path.is_symlink()
+    if (prior_transcript or prior_metadata) and not metadata_matches:
+        raise TranslationValidationError("已有译文的来源或翻译配置无法核验，原文件已保留")
+    if prior_transcript:
+        if not _transcript_is_complete(transcript_path, segments):
+            raise TranslationValidationError("已有译文的段落或顺序无法核验，原文件已保留")
         if speakers_path is not None:
             _verify_speaker_sequence(speakers_path, segments)
         _write_job_state(state_path, "transcript_ready", url, metadata)
@@ -1048,7 +1143,6 @@ def prepare_episode(
     )
     _write_job_state(state_path, "translation_ready", url, metadata)
     transcript = _render_chinese_transcript(metadata, url, segments, translations)
-    _write_text_atomic(transcript_path, transcript)
     if speakers_path is not None:
         _verify_speaker_sequence(speakers_path, segments)
         translated_paragraphs = len(
@@ -1062,6 +1156,7 @@ def prepare_episode(
         translation_metadata_path,
         _translation_metadata_payload(source_hash, effective_identity),
     )
+    _write_text_atomic(transcript_path, transcript)
     _write_job_state(state_path, "transcript_ready", url, metadata)
     return prepared
 
@@ -1130,7 +1225,9 @@ def main(argv: list[str] | None = None) -> int:
         print("错误:找不到 yt-dlp,请先安装", file=sys.stderr)
         return 2
     provider_config = get_provider_config(args.provider)
-    if not os.getenv(provider_config.api_key_env):
+    # Keep the CLI setup diagnostic without loading a credential before
+    # the cache check and paid-transport admission.
+    if not any(name == provider_config.api_key_env for name in os.environ):
         print(f"错误:缺少环境变量 {provider_config.api_key_env}", file=sys.stderr)
         print(
             "首次使用请运行: "

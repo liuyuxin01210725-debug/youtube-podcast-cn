@@ -67,7 +67,7 @@ class EdgeBackendTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "part.mp3"
-            backend = tts_backends.EdgeTTSBackend()
+            backend = tts_backends.build_backend("edge")
             with mock.patch.object(
                 tts_backends.edge_tts, "Communicate", FakeCommunicate
             ):
@@ -77,6 +77,61 @@ class EdgeBackendTests(unittest.TestCase):
                 calls[0][:2], ("你好。", backend.resolve_voice("female_1"))
             )
             self.assertEqual(usage.output_tokens, 0)
+
+    def test_book_edge_passes_receive_timeout_on_every_attempt(self) -> None:
+        request = tts_backends.SynthesisRequest("合成测试", "female_1", "conversation")
+        backend = tts_backends.build_backend("edge", book_synthesis=True)
+        failure = TimeoutError("synthetic Edge timeout")
+        paths = []
+
+        async def save(filename):
+            self.assertTrue(all(not path.exists() for path in paths))
+            path = Path(filename)
+            paths.append(path)
+            path.write_bytes(b"partial")
+            raise failure
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "part.mp3"
+            output.write_bytes(b"previous complete audio")
+            with mock.patch.object(tts_backends.edge_tts, "Communicate") as communicate, \
+                    mock.patch.object(tts_backends.asyncio, "sleep", new_callable=mock.AsyncMock) as sleep:
+                communicate.side_effect = lambda *args, **kwargs: types.SimpleNamespace(save=save)
+                with self.assertRaises(TimeoutError) as caught:
+                    asyncio.run(backend.synthesize(request, output))
+            self.assertIs(caught.exception, failure)
+            call = mock.call(request.text, backend.resolve_voice(request.voice_slot), receive_timeout=180)
+            self.assertEqual(communicate.call_args_list, [call] * 6)
+            self.assertEqual(sleep.await_args_list, [mock.call(delay) for delay in (1.0, 2.0, 4.0, 8.0, 15.0)])
+            self.assertEqual(output.read_bytes(), b"previous complete audio")
+            self.assertEqual(list(Path(tmp).iterdir()), [output])
+
+    def test_book_edge_cancellation_propagates_and_cleans_up(self) -> None:
+        request = tts_backends.SynthesisRequest("合成测试", "female_1", "conversation")
+        backend = tts_backends.EdgeTTSBackend(book_synthesis=True)
+        for during_backoff in (False, True):
+            with self.subTest(during_backoff=during_backoff), tempfile.TemporaryDirectory() as tmp:
+                cancel = asyncio.CancelledError("synthetic cancellation")
+                output = Path(tmp) / "part.mp3"
+
+                async def save(filename):
+                    Path(filename).write_bytes(b"partial")
+                    if during_backoff:
+                        raise TimeoutError("synthetic Edge timeout")
+                    raise cancel
+
+                with mock.patch.object(tts_backends.edge_tts, "Communicate") as communicate, \
+                        mock.patch.object(tts_backends.asyncio, "sleep", new_callable=mock.AsyncMock) as sleep:
+                    communicate.return_value = types.SimpleNamespace(save=save)
+                    sleep.side_effect = cancel
+                    with self.assertRaises(asyncio.CancelledError) as caught:
+                        asyncio.run(backend.synthesize(request, output))
+                self.assertIs(caught.exception, cancel)
+                communicate.assert_called_once_with(
+                    request.text, backend.resolve_voice(request.voice_slot), receive_timeout=180
+                )
+                self.assertEqual(sleep.await_args_list, [mock.call(1.0)] if during_backoff else [])
+                self.assertEqual(list(Path(tmp).iterdir()), [])
 
     def test_edge_403_is_a_safe_backend_error(self) -> None:
         class Denied:
@@ -99,6 +154,11 @@ class EdgeBackendTests(unittest.TestCase):
 
 
 class QwenBackendTests(unittest.TestCase):
+    def test_book_option_does_not_reach_qwen(self) -> None:
+        with mock.patch.object(tts_backends, "Qwen3APIBackend") as constructor:
+            tts_backends.build_backend("qwen3-api", "test-key", book_synthesis=True)
+        constructor.assert_called_once_with(api_key="test-key")
+
     def test_requires_api_key(self) -> None:
         with self.assertRaisesRegex(ValueError, "DASHSCOPE_API_KEY"):
             tts_backends.build_backend("qwen3-api", api_key="")

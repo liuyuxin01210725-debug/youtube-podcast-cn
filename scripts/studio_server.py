@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Loopback-only workbench. Every engine invocation has its own process."""
-import argparse, fcntl, hashlib, json, mimetypes, os, re, secrets, shutil, signal, subprocess, sys, threading, time, uuid
+import argparse, fcntl, hashlib, json, mimetypes, os, re, secrets, selectors, shutil, signal, subprocess, sys, threading, time, uuid
 from concurrent.futures import ThreadPoolExecutor
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -14,7 +14,7 @@ MAX_BOOK_UPLOAD=8*1024*1024
 from studio_preview import preview_limit, select_preview_segments
 from studio_document import OFFICIAL_EVIDENCE_FIELDS, SEGMENT_CONFIRM_FIELDS, segment_evidence_hash, split_document_segment
 from diarization_cache import assign_studio_voices
-from studio_speakers import expected_speakers, use_male_slots, validate_speaker_voices
+from studio_speakers import expected_speakers, requires_voice_mapping, use_male_slots, validate_speaker_voices
 
 def as_bool(value):
     return value is True
@@ -58,11 +58,35 @@ def read(p, default=None):
 def write(p,data):
     t=p.with_suffix('.new'); t.write_text(json.dumps(data,ensure_ascii=False,indent=2)); t.replace(p)
 
+def wait_for_engine(process):
+    """Drain both output streams in bounded chunks; only retain an output flag.
+
+    Engine-owned error details are already persisted in debug-failure.json.
+    Child output can include arbitrary provider data or a private transcript.
+    """
+    observed = False
+    with process.stdout as output, selectors.DefaultSelector() as selector:
+        selector.register(output, selectors.EVENT_READ)
+        while True:
+            exited = process.poll() is not None
+            if not selector.select(timeout=0 if exited else .2):
+                # An inherited writer can keep the pipe open beyond engine exit.
+                if exited:
+                    break
+                continue
+            chunk = os.read(output.fileno(), 4096)
+            if not chunk:
+                break
+            observed = True
+    return process.wait(), observed
+
+
 class Studio:
     def __init__(self, root, engine=None, recover=True):
         self.root=Path(root).expanduser().resolve(); self.root.mkdir(parents=True,exist_ok=True)
         self.token=secrets.token_urlsafe(32); self.lock=threading.RLock(); self.process=None; self.active=None
-        self.engine=engine or [str(ROOT/'.venv/bin/python'),str(ROOT/'scripts/studio_engine.py')]
+        python=ROOT/'.venv/bin/python'
+        self.engine=engine or [str(python if python.is_file() else sys.executable), '-E', str(ROOT/'scripts/studio_engine.py')]
         self.stop=False; self.lock_fd=None
         if not recover:
             return
@@ -266,15 +290,28 @@ class Studio:
             write(p/'document.json', updated); state['stale']=True; state['updated_at']=time.time(); write(p/'state.json',state)
             return {'ok':True, 'left_id': left_id, 'right_id': right_id}
 
-    def confirm_speakers(self, ident):
-        """Clear every 待核对 flag without requiring a per-segment edit."""
+    def update_document(self, ident, data):
         with self.lock:
-            p, state, doc = self._editable(ident)
-            for segment in doc['segments']:
-                if isinstance(segment, dict):
-                    segment['ambiguous']=False
-            write(p/'document.json', doc)
-            state['updated_at']=time.time(); write(p/'state.json', state)
+            p=self.job(ident); self.migrate_assets(p); state=read(p/'state.json',{})
+            if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
+            doc=read(p/'document.json',{}); updates=data.get('segments',[])
+            if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
+            for original,new in zip(doc['segments'],updates):
+                if original['id']!=new['id'] or new.get('speaker_id') not in doc['speakers'] or not isinstance(new.get('chinese'),str) or len(new['chinese'])>20000: raise ValueError('译稿数据无效')
+                # A text edit must not sign off every 待核对 row. Only the
+                # row whose speaker actually changed is confirmed here.
+                confirmed = original.get('speaker_id') != new.get('speaker_id')
+                if confirmed: doc['voices_confirmed']=False
+                original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False if confirmed else bool(original.get('ambiguous')))
+            for ident,slot in data.get('voices',{}).items():
+                if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')
+                if doc['speakers'][ident].get('voice_slot')!=slot: doc['voices_confirmed']=False
+                doc['speakers'][ident]['voice_slot']=slot
+            write(p/'document.json',doc); state['stale']=True; write(p/'state.json',state)
+
+    def confirm_speakers(self, ident):
+        self.job(ident)
+        raise ValueError('请用 split-segment 拆段、在译稿中逐段修改，或用 confirm-segments 提交逐段证据。')
     def confirm_segments(self, ident, payload):
         """Confirm only listed same-speaker segments with hash-bound evidence."""
         if not isinstance(payload, dict) or set(payload)-{'document_sha256', 'items'}:
@@ -332,7 +369,10 @@ class Studio:
         """Reapply the male-first studio default in first-appearance order."""
         with self.lock:
             p, state, doc = self._editable(ident)
-            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict) and not segment.get('is_ad')], male_only=use_male_slots(read(p/'config.json',{})))
+            config=read(p/'config.json',{})
+            if requires_voice_mapping(config):
+                raise ValueError('本任务须逐人设置声槽，再用 confirm-voices 确认。')
+            slots=assign_studio_voices([segment.get('speaker_id') for segment in doc['segments'] if isinstance(segment, dict) and not segment.get('is_ad')], male_only=use_male_slots(config))
             for speaker, slot in slots.items():
                 record=doc['speakers'].get(speaker)
                 if isinstance(record, dict):
@@ -343,8 +383,12 @@ class Studio:
     def confirm_voices(self, ident):
         with self.lock:
             p, state, doc = self._editable(ident)
-            validate_speaker_voices(read(p/'config.json',{}), doc)
+            validate_speaker_voices(read(p/'config.json',{}), doc, confirming=True)
             doc['voices_confirmed']=True
+            doc['confirmed_voice_slots']={
+                row['speaker_id']: doc['speakers'][row['speaker_id']]['voice_slot']
+                for row in doc['segments']
+            }
             write(p/'document.json', doc)
             state['updated_at']=time.time(); write(p/'state.json', state)
     def engine_args(self, p, state):
@@ -355,30 +399,10 @@ class Studio:
             cmd+=['--preview', str(preview_limit(segments or []))]
         if state.get('accept_unreviewed'):
             cmd.append('--accept-unreviewed')
+        if state.get('action', 'run') != 'prepare' and not state.get('preview'):
+            from studio_publish_icloud import default_library_root
+            cmd+=['--publish-library', str(default_library_root().resolve())]
         return cmd
-    def private_listen_needs_retry(self, p, state):
-        if state.get('action')=='prepare' or state.get('preview'): return False
-        audio=p/'output.mp3'
-        if not audio.is_file() or audio.is_symlink(): return False
-        return not (read(p/'private-listen.json') or {}).get('ok')
-    def retry_private_listen(self, p):
-        # Engine stdout is discarded. Retry here so the workbench window shows the result.
-        try:
-            import studio_publish_icloud
-            try:
-                studio_publish_icloud.ensure_publishable_title(p)
-            except Exception:
-                pass
-            result=studio_publish_icloud.publish_job(p)
-        except Exception as error:
-            print(f'私人听：iCloud 发布未成功（任务成品仍保留）：{type(error).__name__}: {error}', flush=True)
-            return
-        print(f"私人听：iCloud 资料库已更新 {result.get('episode_dir','')}", flush=True)
-        try:
-            import studio_push_iphone
-            studio_push_iphone.push_after_publish(result, p)
-        except Exception:
-            pass
     def worker(self):
         while not self.stop:
             with self.lock:
@@ -390,24 +414,29 @@ class Studio:
                     s=read(p/'state.json'); s['status']='running'; write(p/'state.json',s); self.active=p.name
                     (p/'cancel').unlink(missing_ok=True)
                     cmd=self.engine_args(p, s)
-                    try: self.process=subprocess.Popen(cmd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True,pass_fds=(self.lock_fd,) if self.lock_fd is not None else ())
+                    try: self.process=subprocess.Popen(cmd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,start_new_session=True,pass_fds=(self.lock_fd,) if self.lock_fd is not None else ())
                     except OSError: self.process=None
             if p:
-                code=self.process.wait() if self.process else 1
-                retry_private=False
+                process = self.process
+                code, observed = wait_for_engine(process) if process else (1, False)
+                if code not in (0, 130):
+                    try:
+                        write(p/'engine-error.log', {
+                            'category': 'engine_exit' if process else 'engine_launch',
+                            'exit_code': code,
+                            'output_observed': observed,
+                            'message': '引擎执行失败，请查看 debug-failure.json。' if process else '引擎进程未启动。',
+                            'updated_at': time.time(),
+                        })
+                    except OSError:
+                        pass
                 with self.lock:
                     s=read(p/'state.json',{}); s['status']='cancelled' if code==130 else ('complete' if code==0 else 'failed')
                     if code==0 and s.get('action')!='prepare':
                         name='preview.mp3' if s.get('preview') else 'output.mp3'
                         if (p/name).is_file(): s.setdefault('asset_revisions',{})[name]=self.revision(p,s.get('preview',False))
                     s['updated_at']=time.time(); write(p/'state.json',s)
-                    retry_private=code==0 and self.private_listen_needs_retry(p, s)
-                    if code==0 and not retry_private and not s.get('preview') and s.get('action')!='prepare' and (p/'output.mp3').is_file():
-                        note=read(p/'private-listen.json') or {}
-                        if note.get('ok'): print(f"私人听：iCloud 资料库已更新 {note.get('episode_dir','')}", flush=True)
-                        else: print(f"私人听：iCloud 发布未成功（任务成品仍保留）：{note.get('error') or '引擎未留下发布记录'}", flush=True)
                     self.active=None; self.process=None
-                if retry_private: self.retry_private_listen(p)
             else: time.sleep(.25)
 
 class Handler(BaseHTTPRequestHandler):
@@ -479,23 +508,7 @@ class Handler(BaseHTTPRequestHandler):
             elif m[2]=='confirm-voices': studio.confirm_voices(m[1])
             elif m[2]=='split-segment': return self.send(studio.split_segment(m[1], data))
             else:
-                with studio.lock:
-                    p=studio.job(m[1]); studio.migrate_assets(p); state=read(p/'state.json',{})
-                    if state.get('status') in ('running','queued','cancelling'): raise ValueError('请等待任务停止后编辑')
-                    doc=read(p/'document.json',{}); updates=data.get('segments',[])
-                    if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
-                    for original,new in zip(doc['segments'],updates):
-                        if original['id']!=new['id'] or new.get('speaker_id') not in doc['speakers'] or not isinstance(new.get('chinese'),str) or len(new['chinese'])>20000: raise ValueError('译稿数据无效')
-                        # A text edit must not sign off every 待核对 row. Only the
-                        # row whose speaker actually changed is confirmed here.
-                        confirmed = original.get('speaker_id') != new.get('speaker_id')
-                        if confirmed: doc['voices_confirmed']=False
-                        original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False if confirmed else bool(original.get('ambiguous')))
-                    for ident,slot in data.get('voices',{}).items():
-                        if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')
-                        if doc['speakers'][ident].get('voice_slot')!=slot: doc['voices_confirmed']=False
-                        doc['speakers'][ident]['voice_slot']=slot
-                    write(p/'document.json',doc); state['stale']=True; write(p/'state.json',state)
+                studio.update_document(m[1], data)
             self.send({'ok':True})
         except (ValueError,KeyError,TypeError,AttributeError,OSError) as e: self.send({'error':str(e)},400)
 

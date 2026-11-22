@@ -59,7 +59,13 @@ class StudioTests(unittest.TestCase):
     def test_count_failure_is_recoverable_and_keeps_existing_output(self):
         with tempfile.TemporaryDirectory() as root:
             engine = StudioEngine(root)
-            (engine.job / 'document.json').write_text(json.dumps(self.speaker_document(6)))
+            doc = self.speaker_document(6)
+            for row in doc['segments']:
+                row.update(start_ms=0, end_ms=1000)
+            (engine.job / 'document.json').write_text(json.dumps(doc))
+            (engine.job / 'source-identity.json').write_text(json.dumps({
+                'sha256': 'a' * 64, 'bytes': 100, 'duration_ms': 1000,
+            }))
             (engine.job / 'output.mp3').write_bytes(b'previous')
             with patch.object(engine, 'publish_private_library') as publish:
                 with self.assertRaisesRegex(ValueError, '人数硬闸'):
@@ -516,7 +522,9 @@ class StudioTests(unittest.TestCase):
                     patch.object(engine, 'ffmpeg') as ffmpeg, \
                     patch.object(engine, 'credential', return_value='test-key'), \
                     patch('studio_engine.create_translation_client', return_value=Client()):
-                document = engine.prepare({'expected_speakers': 2, 'content_type': 'conversation'}, Path('unused.wav'))
+                wav = Path(root) / 'synthetic.wav'
+                wav.write_bytes(b'synthetic source')
+                document = engine.prepare({'expected_speakers': 2, 'content_type': 'conversation'}, wav)
             self.assertEqual(diarize.call_args.args[1].exact, 2)
             ffmpeg.assert_not_called()
             self.assertEqual(seen, [

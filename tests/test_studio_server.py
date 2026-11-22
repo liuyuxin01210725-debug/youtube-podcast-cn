@@ -364,7 +364,7 @@ class ServerTests(unittest.TestCase):
         self.assertGreaterEqual(float((p2/'started').read_text()),float((p1/'finished').read_text()))
         self.assertEqual((p1/'output.mp3').read_bytes(),b'old')
         self.studio.stop=True;t.join(2)
-    def test_batch_confirm_and_risk_continue_leave_a_path_through_review(self):
+    def test_bulk_confirmation_rejected_and_row_edits_remain_available(self):
         ident = self.create()
         self.studio.action(ident, 'cancel')
         p = self.studio.job(ident)
@@ -389,12 +389,12 @@ class ServerTests(unittest.TestCase):
         after_move = read(p / 'document.json')['segments']
         self.assertFalse(after_move[1]['ambiguous'])
         self.assertTrue(after_move[0]['ambiguous'])
-        self.assertEqual(self.request(f'/api/jobs/{ident}/confirm-speakers', {})[0], 200)
-        self.assertTrue(all(not segment.get('ambiguous') for segment in read(p / 'document.json')['segments']))
-        doc = read(p / 'document.json')
-        for segment in doc['segments']:
-            segment['ambiguous'] = True
-        write(p / 'document.json', doc)
+        before = (p / 'document.json').read_bytes()
+        code, body = self.request(f'/api/jobs/{ident}/confirm-speakers', {})
+        self.assertEqual(code, 400)
+        self.assertIn('confirm-segments', json.loads(body)['error'])
+        self.assertEqual((p / 'document.json').read_bytes(), before)
+        self.assertEqual([s['ambiguous'] for s in after_move], [True, False, True, True, True, True])
         self.assertEqual(self.request(f'/api/jobs/{ident}/voice-slots', {'scheme': 'other'})[0], 400)
         self.assertEqual(self.request(f'/api/jobs/{ident}/voice-slots', {'scheme': 'male_first'})[0], 200)
         voices = read(p / 'document.json')

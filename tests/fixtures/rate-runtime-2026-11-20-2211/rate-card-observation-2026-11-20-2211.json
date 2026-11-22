@@ -1,0 +1,137 @@
+{
+  "kind": "versioned_official_rate_observation",
+  "no_paid_request": true,
+  "observed_at": "2026-11-20 22:11:33 +0800 Asia/Shanghai",
+  "observed_at_unix": 1795183893,
+  "zone": "Asia/Shanghai",
+  "ttl_seconds": 86400,
+  "fact_expires_at_unix": 1795270293,
+  "fact_expires_at": "2026-11-21 22:11:33 +0800 Asia/Shanghai",
+  "freshness_note": "Freshness starts at this live observation, TTL is the established 86400s technical window. This does not rewrite POLICY_VERIFIED_AT or POLICY_EXPIRES_AT (1795135740, 2026-11-20 08:49:00 +0800). The old card remains expired.",
+  "retrievals": {
+    "mac": {
+      "started_at": "2026-11-20 22:11:16 +0800 Asia/Shanghai",
+      "completed_at": "2026-11-20 22:11:33 +0800 Asia/Shanghai",
+      "started_at_unix": 1795183876
+    },
+    "box": {
+      "started_at": "2026-11-20 22:11:08 +0800 Asia/Shanghai",
+      "completed_at": "2026-11-20 22:11:10 +0800 Asia/Shanghai",
+      "started_at_unix": 1795183868
+    }
+  },
+  "byte_identical_to_1900_observation": true,
+  "observation_1900": {
+    "retrieved_at": "2026-11-20 19:00:16 +0800 Asia/Taipei",
+    "sources_dir": "sources"
+  },
+  "sources": [
+    {
+      "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+      "file": "sources/pricing-zh-cn.html",
+      "sha256": "e872c2c8277f4682c5d4db3e5cc5f88f3462b403c30dea7753cdb025b004e43c",
+      "bytes": 29623
+    },
+    {
+      "url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "file": "sources/pricing-en.html",
+      "sha256": "b61db7d97374d37819b4dcdd41e86aa2d6bfa4d50bf059e700327727a4462e02",
+      "bytes": 29466
+    },
+    {
+      "url": "https://api-docs.deepseek.com/updates/?latest=20261017",
+      "file": "sources/updates-en.html",
+      "sha256": "f7afdaae2e8db1f3fa95d2d7adb5d69c964dc42fdfd087d221e7398aa0dc830e",
+      "bytes": 57618
+    },
+    {
+      "url": "https://api-docs.deepseek.com/news/news261017/",
+      "file": "sources/news261017.html",
+      "sha256": "26176e3916b5f015ce2d38619f593a22db357ab11256ab51336db57d9d606a1b",
+      "bytes": 26131
+    }
+  ],
+  "extracted": {
+    "api_name": "deepseek-flash",
+    "model_revision": "DeepSeek-V4.1-Flash-1017",
+    "endpoint": "https://api.deepseek.com",
+    "unit": "CNY per 1,000,000 tokens, from official zh-cn page",
+    "peak_hours_asia_shanghai": "Mon–Fri excluding PRC holidays 09:00–12:00 and 14:00–18:00",
+    "fee_mode": "cny_token_only",
+    "thinking": "disabled in current request contract; thinking is a distinct official fee mode and is not admitted here",
+    "input_cache_hit": {
+      "off_peak": 0.02,
+      "peak": 0.04
+    },
+    "input_cache_miss": {
+      "off_peak": 1.0,
+      "peak": 2.0
+    },
+    "output": {
+      "off_peak": 4.0,
+      "peak": 8.0
+    },
+    "admitted_peak_uncached_input_and_output_cny_per_million": [
+      2,
+      8
+    ]
+  },
+  "old_policy_constants_unchanged": {
+    "POLICY": "deepseek-flash-cny-2026-11-19-v1",
+    "POLICY_VERIFIED_AT": 1795049340,
+    "POLICY_EXPIRES_AT": 1795135740,
+    "POLICY_EXPIRES_AT_local": "2026-11-20 08:49:00 +0800 Asia/Shanghai"
+  },
+  "authorized_batch": {
+    "source": "current-selected-metadata.json",
+    "source_recorded_at": "2026-11-19T11:22:43.652007+08:00",
+    "source_sha256": "1c7c48b451098b159c9d42482711472af2abce13c20411d7e052b333fc737253",
+    "source_bytes": 122404,
+    "timezone": "Asia/Shanghai",
+    "scope_note": "t1294u lifts the old 22/0.87 cap only for this already-selected job list. t1387/REWORK job 1c3ce3aa9ddb4266b1bc52d1918077b3 and local-20261120-* are not in this list and must not auto-open a card.",
+    "authorization_refs": [
+      {
+        "ref": "t1294u",
+        "words": "不用管费用，直接做。",
+        "at": "2026-11-19 09:10:20 +0800",
+        "session": "Javis 691ed133-bf38-4045-843f-994f29756581 position 6006"
+      },
+      {
+        "ref": "t528u",
+        "words": "你把所有的都做好吧…该处理，该修理，该优化的，该去转换的。",
+        "note": "remaining repairs and short-sample/batch conversion of already authorized work, not a new spend kind or unselected expansion"
+      }
+    ],
+    "job_ids": [
+      "516b03a087cd44f2a5b0c01ba4ea4004",
+      "5682f75d9ec94898aec8090dd385c10f",
+      "86b82d4a1c824c5da40accb4d0debe4f",
+      "5fc7989f14df42be9bbc2f12b390c4dd",
+      "fcb76827fdec4d0a94dd1f9b7657b45a",
+      "fd4c6200b01540d992b5a9e39784eb2e",
+      "86a94bc49f8d4fe6beb86f378f5bd667",
+      "1c5383d356994344a5a8ed98f4885ca6",
+      "d351c281bd4f40d88b2c78c2151acf36",
+      "deb713c104b04b59b3a1036c043bb4b6",
+      "2c1eb7aabf754cbcb3fca99a752f5805",
+      "fdcb2044babd4e4ebddc1eee47a89a61",
+      "b1eddee168e24f7ea6ebec6c6ff2a55d",
+      "2c3f158548ff4f75af05548291295a47",
+      "c5a243cc16f64ba182bd437f4b40ea11",
+      "8edb7b2c523641bc8b7f4ccb36b1d28b",
+      "91becd48d69649d99d782c71675a921f",
+      "85a59fb35d654171acea1c899393e54a",
+      "f4ace128daef4d86850134ee228f54f1",
+      "61566c1cc21d4dafb158929f4a9eaba9",
+      "9941d060d2b04261817bbe1d6acd49de",
+      "477ad7c161f0489a8d8c9a73d729355b",
+      "a16815fed4f74af59b5b6999c8b64e6c",
+      "8940c08f52de4f289f14b4dd59a4c75e",
+      "4a7cbfb91450493d927e600314211283",
+      "16e71f3faaf54ef9ae8a774150e7db2d",
+      "3c0ad02ac5d64974a1a151fc9443d861",
+      "3658be8afa4f588a95849949ddf79cc6"
+    ],
+    "job_count": 28
+  }
+}

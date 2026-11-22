@@ -257,7 +257,7 @@ class DiarizationCache:
             return None
 
 
-def assign_studio_voices(speaker_ids, *, male_only: bool = False) -> dict[str, str]:
+def assign_studio_voices(speaker_ids, *, male_only: bool = False, require_mapping: bool = False) -> dict[str, str | None]:
     """Map first-seen speakers to male-first system slots.
 
     A sixth speaker reuses ``male_1``. The distinguishable pool stays at five
@@ -265,11 +265,11 @@ def assign_studio_voices(speaker_ids, *, male_only: bool = False) -> dict[str, s
     inside the three male slots for a 1–3 person show.
     """
     pool = ("male_1", "male_2", "male_3") if male_only else STUDIO_VOICE_SLOTS
-    assigned: dict[str, str] = {}
+    assigned: dict[str, str | None] = {}
     for speaker_id in speaker_ids:
         if not isinstance(speaker_id, str) or not speaker_id or speaker_id in assigned:
             continue
-        assigned[speaker_id] = pool[len(assigned) % len(pool)]
+        assigned[speaker_id] = None if require_mapping else pool[len(assigned) % len(pool)]
     return assigned
 
 

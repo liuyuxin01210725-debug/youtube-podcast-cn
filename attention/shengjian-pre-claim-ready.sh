@@ -32,7 +32,7 @@ if "static let displayLimit = 1" not in continue_src:
     fail("继续播放必须只留 1 张卡")
 if "static let minimumPlayedSeconds = 0.0" not in continue_src:
     fail("短播门槛 minimumPlayedSeconds 丢了")
-if "mark.seconds > minimumPlayedSeconds" not in continue_src:
+if "seconds > minimumPlayedSeconds" not in continue_src:
     fail("继续播放资格没有走短播门槛")
 if "mark.seconds >= 5" in continue_src:
     fail("ContinueListening 又把 >= 5 秒写回继续播放资格")
@@ -53,18 +53,47 @@ if "dismissContinue" in appear:
     fail("打开播放页不能 dismissContinue")
 if "ListenNoteSection(" not in player or "ExtractDetailSection(" not in player:
     fail("播放页缺少听后感或提炼区块")
+if "openEpisode()" not in appear or "autoplay: !library.isFinished(episode)" not in player:
+    fail("打开已听完的播放页必须保留完成状态，等待主动播放")
+disappear = player.split(".onDisappear", 1)[1].split("private func openEpisode", 1)[0]
+if "player.checkpoint()" not in disappear:
+    fail("离开播放页必须保存本集实际停点")
 
 model = read("PlayerModel.swift")
 if "playheadToPersist" not in model:
     fail("离开播放器没有把真实播放头写入 ListenMark")
 if "guard !clipSuppressListenMark else { return }" not in model:
     fail("听这段仍必须拦住 checkpoint")
+if "PlayerPlaybackPolicy.shouldRestartFromBeginning" not in model:
+    fail("播放到终点再点播放必须走重头开播策略")
+if "PlayerPlaybackPolicy.progressAfterSeek" not in model:
+    fail("seek 落地后不能再让旧终点时钟盖掉 0")
+if model.count("PlayerPlaybackPolicy.didLandSeek(") < 2:
+    fail("续听与主动定位都必须验证实际落点")
+if "self?.handleTimeUpdate()" not in model:
+    fail("播放周期回调必须使用当前 AVPlayer 时钟")
+if "podcastProgress.beginPlayback(at: player.currentTime().seconds)" not in model or \
+        "guard let currentID, podcastProgress.observe(seconds: liveClock) else { return }" not in model:
+    fail("播客必须等真实播放时钟推进才回写进度")
+if "onProgress?(currentID, current, duration, podcastCheckpointCompletion) == true" not in model:
+    fail("本轮点段进入已听后，后续进度不能被当成复听")
+library_view = read("LibraryView.swift")
+if "library.remember(episode: episode, seconds: seconds, duration: duration, finished: finished)" not in library_view:
+    fail("播放的完成状态没有传给资料库")
+if "player.resetPodcastProgress(for: episode)" not in library_view:
+    fail("手动标已听必须阻止播放器还写回已清除的复听游标")
+
+policy = read("PlayerPlaybackPolicy.swift")
+if "shouldRestartFromBeginning" not in policy or "progressAfterSeek" not in policy:
+    fail("PlayerPlaybackPolicy 缺终点重播 / seek 持久化规则")
 
 store = read("LibraryStore.swift")
 if "entry.seconds >= 5" not in store:
     fail("在听芯片的 5 秒门槛被挪走了")
-if "continueTouched[id]" not in store:
+if "continueTouched[mediaKey]" not in store:
     fail("ListenMark 写入没有更新 continueTouched")
+if "replaySeconds: entry.replaySeconds" not in store:
+    fail("资料库必须把复听游标传给继续播放筛选")
 
 section = read("ContinueListeningSection.swift")
 if "继续播放" not in section:
@@ -73,7 +102,20 @@ if "继续播放" not in section:
 note_src = read("ListenNoteSection.swift")
 if "听后感" not in note_src:
     fail("听后感文案丢了")
+if "ListenNoteEditor(" not in note_src:
+    fail("听后感必须用可滚动的 ListenNoteEditor（不能只剩夹在 ScrollView 里的 TextEditor）")
+if "revealEndToken" not in note_src:
+    fail("长听后感重开要能露出文末（revealEndToken）")
+if "listenNotes.saveDraft(episodeId: loadedEpisodeId" not in note_src:
+    fail("听后感草稿必须按加载的集写回本地存储")
+if ".onDisappear {\n            commitTask?.cancel()\n            _ = commit()" not in note_src:
+    fail("离开听后感时必须立即保存，不能只等待防抖任务")
 read("ListenNoteStore.swift")
+if "ListenNoteEditorPolicy.shouldMoveCaretToEndOnFocus" not in read("ListenNoteEditor.swift"):
+    fail("听后感首焦规则未接入编辑器")
+editor_policy = read("ListenNoteEditorPolicy.swift")
+if "shouldRevealEndOnLoad" not in editor_policy or "shouldMoveCaretToEndOnFocus" not in editor_policy:
+    fail("ListenNoteEditorPolicy 缺重开露文末 / 首焦到文末规则")
 
 mock = read("MockExtractor.swift")
 if "enum ExtractorGate" not in mock or "struct MockExtractor" not in mock:
@@ -125,7 +167,12 @@ for cand in   "$root/dist/CURRENT-iphoneos"   "$root/dist/PrivateListen-CURRENT-
   fi
 done
 
-for root_cand in "${search_roots[@]}"; do
+if [[ -n "${SHENGJIAN_APP:-}" ]]; then
+  [[ -d "$SHENGJIAN_APP" ]] || fail "指定 App 不存在：$SHENGJIAN_APP"
+  search_roots+=("$SHENGJIAN_APP")
+fi
+# Bash 3.2 treats an empty array expansion as unset under set -u.
+for root_cand in ${search_roots[@]+"${search_roots[@]}"}; do
   while IFS= read -r -d '' app; do
     # Debug tip builds put Chinese strings in PrivateListen.debug.dylib (thin stub is ~90KB).
     dylib="$app/PrivateListen.debug.dylib"

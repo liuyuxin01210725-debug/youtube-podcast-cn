@@ -24,17 +24,20 @@ enum PointListenProbe {
             guard let episode = library.episodes.first(where: { $0.id == "point-listen-isolated" }) else {
                 throw CocoaError(.fileReadNoSuchFile)
             }
-            let folder = episode.audioURL.deletingLastPathComponent()
-            let packet = try JSONDecoder().decode(ExtractionPacket.self, from: Data(contentsOf: folder.appendingPathComponent("extract.json")))
-            let index = try JSONDecoder().decode(PointListenIndex.self, from: Data(contentsOf: folder.appendingPathComponent(PointListening.indexFileName)))
+            guard let packetURL = episode.publishedAsset("extract.json"),
+                  let indexURL = episode.publishedAsset(PointListening.indexFileName) else {
+                throw CocoaError(.fileReadNoSuchFile)
+            }
+            let packet = try JSONDecoder().decode(ExtractionPacket.self, from: Data(contentsOf: packetURL))
+            let index = try JSONDecoder().decode(PointListenIndex.self, from: Data(contentsOf: indexURL))
             let audio = try await PointListenAudio.load(episode.audioURL)
             let rows = PointListening.rows(packet: packet, index: index)
             guard rows.count == 5 else { throw CocoaError(.fileReadCorruptFile) }
             let previous = player.onProgress
             var writes = 0
-            player.onProgress = { id, seconds, duration in
+            player.onProgress = { id, seconds, duration, finished in
                 writes += 1
-                library.remember(id: id, seconds: seconds, duration: duration)
+                return library.remember(id: id, seconds: seconds, duration: duration, finished: finished)
             }
             defer { player.pause(); player.onProgress = previous }
             player.open(episode, resumeAt: 0, force: true)

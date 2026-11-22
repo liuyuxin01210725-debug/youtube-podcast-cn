@@ -1,0 +1,64 @@
+{
+  "retrieved_at": "2026-11-20 19:00:16 +0800 Asia/Taipei",
+  "zone": "Asia/Taipei",
+  "kind": "read_only_official_public_docs",
+  "no_paid_request": true,
+  "sources": [
+    {
+      "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+      "file": "sources/pricing-zh-cn.html",
+      "sha256": "e872c2c8277f4682c5d4db3e5cc5f88f3462b403c30dea7753cdb025b004e43c",
+      "lang": "zh-cn"
+    },
+    {
+      "url": "https://api-docs.deepseek.com/quick_start/pricing/",
+      "file": "sources/pricing-en.html",
+      "sha256": "b61db7d97374d37819b4dcdd41e86aa2d6bfa4d50bf059e700327727a4462e02",
+      "lang": "en"
+    },
+    {
+      "url": "https://api-docs.deepseek.com/updates/?latest=20261017",
+      "file": "sources/updates-en.html",
+      "sha256": "f7afdaae2e8db1f3fa95d2d7adb5d69c964dc42fdfd087d221e7398aa0dc830e"
+    },
+    {
+      "url": "https://api-docs.deepseek.com/news/news261017/",
+      "file": "sources/news261017.html",
+      "sha256": "26176e3916b5f015ce2d38619f593a22db357ab11256ab51336db57d9d606a1b"
+    }
+  ],
+  "observed_deepseek_flash": {
+    "api_name": "deepseek-flash",
+    "model_revision": "DeepSeek-V4.1-Flash-1017",
+    "endpoint": "https://api.deepseek.com",
+    "unit": "CNY per 1,000,000 tokens, from official zh-cn page",
+    "peak_hours_asia_shanghai": "Mon–Fri excluding PRC holidays 09:00–12:00 and 14:00–18:00",
+    "input_cache_hit": {
+      "off_peak": 0.02,
+      "peak": 0.04
+    },
+    "input_cache_miss": {
+      "off_peak": 1.0,
+      "peak": 2.0
+    },
+    "output": {
+      "off_peak": 4.0,
+      "peak": 8.0
+    }
+  },
+  "comparison_to_admitted_snapshot_2026-11-19": {
+    "admitted_policy": "deepseek-flash-cny-2026-11-19-v1",
+    "admitted_peak_uncached_input_and_output_cny_per_million": [
+      2,
+      8
+    ],
+    "official_page_still_matches_that_pair": true,
+    "note": "This is a fact refresh of the public rate card only. It does not extend POLICY_EXPIRES_AT, does not create a new spend allowance, and must not be used to reopen paid requests."
+  },
+  "runtime_status": {
+    "POLICY_VERIFIED_AT": 1795049340,
+    "POLICY_EXPIRES_AT": 1795135740,
+    "POLICY_EXPIRES_AT_local": "2026-11-20 08:49:00 +0800 Asia/Taipei",
+    "freshness_expired_at_retrieval": true
+  }
+}

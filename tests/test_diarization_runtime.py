@@ -34,7 +34,7 @@ from diarization_runtime import (  # noqa: E402
     run_sherpa_backend,
 )
 from setup_diarization import _allowed_download_url  # noqa: E402
-import setup_diarization as setup_module  # noqa: E402
+import setup_diarization as diarization_setup  # noqa: E402
 import sherpa_diarization_worker as worker  # noqa: E402
 from sherpa_diarization_worker import result_to_turns  # noqa: E402
 
@@ -53,13 +53,13 @@ def sha256(path: Path) -> str:
 
 
 def _hold_setup_lock(path: str, acquired: object, release: object) -> None:
-    with setup_module._setup_lock(Path(path)):
+    with diarization_setup._setup_lock(Path(path)):
         acquired.set()
         release.wait(5)
 
 
 def _acquire_setup_lock(path: str, acquired: object) -> None:
-    with setup_module._setup_lock(Path(path)):
+    with diarization_setup._setup_lock(Path(path)):
         acquired.set()
 
 
@@ -552,7 +552,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(runtime.python, python)
             self.assertEqual(runtime.segmentation_model, model_root / "segmentation.onnx")
 
-            setup_module.setup_diarization(
+            diarization_setup.setup_diarization(
                 runtime_root=runtime_root,
                 model_root=model_root,
                 manifest_path=manifest_path,
@@ -816,7 +816,7 @@ class RuntimeTests(unittest.TestCase):
 
             with mock.patch.object(Path, "replace", interrupt_staging):
                 with self.assertRaises(KeyboardInterrupt):
-                    setup_module._publish_directory(staging, destination)
+                    diarization_setup._publish_directory(staging, destination)
 
             self.assertEqual(
                 (destination / "version").read_text(encoding="utf-8"),
@@ -849,7 +849,7 @@ class RuntimeTests(unittest.TestCase):
 
             with mock.patch.object(Path, "replace", interrupt_runtime):
                 with self.assertRaises(KeyboardInterrupt):
-                    setup_module._publish_directories(
+                    diarization_setup._publish_directories(
                         [
                             (model_staging, model_destination),
                             (runtime_staging, runtime_destination),

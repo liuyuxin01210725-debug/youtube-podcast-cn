@@ -9,28 +9,31 @@ import UniformTypeIdentifiers
 /// Extract badges and the extract design entry stay as they are.
 struct LibraryView: View {
     @EnvironmentObject private var library: LibraryStore
+    @EnvironmentObject private var books: BookStore
     @EnvironmentObject private var player: PlayerModel
     @EnvironmentObject private var extracts: ExtractStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
     @State private var picking = false
+    @State private var pickingBook = false
     @State private var showExtractDesign = false
     @State private var filter: LibraryShelf.Chip = LibraryShelf.defaultChip
     @State private var searchText = ""
     @State private var searchPresented = false
-
-    private let searchAlwaysVisibleAt = 40
+    #if DEBUG
+    @State private var handledSyntheticEpisodeLaunch = false
+    #endif
 
     var body: some View {
         NavigationStack(path: $path) {
             Group {
-                if !library.hasCloudFolder && library.episodes.isEmpty {
+                if !library.hasCloudFolder && library.episodes.isEmpty && books.editions.isEmpty {
                     prompt(
                         title: "选择资料库",
                         systemImage: "folder",
                         detail: "在 iCloud 云盘里选中「中文播客私人库」。只需选一次。分享进来的链接和完整生成的节目都在这个文件夹里。"
                     )
-                } else if library.episodes.isEmpty && library.inbox.isEmpty {
+                } else if library.episodes.isEmpty && library.inbox.isEmpty && books.editions.isEmpty {
                     prompt(
                         title: "还没有节目",
                         systemImage: "music.note.list",
@@ -41,7 +44,7 @@ struct LibraryView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                if let episode = miniEpisode, !player.fullPlayerOpen {
+                if !searchPresented, let episode = miniEpisode, !player.fullPlayerOpen {
                     MiniPlayerBar(
                         episode: episode,
                         isPlaying: player.isPlaying,
@@ -54,17 +57,18 @@ struct LibraryView: View {
             .navigationTitle("资料库")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if library.episodes.count < searchAlwaysVisibleAt {
-                        Button {
-                            searchPresented = true
-                        } label: {
-                            Image(systemName: "magnifyingglass")
-                        }
-                        .accessibilityLabel("搜索")
+                    Button {
+                        searchPresented = true
+                    } label: {
+                        Image(systemName: "magnifyingglass")
                     }
+                    .accessibilityLabel("搜索")
+                    .accessibilityIdentifier("library.search")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
                     Menu {
+                        Button("导入书包（离线目录）") { pickingBook = true; picking = true }
+                            .disabled(books.importing)
                         Button {
                             Task { @MainActor in
                                 showExtractDesign = true
@@ -81,15 +85,24 @@ struct LibraryView: View {
                     .accessibilityLabel("更多")
                 }
             }
-            .searchable(text: $searchText, isPresented: $searchPresented, prompt: "标题、节目、嘉宾")
+            .searchable(
+                text: $searchText,
+                isPresented: $searchPresented,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "标题、节目、嘉宾"
+            )
             .onAppear {
-                player.onProgress = { id, seconds, duration in
+                player.onBookProgress = { ref, seconds, duration, delta, ended in
+                    Task { @MainActor in books.remember(ref, seconds: seconds, duration: duration, playedDelta: delta, ended: ended) }
+                }
+                books.reload()
+                player.onProgress = { [weak player] id, seconds, duration, finished in
+                    guard let episode = player?.currentEpisode, episode.id == id else { return false }
+                    let newlyFinished = library.remember(episode: episode, seconds: seconds, duration: duration, finished: finished)
                     Task { @MainActor in
-                        library.remember(id: id, seconds: seconds, duration: duration)
-                        if let episode = library.episodes.first(where: { $0.id == id }) {
-                            extracts.maybeLightOnFinished(episode: episode, seconds: seconds, duration: duration)
-                        }
+                        extracts.maybeLightOnFinished(episode: episode, seconds: seconds, duration: duration)
                     }
+                    return newlyFinished
                 }
                 library.reload()
                 extracts.reloadAll(episodes: library.episodes)
@@ -119,15 +132,32 @@ struct LibraryView: View {
             .fileImporter(isPresented: $picking, allowedContentTypes: [.folder], allowsMultipleSelection: false) { result in
                 switch result {
                 case .success(let urls):
-                    if let url = urls.first { library.adopt(url) }
+                    if let url = urls.first {
+                        if pickingBook { Task { await books.importPackage(url) } }
+                        else { library.adopt(url) }
+                    }
+                    pickingBook = false
                 case .failure(let error):
                     if (error as? CocoaError)?.code == .userCancelled { return }
                     library.message = "没有选中资料库文件夹。"
                 }
             }
+            .navigationDestination(for: BookRoute.self) { route in BookDetailView(route: route) }
             .navigationDestination(for: Episode.self) { episode in
                 PlayerView(episode: episode)
             }
+            #if DEBUG
+            .navigationDestination(for: DebugSyntheticEpisodeRoute.self) { route in
+                PlayerView(episode: route.episode, opensPaused: true)
+            }
+            .task {
+                guard !handledSyntheticEpisodeLaunch else { return }
+                handledSyntheticEpisodeLaunch = true
+                if let route = DebugSyntheticEpisodeRoute.resolve(in: library.episodes) {
+                    path.append(route)
+                }
+            }
+            #endif
             .navigationDestination(isPresented: $showExtractDesign) {
                 ExtractDesignView()
             }
@@ -167,7 +197,15 @@ struct LibraryView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if showsContinueSection && !continueSectionRows.isEmpty {
+            if let error = books.errorText { Section { Text(error).font(.footnote).foregroundStyle(.secondary) } }
+            if showsContinueSection && bookWinsContinue, let mark = books.continueMark {
+                Section("继续播放") {
+                    NavigationLink(value: BookRoute(bookID: mark.reference.bookID, revision: mark.reference.packageRevision, chapterID: mark.reference.chapterID, play: true)) {
+                        VStack(alignment: .leading) { Text(mark.bookTitle); Text("\(mark.chapterTitle) · 上次 \(Int(mark.seconds)) 秒").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    .swipeActions { Button("隐藏") { books.dismissContinue(mark) } }
+                }
+            } else if showsContinueSection && !continueSectionRows.isEmpty {
                 ContinueListeningSection(
                     rows: continueSectionRows,
                     onPlay: playFromLibrary,
@@ -185,6 +223,19 @@ struct LibraryView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .padding(.vertical, 4)
+                    }
+                }
+            }
+            if !visibleBooks.isEmpty {
+                Section("书籍") {
+                    ForEach(visibleBooks) { edition in
+                        NavigationLink(value: BookRoute(bookID: edition.manifest.bookId, revision: edition.manifest.packageRevision)) {
+                            VStack(alignment: .leading) {
+                                Text(edition.manifest.title)
+                                Text(books.heard(edition) ? "当前章轨已听 · 非整本完整性认证" : "\(edition.manifest.chapters.count) 章 · 独立译本与朗读稿")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
             }
@@ -277,28 +328,32 @@ struct LibraryView: View {
     private var episodeRows: some View {
         var density = 0
         return ForEach(visibleEpisodes) { episode in
-            let badge = extracts.badge(for: episode.id, densityUsed: &density)
+            let badge = episode.pendingTranscript == nil ? extracts.badge(for: episode.mediaKey, densityUsed: &density) : nil
             NavigationLink(value: episode) {
                 episodeRow(episode, badge: badge)
             }
+            .accessibilityIdentifier("library.episode.\(episode.id)")
             .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                 if filter == .all && !library.isFinished(episode.id) {
                     Button {
                         library.markFinished(episode.id)
+                        player.resetPodcastProgress(for: episode)
                     } label: {
                         Label("已听完", systemImage: "checkmark.circle")
                     }
                     .tint(.green)
                 }
-                Button {
-                    extracts.toggleStar(episode: episode, lensIds: episode.effectiveLensIds)
-                } label: {
-                    Label(
-                        extracts.isStarred(episode.id) ? "取消星标" : "星标",
-                        systemImage: extracts.isStarred(episode.id) ? "star.slash" : "star.fill"
-                    )
+                if episode.pendingTranscript == nil {
+                    Button {
+                        extracts.toggleStar(episode: episode, lensIds: episode.effectiveLensIds)
+                    } label: {
+                        Label(
+                            extracts.isStarred(episode.id) ? "取消星标" : "星标",
+                            systemImage: extracts.isStarred(episode.id) ? "star.slash" : "star.fill"
+                        )
+                    }
+                    .tint(.orange)
                 }
-                .tint(.orange)
             }
         }
     }
@@ -386,6 +441,16 @@ struct LibraryView: View {
         }
     }
 
+    private var visibleBooks: [BookEdition] {
+        guard filter == LibraryShelf.defaultChip || filter == .all || filter == .finished else { return [] }
+        return books.selectedEditions.filter { e in
+            (searchText.isEmpty || e.manifest.title.localizedCaseInsensitiveContains(searchText)) && (filter == .all || (filter == .finished ? books.heard(e) : !books.heard(e)))
+        }
+    }
+    private var bookWinsContinue: Bool {
+        BookProgressPolicy.bookWins(bookTouch: books.continueMark?.lastActuallyListenedAt, podcastTouch: library.continueEntries(in: library.episodes).first?.touchedAt)
+    }
+
     private var showsContinueSection: Bool {
         LibraryShelf.showsContinue(chip: filter, query: searchText)
     }
@@ -397,17 +462,17 @@ struct LibraryView: View {
             guard let episode = byID[item.id] else { return nil }
             guard ContinueListening.showsContinueCard(
                 continueID: episode.id,
-                playerID: player.currentID,
+                playerID: player.isCurrent(episode) ? episode.id : nil,
                 controlsUsable: miniTransportUsable
             ) else { return nil }
             let nearResume = !ContinueListening.shouldReopenAtListenMark(
-                currentID: player.currentID,
+                currentID: player.isCurrent(episode) ? episode.id : nil,
                 episodeID: episode.id,
                 playhead: player.current,
                 resumeAt: item.seconds,
                 clipInProgress: player.isClipPlayback
             )
-            let playing = nearResume && player.currentID == episode.id && player.isPlaying
+            let playing = nearResume && player.isCurrent(episode) && player.isPlaying
             return ContinueListeningSection.Row(episode: episode, item: item, playing: playing)
         }
     }
@@ -424,8 +489,7 @@ struct LibraryView: View {
     }
 
     private var miniEpisode: Episode? {
-        guard let id = player.currentID else { return nil }
-        return library.episodes.first { $0.id == id }
+        player.currentEpisode
     }
 
     private var miniFraction: Double? {
@@ -437,14 +501,14 @@ struct LibraryView: View {
 
     /// Continue pill uses ListenMark. If 「听这段」 left the playhead elsewhere, seek back.
     private func playFromLibrary(_ episode: Episode) {
-        library.acknowledgeContinue(episode.id)
-        let resumeAt = library.resumeSeconds(for: episode.id)
+        library.acknowledgeContinue(episode)
+        let resumeAt = library.resumeSeconds(for: episode)
         guard episode.isPlayableNow else {
             path.append(episode)
             return
         }
         if player.errorText != nil || ContinueListening.shouldReopenAtListenMark(
-            currentID: player.currentID,
+            currentID: player.isCurrent(episode) ? episode.id : nil,
             episodeID: episode.id,
             playhead: player.current,
             resumeAt: resumeAt,
@@ -459,10 +523,10 @@ struct LibraryView: View {
     }
 
     private func toggleMini(_ episode: Episode) {
-        if player.currentID == episode.id {
+        if player.isCurrent(episode) {
             player.toggle()
         } else {
-            player.open(episode, resumeAt: library.resumeSeconds(for: episode.id))
+            player.open(episode, resumeAt: library.resumeSeconds(for: episode))
         }
     }
 
@@ -509,7 +573,7 @@ struct LibraryView: View {
         let remaining: String?
         if library.isInProgress(episode.id), let duration = episode.durationSec, duration > 1 {
             remaining = ContinueListening.remainingLabel(
-                seconds: library.resumeSeconds(for: episode.id),
+                seconds: library.resumeSeconds(for: episode),
                 duration: duration
             )
         } else {

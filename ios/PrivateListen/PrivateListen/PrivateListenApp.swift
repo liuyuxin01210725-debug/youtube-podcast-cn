@@ -2,7 +2,9 @@ import SwiftUI
 
 @main
 struct PrivateListenApp: App {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var library = LibraryStore()
+    @StateObject private var books = BookStore()
     @StateObject private var player = PlayerModel()
     @StateObject private var extracts = ExtractStore()
     @StateObject private var pointStars = PointStarStore()
@@ -15,7 +17,7 @@ struct PrivateListenApp: App {
             // DiscoverView.swift / DiscoverCatalog.swift remain in the target unused by TabView.
             Group {
                 #if DEBUG && targetEnvironment(simulator)
-                if PointListenProbe.previewEnabled {
+                if !DebugSyntheticEpisodeRoute.requested(), PointListenProbe.previewEnabled {
                     PointListenPreview()
                 } else {
                     LibraryView()
@@ -25,11 +27,15 @@ struct PrivateListenApp: App {
                 #endif
             }
                 .environmentObject(library)
+                .environmentObject(books)
                 .environmentObject(player)
                 .environmentObject(extracts)
                 .environmentObject(pointStars)
                 .environmentObject(listenNotes)
                 .task {
+                    #if DEBUG
+                    guard !DebugSyntheticEpisodeRoute.requested() else { return }
+                    #endif
                     #if DEBUG && !targetEnvironment(simulator)
                     await NortonDeviceFourProbe.runIfNeeded(player: player, library: library)
                     #endif
@@ -39,6 +45,10 @@ struct PrivateListenApp: App {
                 }
                 .onOpenURL { url in
                     library.acceptIncoming(url)
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    guard phase == .active else { return }
+                    library.refreshLocalLibraryOnActivation()
                 }
         }
     }

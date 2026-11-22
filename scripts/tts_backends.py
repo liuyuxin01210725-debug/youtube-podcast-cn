@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import tempfile
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+import aiohttp
 import edge_tts
+from edge_tts.exceptions import NoAudioReceived, WebSocketError
 
 
 VOICE_SLOTS = (
@@ -135,15 +139,44 @@ def _edge_voice_map() -> dict[str, str]:
     }
 
 
+_EDGE_RETRY_DELAYS = (1.0, 2.0, 4.0, 8.0, 15.0)
+_EDGE_ATTEMPT_TIMEOUT = 90
+_EDGE_RETRY_STATUSES = {429, 500, 502, 503, 504}
+EDGE_ACCESS_DENIED_MESSAGE = (
+    "系统音色服务拒绝连接（HTTP 403）。请确认 edge-tts 已升级到 7.3.1 或更高版本。"
+)
+_SPEAKABLE_TTS = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]")
+
+
+def speakable_tts(text: str) -> bool:
+    return _SPEAKABLE_TTS.search(text or "") is not None
+
+
+def _edge_retryable(error: Exception, text: str) -> bool:
+    if isinstance(error, aiohttp.ClientResponseError):
+        return error.status in _EDGE_RETRY_STATUSES
+    if isinstance(error, (aiohttp.ClientSSLError, aiohttp.ServerFingerprintMismatch)):
+        return False
+    if isinstance(error, NoAudioReceived):
+        return speakable_tts(text)
+    return isinstance(error, (
+        aiohttp.ClientConnectionError, aiohttp.ClientPayloadError,
+        WebSocketError, ConnectionError, TimeoutError, asyncio.TimeoutError,
+    ))
+
+
 class EdgeTTSBackend:
     name = "edge"
     model = "edge-tts"
     file_suffix = ".mp3"
     max_chars = 2500
 
-    def __init__(self, voice_map: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, voice_map: dict[str, str] | None = None, *, book_synthesis: bool = False
+    ) -> None:
         self.voice_map = voice_map or _edge_voice_map()
         self.concurrency = int(os.getenv("TTS_CONCURRENCY", "8"))
+        self._book_synthesis = book_synthesis
 
     def resolve_voice(self, voice_slot: str) -> str:
         if voice_slot not in VOICE_SLOTS:
@@ -161,21 +194,31 @@ class EdgeTTSBackend:
     async def synthesize(
         self, request: SynthesisRequest, output: Path
     ) -> SynthesisUsage:
-        communicate = edge_tts.Communicate(
-            request.text, self.resolve_voice(request.voice_slot)
-        )
-        try:
-            await communicate.save(str(output))
-        except Exception as error:
-            message = str(error)
-            lowered = message.casefold()
-            if "403" in message or "invalid response status" in lowered:
-                raise TTSBackendError(
-                    "系统音色服务暂时拒绝连接（常见于 edge-tts 过旧）。请升级到 edge-tts>=7.3.1 后重试："
-                    ".venv/bin/pip install -U 'edge-tts>=7.3.1'"
-                ) from error
-            raise
-        return SynthesisUsage()
+        voice = self.resolve_voice(request.voice_slot)
+        receive_options = {"receive_timeout": 180} if self._book_synthesis else {}
+        for attempt in range(len(_EDGE_RETRY_DELAYS) + 1):
+            # Keep interrupted streams away from the destination, even on cancellation.
+            with tempfile.TemporaryDirectory(prefix=".edge-", dir=output.parent, ignore_cleanup_errors=True) as folder:
+                staged = Path(folder) / output.name
+                communicate = edge_tts.Communicate(request.text, voice, **receive_options)
+                try:
+                    await asyncio.wait_for(communicate.save(str(staged)), _EDGE_ATTEMPT_TIMEOUT)
+                except Exception as error:
+                    # Some older wrappers expose the aiohttp 403 as a plain RuntimeError.
+                    denied = (
+                        error.status == 403 if isinstance(error, aiohttp.ClientResponseError)
+                        else type(error) is RuntimeError and re.match(
+                            r"^403,\s*message=invalid response status(?:,|$)", str(error), re.I
+                        )
+                    )
+                    if denied:
+                        raise TTSBackendError(EDGE_ACCESS_DENIED_MESSAGE, retryable=False) from None
+                    if attempt == len(_EDGE_RETRY_DELAYS) or not _edge_retryable(error, request.text):
+                        raise
+                else:
+                    staged.replace(output)
+                    return SynthesisUsage()
+            await asyncio.sleep(_EDGE_RETRY_DELAYS[attempt])
 
 
 def _qwen_voice_map() -> dict[str, str]:
@@ -387,9 +430,11 @@ class Qwen3APIBackend:
         )
 
 
-def build_backend(name: str, api_key: str | None = None) -> TTSBackend:
+def build_backend(
+    name: str, api_key: str | None = None, *, book_synthesis: bool = False
+) -> TTSBackend:
     if name == "edge":
-        return EdgeTTSBackend()
+        return EdgeTTSBackend(book_synthesis=book_synthesis)
     if name == "qwen3-api":
         return Qwen3APIBackend(api_key=api_key or "")
     raise ValueError(f"不支持的 TTS 后端: {name}")

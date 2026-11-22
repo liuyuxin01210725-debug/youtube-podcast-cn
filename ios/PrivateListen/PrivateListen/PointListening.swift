@@ -146,18 +146,3 @@ enum PointListening {
         value.count == count && value.allSatisfy { "0123456789abcdef".contains($0) }
     }
 }
-
-/// Separates the seek landing from actual playback; the existing finished rule stays in LibraryStore.
-struct JumpContinueProgress {
-    private var landing: Double?
-    var allowsCheckpoint: Bool { landing == nil }
-
-    mutating func didLand(at seconds: Double) { landing = seconds }
-    mutating func reset() { landing = nil }
-    mutating func observe(seconds: Double, isPlaying: Bool) -> Bool {
-        guard let landing else { return true }
-        guard isPlaying, seconds.isFinite, seconds > landing + 0.01 else { return false }
-        self.landing = nil
-        return true
-    }
-}

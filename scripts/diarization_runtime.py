@@ -10,7 +10,6 @@ import os
 import re
 import subprocess
 import tempfile
-import urllib.request
 import wave
 from dataclasses import dataclass
 from functools import lru_cache
@@ -407,6 +406,15 @@ def _speaker_mapping(
 
 
 
+def speaker_turn_summary(turns):
+    durations: dict[str, int] = {}
+    for turn in turns:
+        durations[turn.speaker_id] = durations.get(turn.speaker_id, 0) + (
+            turn.end_ms - turn.start_ms
+        )
+    return {"cluster_count": len(durations), "duration_ms_by_id": durations}
+
+
 def _collapse_minor_speakers(
     turns: list[DiarizationTurn],
     prototypes: dict[str, list[float]],
@@ -427,11 +435,7 @@ def _collapse_minor_speakers(
     """
     if not turns or min_ms <= 0:
         return turns
-    duration_by: dict[str, int] = {}
-    for turn in turns:
-        duration_by[turn.speaker_id] = duration_by.get(turn.speaker_id, 0) + (
-            turn.end_ms - turn.start_ms
-        )
+    duration_by = speaker_turn_summary(turns)["duration_ms_by_id"]
     majors = {sid for sid, total in duration_by.items() if total >= min_ms}
     minors = [sid for sid in duration_by if sid not in majors]
     if not minors or not majors:
@@ -686,7 +690,7 @@ def ensure_diarization_runtime(
     model_root: Path | None = None,
     manifest_path: Path = DEFAULT_MANIFEST_PATH,
     requirements_path: Path = DEFAULT_REQUIREMENTS_PATH,
-    opener: Callable[..., object] = urllib.request.urlopen,
+    opener: Callable[..., object] | None = None,
     runner: Runner = subprocess.run,
 ) -> DiarizationRuntime:
     """Reuse a verified runtime or install it atomically on first use."""
@@ -705,6 +709,10 @@ def ensure_diarization_runtime(
 
     from setup_diarization import setup_diarization
 
+    if opener is None:
+        from urllib.request import urlopen
+
+        opener = urlopen
     setup_diarization(
         runtime_root=resolved_runtime_root,
         model_root=resolved_model_root,
@@ -861,6 +869,7 @@ def _run_worker_chunk(
     runner: Runner,
     popen_factory: PopenFactory | None,
     progress_callback: Callable[[int], None] | None,
+    fold_callback: Callable[[dict], None] | None = None,
 ) -> WorkerChunk:
     descriptor, output_name = tempfile.mkstemp(
         prefix=".diarization-output-", suffix=".json", dir=audio_path.parent
@@ -934,6 +943,11 @@ def _run_worker_chunk(
             result.turns, result.embeddings, bounds
         )
         fitted = WorkerChunk(turns, embeddings)
+        if fold_callback is not None:
+            fold_callback({
+                "stage": "chunk_budget", "start_ms": start_ms, "end_ms": end_ms,
+                "before": speaker_turn_summary(result.turns), "after": speaker_turn_summary(turns),
+            })
         _validate_chunk_turns(fitted.turns, bounds)
         return fitted
     finally:
@@ -951,6 +965,7 @@ def run_sherpa_backend(
     runner: Runner = subprocess.run,
     popen_factory: PopenFactory | None = None,
     progress_callback: Callable[[int], None] | None = None,
+    fold_callback: Callable[[dict], None] | None = None,
     chunk_duration_ms: int = DEFAULT_CHUNK_DURATION_MS,
     chunk_overlap_ms: int = DEFAULT_CHUNK_OVERLAP_MS,
 ) -> list[DiarizationTurn]:
@@ -991,6 +1006,7 @@ def run_sherpa_backend(
             runner=runner,
             popen_factory=popen_factory,
             progress_callback=emit_progress,
+            fold_callback=fold_callback,
         )
         chunk_turns = chunk.turns
         if index == 0:
@@ -1025,4 +1041,8 @@ def run_sherpa_backend(
                         for left, right in zip(previous, vector, strict=True)
                     ]
         previous_end_ms = end_ms
-    return _collapse_minor_speakers(stitched, prototypes, bounds=bounds)
+    folded = _collapse_minor_speakers(stitched, prototypes, bounds=bounds)
+    if fold_callback is not None:
+        fold_callback({"stage": "minor_speakers", "before": speaker_turn_summary(stitched),
+                       "after": speaker_turn_summary(folded)})
+    return folded

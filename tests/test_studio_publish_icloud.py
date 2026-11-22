@@ -8,7 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from studio_engine import StudioEngine
+from studio_engine import StudioEngine, fingerprint
+from temporary_audio import sha256_file
 from studio_artwork import solid_placeholder_png
 from studio_publish_icloud import (
     PublishError,
@@ -22,7 +23,7 @@ from studio_publish_icloud import (
     translate_episode_topic,
     youtube_id_from_url,
 )
-from studio_server import Studio, read, write
+from studio_server import Studio, write
 
 
 class PublishTests(unittest.TestCase):
@@ -42,13 +43,12 @@ class PublishTests(unittest.TestCase):
         self.assertIsNone(youtube_id_from_url('https://example.com/watch?v=abcdefghijk'))
         self.assertIsNone(youtube_id_from_url('not a url'))
 
-    def test_publish_copies_orders_and_replaces(self):
+    def test_publish_copies_orders_and_rejects_unbound_replacement(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
             older = self.make_job(root, 'job-older', '较早的一期', audio=b'old')
             newer = self.make_job(root, 'job-newer', '最新的一期', audio=b'new')
             os.utime(older / 'output.mp3', (1_000, 1_000))
             os.utime(newer / 'output.mp3', (2_000, 2_000))
-            (Path(library) / 'library.json').write_text('{', encoding='utf-8')
             with patch('studio_publish_icloud.shutil.which', return_value=None):
                 first = publish_job(older, library)
                 second = publish_job(newer, library)
@@ -67,13 +67,29 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(episode['source_job_id'], 'job-newer')
             (newer / 'output.mp3').write_bytes(b'newer-still')
             os.utime(newer / 'output.mp3', (3_000, 3_000))
-            publish_job(newer, library)
-            listing = json.loads((Path(library) / 'library.json').read_text(encoding='utf-8'))
-            self.assertEqual([item['id'] for item in listing['episodes']], ['job-newer', 'job-older'])
-            self.assertEqual((Path(library) / 'episodes' / 'job-newer' / 'output.mp3').read_bytes(), b'newer-still')
+            before = (Path(library) / 'library.json').read_bytes()
+            with self.assertRaisesRegex(PublishError, '同编号新版需要可核验'):
+                publish_job(newer, library)
+            self.assertEqual((Path(library) / 'library.json').read_bytes(), before)
+            self.assertEqual((Path(library) / 'episodes' / 'job-newer' / 'output.mp3').read_bytes(), b'new')
             status = json.loads((newer / 'private-listen.json').read_text(encoding='utf-8'))
             self.assertTrue(status['ok'])
             self.assertEqual(status['episode_id'], 'job-newer')
+
+    def test_publish_with_invalid_index_preserves_index_and_existing_episode(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
+            job = self.make_job(root, 'job-synthetic', audio=b'before')
+            live_episode = Path(library) / 'episodes' / job.name
+            live_episode.mkdir(parents=True)
+            (live_episode / 'output.mp3').write_bytes(b'existing published audio')
+            listing = Path(library) / 'library.json'
+            prior = b'{"episodes": false, "custom": "preserve me"}\n'
+            listing.write_bytes(prior)
+            with self.assertRaisesRegex(PublishError, '现有资料库索引格式无效'):
+                publish_job(job, library)
+            self.assertEqual(listing.read_bytes(), prior)
+            self.assertEqual((live_episode / 'output.mp3').read_bytes(), b'existing published audio')
+            self.assertFalse((job / 'private-listen.json').exists())
 
     def test_metadata_title_and_video_id_win(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
@@ -216,9 +232,15 @@ class PublishTests(unittest.TestCase):
         self.assertNotIn('source_title', rejected)
         self.assertEqual(rejected['channel'], 'The Diary Of A CEO')
 
-    def test_translate_hook_without_api_key_returns_none(self):
-        with patch.dict(os.environ, {}, clear=True):
+    def test_translate_hook_without_scope_does_not_lookup_credentials(self):
+        with (
+            patch.dict(os.environ, {'DEEPSEEK_API_KEY': 'synthetic-key'}, clear=True),
+            patch('podcast_cn.create_translation_client') as create,
+            patch('studio_publish_icloud.subprocess.run') as command,
+        ):
             self.assertIsNone(translate_episode_topic('Creatine is the secret to weight loss', provider='deepseek'))
+        create.assert_not_called()
+        command.assert_not_called()
         self.assertEqual(
             compose_display_title('肌酸专家：肌酸是减肥的秘密', 'Huberman'),
             '肌酸专家：肌酸是减肥的秘密 · Huberman',
@@ -328,7 +350,7 @@ class PublishTests(unittest.TestCase):
             }
             (episode_dir / 'extract.json').write_text(json.dumps(extract), encoding='utf-8')
             (job / 'output.mp3').write_bytes(b'republish')
-            with patch('studio_publish_icloud.shutil.which', return_value=None):
+            with self.assertRaisesRegex(PublishError, '同编号新版需要可核验'):
                 publish_job(job, library)
             kept = json.loads((episode_dir / 'extract.json').read_text(encoding='utf-8'))
             self.assertEqual(kept['methods'][0]['status'], 'confirmed')
@@ -338,9 +360,23 @@ class PublishTests(unittest.TestCase):
 class EngineHookTests(unittest.TestCase):
     def ready_engine(self, root):
         engine = StudioEngine(Path(root) / '6d898d4192de495fafcec86b9c938430')
-        (engine.job / 'document.json').write_text('{}', encoding='utf-8')
+        document = {'segments': [
+            {'id': 'seg-000001', 'speaker_id': 'host', 'start_ms': 0, 'end_ms': 1000},
+        ], 'speakers': {'host': {'voice_slot': 'male_1'}}}
+        write(engine.job / 'document.json', document)
         write(engine.job / 'state.json', {'title': '肌酸对谈'})
-        config = {'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=MM-C3JqCXBk'}}
+        config = {'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=MM-C3JqCXBk'},
+                  'expected_speakers': 1}
+        write(engine.job / 'config.json', config)
+        lock = engine.job / 'source-identity.json'
+        write(lock, {**config['source'], 'sha256': 'a' * 64, 'bytes': 100, 'duration_ms': 1000})
+        mp3 = engine.job / 'output.mp3'
+        mp3.write_bytes(b'full-audio')
+        write(engine.job / 'render-identity.json', {
+            'schema_version': 1, 'sample_rate': 24000, 'audio_sha256': sha256_file(mp3),
+            'document_sha256': fingerprint(document), 'source_identity_sha256': sha256_file(lock),
+            'timeline': [{'id': 'seg-000001', 'start_frame': 0, 'end_frame': 24000}],
+        })
         return engine, config
 
     def test_full_render_publishes_preview_and_prepare_do_not(self):
@@ -349,7 +385,9 @@ class EngineHookTests(unittest.TestCase):
             mp3 = engine.job / 'output.mp3'
             mp3.write_bytes(b'full-audio')
             with patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}):
-                with patch.object(engine, 'render', return_value=mp3):
+                with patch.object(engine, 'render', return_value=mp3), patch(
+                    'studio_publish_icloud.probe_duration_sec', return_value=1.0,
+                ):
                     self.assertEqual(engine.run(config, 'render'), mp3)
                 published = Path(library) / 'episodes' / engine.job.name / 'output.mp3'
                 self.assertEqual(published.read_bytes(), b'full-audio')
@@ -383,27 +421,17 @@ class EngineHookTests(unittest.TestCase):
 
 
 class ServerHookTests(unittest.TestCase):
-    def test_retry_only_when_full_output_is_unpublished(self):
+    def test_only_explicit_managed_full_actions_get_a_publish_target(self):
         with tempfile.TemporaryDirectory() as jobs, tempfile.TemporaryDirectory() as library:
             studio = Studio(jobs)
             job = Path(jobs) / 'abc123'
             job.mkdir()
-            (job / 'output.mp3').write_bytes(b'audio')
-            state = {'action': 'render', 'preview': False}
-            self.assertTrue(studio.private_listen_needs_retry(job, state))
-            self.assertFalse(studio.private_listen_needs_retry(job, {'action': 'render', 'preview': True}))
-            self.assertFalse(studio.private_listen_needs_retry(job, {'action': 'prepare', 'preview': False}))
-            link = Path(jobs) / 'linked'
-            link.mkdir()
-            (link / 'output.mp3').symlink_to(job / 'output.mp3')
-            self.assertFalse(studio.private_listen_needs_retry(link, state))
             with patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}):
-                studio.retry_private_listen(job)
-            self.assertEqual((Path(library) / 'episodes' / 'abc123' / 'output.mp3').read_bytes(), b'audio')
-            self.assertFalse(studio.private_listen_needs_retry(job, state))
-            before = read(job / 'state.json')
-            studio.retry_private_listen(link)
-            self.assertEqual(read(job / 'state.json'), before)
+                full = studio.engine_args(job, {'action': 'render', 'preview': False})
+                self.assertEqual(full[full.index('--publish-library') + 1], str(Path(library).resolve()))
+                for state in ({'action': 'render', 'preview': True}, {'action': 'prepare'}):
+                    self.assertNotIn('--publish-library', studio.engine_args(job, state))
+            self.assertFalse((Path(library) / 'library.json').exists())
 
 if __name__ == '__main__':
     unittest.main()

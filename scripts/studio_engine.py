@@ -1,36 +1,64 @@
 #!/usr/bin/env python3
 """Persistent, editable studio jobs; ML models live only in child processes."""
 from __future__ import annotations
+import sys
+
+if __name__ == '__main__':
+    # Check before asyncio or HTTP imports bind the overridden socket class.
+    from studio_recovery import StudioRecoveryError, require_translation_network
+
+    try:
+        require_translation_network()
+    except StudioRecoveryError as error:
+        raise SystemExit(f'{error.code}: {error}') from None
+
 import argparse
 import asyncio
 from dataclasses import asdict
+import errno
 import hashlib
 import json
+import logging
 import os
 import re
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
-import sys
 import tempfile
 import time
 import wave
 
+import aiohttp
+from edge_tts.exceptions import NoAudioReceived, WebSocketError
+
 from podcast_cn import (fetch_video_info, download_english_subtitles, create_translation_client,
-                        translate_with_resume, get_provider_config, _is_exact_youtube_url,
-                        video_metadata_from_info, PodcastPipelineError)
+                        translate_with_resume, chunk_segments, get_provider_config, _is_exact_youtube_url,
+                        video_metadata_from_info, PodcastPipelineError,
+                        TranslationConfigurationError, TranslationValidationError)
 from podcast_captions import CaptionPiece, SubtitleSegment, parse_vtt_pieces, group_caption_pieces
 from diarization_core import (SpeakerBounds, align_caption_pieces, fill_unassigned_for_review,
                               validate_diarization)
 from diarization_cache import assign_studio_voices
-from diarization_runtime import ensure_diarization_runtime, run_sherpa_backend
+import diarization_runtime
+from diarization_runtime import (DiarizationRuntimeError, DiarizationSetupError,
+                                 ensure_diarization_runtime, run_sherpa_backend)
 from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
 from studio_ads import ad_only_speakers, fold_ad_speakers, group_key, mark_sponsor_windows, split_group_key
-from studio_speakers import SpeakerGateError, expected_speakers, use_male_slots, validate_speaker_ids, validate_speaker_voices
+from studio_document import check_source_coverage
+from studio_recovery import (
+    StudioRecoveryError, TranslationJournal, _read_regular_bytes, _save_bytes, _sync_dir,
+    decode_json_object, load_source,
+    podcast_job_lock, save_source,
+)
+from studio_speakers import (SpeakerGateError, expected_speakers, requires_voice_mapping, use_male_slots,
+                             validate_speaker_ids, validate_speaker_voices)
 from temporary_audio import download_audio_only, sha256_file
-from tts_backends import TTSBackendError, build_backend, SynthesisRequest
+from translation_budget import TranslationBudget, TranslationRequestError
+from tts_backends import (EDGE_ACCESS_DENIED_MESSAGE, SynthesisRequest, TTSBackendError,
+                          build_backend, speakable_tts)
 
 ROOT = Path(__file__).resolve().parents[1]
 CLONE_MODEL = 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit'
@@ -66,7 +94,40 @@ def classify_failure(stderr, executable=''):
     return StudioError('process_failed', '处理程序执行失败，请检查当前阶段的依赖、音源与模型配置后重试。')
 
 
-_LEAKED_DETAIL = re.compile(r"https?://|bearer\s+\S+|token=", re.IGNORECASE)
+_LEAKED_DETAIL = re.compile(
+    r"://|\?[^\s=]+\s*=|\b(?:bearer|basic)\s+\S+|"
+    r"\b(?:[\w-]*token|authorization|cookie|[\w-]*api[_-]?key|headers?)['\"]?\s*[:=]",
+    re.IGNORECASE,
+)
+_FAILURE_MESSAGE = '处理失败，请检查当前阶段、依赖和模型配置后重试'
+_TRANSLATION_CONFIG_MESSAGES = {
+    '缺少 DEEPSEEK_API_KEY,请先配置 DeepSeek API Key',
+    '缺少 DASHSCOPE_API_KEY,请先配置 通义千问 API Key',
+}
+_PIPELINE_MESSAGES = {
+    '找不到 yt-dlp,请先安装',
+    'yt-dlp 返回的视频信息不是有效 JSON',
+    'yt-dlp 返回的视频信息格式无效',
+    '视频信息缺少 ID 或标题',
+    '这个视频没有英文字幕',
+    'yt-dlp 没有生成英文 VTT 字幕',
+    'DeepSeek 翻译请求失败,可直接重跑继续',
+    '通义千问 翻译请求失败,可直接重跑继续',
+}
+_TTS_MESSAGES = {
+    EDGE_ACCESS_DENIED_MESSAGE,
+    '系统音色服务暂时拒绝连接。请升级 edge-tts',
+    'Qwen 返回了不支持的音频地址',
+    'Qwen 返回了空音频',
+    'Qwen TTS 请求失败',
+    'Qwen TTS 未返回音频',
+    'Qwen 音频下载失败',
+}
+
+
+def diagnostic_segment_id(value):
+    # Current producers use seg-000001; accept the older numbered spellings too.
+    return value if isinstance(value, str) and re.fullmatch(r'(?:seg-?|s)\d{1,12}', value, re.ASCII) else None
 
 
 def user_facing_message(error):
@@ -75,15 +136,73 @@ def user_facing_message(error):
     Arbitrary SDK text can contain keys and signed URLs. Known pipeline and
     TTS errors are fixed Chinese (or an env-var name, not the secret).
     """
-    if isinstance(error, (StudioError, StudioInputError, SpeakerGateError, PodcastPipelineError, TTSBackendError)):
+    if isinstance(error, StudioRecoveryError):
         text = str(error)
-    elif type(error).__name__.startswith('Diarization'):
+        return text if text and not _LEAKED_DETAIL.search(text) else None
+    if isinstance(error, TranslationValidationError):
+        return '翻译结果无法与原文逐段对应，请重试。'
+    if isinstance(error, (DiarizationSetupError, DiarizationRuntimeError)):
+        return '声纹分析失败，请检查本地声纹环境和任务配置。'
+    if isinstance(error, (StudioError, StudioInputError, SpeakerGateError, PodcastPipelineError, TTSBackendError)):
         text = str(error)
     else:
         return None
     if not text or _LEAKED_DETAIL.search(text):
         return None
+    if isinstance(error, TranslationConfigurationError):
+        if text in _TRANSLATION_CONFIG_MESSAGES:
+            return text
+        return '翻译模型供应商配置无效，请检查配置。'
+    if isinstance(error, TTSBackendError):
+        if text.startswith(('Qwen TTS 请求失败(', 'Qwen TTS 未返回音频(')):
+            return text.split('(', 1)[0]
+        return text if text in _TTS_MESSAGES else None
+    if isinstance(error, PodcastPipelineError):
+        if text.startswith(('读取 YouTube 信息失败:', '下载英文字幕失败:')):
+            return text.split(':', 1)[0]
+        return text if text in _PIPELINE_MESSAGES else None
     return text[:500]
+
+
+def failure_details(error):
+    """Describe errors without serializing SDK messages, request data or causes."""
+    if isinstance(error, StudioRecoveryError) and error.code == 'translation_transport_unknown':
+        transport = (error.evidence or {}).get('transport_failure')
+        if transport:
+            return transport['exception_type'], f"翻译传输失败（{transport['phase']}，{transport['reason']}）。"
+    if isinstance(error, aiohttp.ClientResponseError):
+        category = 'WSServerHandshakeError' if isinstance(error, aiohttp.WSServerHandshakeError) else 'ClientResponseError'
+        status = error.status
+        message = f'音色服务返回 HTTP {status}。' if type(status) is int and 100 <= status <= 599 else '音色服务返回异常响应。'
+        return category, message
+    for kind, message in (
+        (aiohttp.ClientSSLError, '音色服务 TLS 连接失败。'),
+        (aiohttp.ServerFingerprintMismatch, '音色服务 TLS 证书校验失败。'),
+        (aiohttp.ClientConnectorError, '无法连接音色服务。'),
+        (TimeoutError, '处理请求超时。'),
+        (asyncio.TimeoutError, '处理请求超时。'),
+        (aiohttp.ServerDisconnectedError, '音色服务连接中断。'),
+        (aiohttp.ClientPayloadError, '音色服务响应未完整接收。'),
+        (WebSocketError, '音色服务 WebSocket 连接中断。'),
+        (NoAudioReceived, '音色服务未返回音频。'),
+        (ConnectionError, '处理连接中断。'),
+        (aiohttp.ClientConnectionError, '音色服务连接中断。'),
+    ):
+        if isinstance(error, kind):
+            return kind.__name__, message
+    for kind in (StudioError, StudioInputError, SpeakerGateError, TTSBackendError,
+                 DiarizationSetupError, DiarizationRuntimeError,
+                 TranslationConfigurationError, TranslationValidationError, TranslationRequestError,
+                 StudioRecoveryError, PodcastPipelineError):
+        if isinstance(error, kind):
+            return kind.__name__, user_facing_message(error) or _FAILURE_MESSAGE
+    if isinstance(error, OSError):
+        if error.errno == errno.ENOSPC or error.args == ('disk full',):
+            return 'OSError', '磁盘空间不足（disk full）。'
+        return 'OSError', '文件或系统操作失败。'
+    if isinstance(error, ValueError):
+        return 'ValueError', '任务输入无效。'
+    return 'UnexpectedError', _FAILURE_MESSAGE
 
 
 def raw_reference_pieces(vtt):
@@ -118,7 +237,6 @@ def fingerprint(value):
 # aborts the whole job; a short silence keeps the timeline without a request.
 SILENCE_FRAMES = 2880
 SILENCE_RATE = 24000
-_SPEAKABLE_TTS = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]")
 _TTS_TURN_MARKER = re.compile(r"(?<!\S)>>+\s*")
 _TTS_STAGE = re.compile(
     r"[\[【〔(（]"
@@ -138,10 +256,6 @@ def clean_tts_text(text):
     cleaned = re.sub(r"\n{2,}", "\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     return cleaned.strip()
-
-
-def speakable_tts(text):
-    return _SPEAKABLE_TTS.search(text or "") is not None
 
 
 def write_pcm_silence(path, frames=SILENCE_FRAMES, rate=SILENCE_RATE):
@@ -201,21 +315,28 @@ class StudioEngine:
         self.cancelled = False
         self.process = None
         self.stage = 'queued'
+        self.completed = self.total = 0
+        self.segment_id = None
         self._stage_started_at = time.time()
         self.subtitle_fallback_reason = None
         self.reference_pieces = None
+        self.asr_chunks = []
         self.temp = self.job / 'temporary'
 
     def check_cancel(self):
         if self.cancelled or (self.job / 'cancel').exists():
             raise Cancelled('任务已取消，可继续使用已完成的缓存')
 
-    def progress(self, stage, completed=0, total=0, **extra):
+    def progress(self, stage, completed=0, total=0, *, segment_id=None, **extra):
         now = time.time()
-        if stage not in ('failed', 'cancelled'):
+        if stage in ('failed', 'cancelled'):
+            completed, total = self.completed, self.total
+        else:
             if stage != self.stage:
                 self._stage_started_at = now
             self.stage = stage
+            self.completed, self.total = completed, total
+            self.segment_id = diagnostic_segment_id(segment_id)
         reason = extra.pop('subtitle_fallback_reason', None)
         if reason:
             self.subtitle_fallback_reason = reason
@@ -226,9 +347,74 @@ class StudioEngine:
             stage_started_at=getattr(self, '_stage_started_at', now),
             updated_at=now,
             subtitle_fallback_reason=self.subtitle_fallback_reason,
+            segment_id=self.segment_id,
             **extra,
         )
         atomic_json(self.job / 'progress.json', payload)
+
+    def record_failure(self, error):
+        category, message = failure_details(error)
+        active = path = self.job / 'debug-failure.json'
+        diagnosis = {
+            'stage': self.stage,
+            'segment_id': self.segment_id,
+            'completed': self.completed,
+            'total': self.total,
+            'exc_type': category,
+            'exc_message': message,
+            'updated_at': time.time(),
+        }
+        if isinstance(error, (StudioError, SpeakerGateError)):
+            diagnosis['error_code'] = error.code
+        if isinstance(error, StudioRecoveryError):
+            if error.code == 'translation_transport_unknown':
+                diagnosis['error_code'] = error.code
+            if error.code == 'translation_request_already_recorded' and (error.evidence or {}).get('receipt'):
+                path = self.job / 'translation-retry-blocked.json'
+                diagnosis['error_code'] = error.code
+            if error.code == 'translation_legacy_unverified' and (path.exists() or path.is_symlink()):
+                return message
+            if error.evidence is not None:
+                diagnosis['translation_request'] = error.evidence
+        if path == active:
+            try:
+                self._archive_debug_failure(active)
+            except OSError as archive_error:
+                self.record_cleanup_failure('debug', archive_error, stage=self.stage)
+                return message
+        try:
+            atomic_json(path, diagnosis)
+        except OSError:
+            pass
+        return message
+
+    def _archive_debug_failure(self, active):
+        try:
+            raw = _read_regular_bytes(active)
+        except FileNotFoundError:
+            return
+        archive = self.job / 'debug-failures'
+        archive.mkdir(mode=0o700, exist_ok=True)
+        if not stat.S_ISDIR(archive.lstat().st_mode):
+            raise OSError(errno.EINVAL, 'Invalid debug failure archive')
+        _sync_dir(self.job)
+        snapshot = archive / (hashlib.sha256(raw).hexdigest() + '.json')
+        try:
+            _save_bytes(snapshot, raw, exclusive=True)
+        except FileExistsError:
+            if _read_regular_bytes(snapshot) != raw:
+                raise OSError(errno.EIO, 'Conflicting debug failure archive') from None
+            _sync_dir(archive)
+
+    def record_cleanup_failure(self, target, error, *, stage):
+        event = {'stage': stage, 'target': target, 'errno': error.errno, 'updated_at': time.time()}
+        try:
+            atomic_json(self.job / f'cleanup-{target}-failure.json', event)
+        except OSError as write_error:
+            logging.getLogger(__name__).warning(
+                '任务清理失败且无法写入清理诊断（%s，清理 errno=%s，写入 errno=%s）',
+                target, error.errno, write_error.errno,
+            )
 
     def command(self, args, **kwargs):
         self.check_cancel()
@@ -273,8 +459,30 @@ class StudioEngine:
 
     def worker(self, payload):
         request = self.temp / 'worker.json'
+        python = ROOT / '.speech-venv/bin/python'
+        if payload['operation'] == 'asr':
+            diagnostic = self.temp / 'asr-diagnostic.json'
+            payload = {**payload, 'diagnostic': str(diagnostic)}
+            atomic_json(diagnostic, {'backend': None, 'attempts': []})
+            # A dependency interpreter may live elsewhere. The script stays here.
+            if not python.is_file():
+                python = Path(sys.executable)
         atomic_json(request, payload)
-        self.command([str(ROOT / '.speech-venv/bin/python'), str(ROOT / 'scripts/studio_worker.py'), str(request)])
+        try:
+            self.command([str(python), '-E', str(ROOT / 'scripts/studio_worker.py'), str(request)])
+        except StudioError:
+            if payload['operation'] != 'asr':
+                raise
+            raise StudioError('asr_failed', '本地语音识别失败，请核对 debug-asr.json 中的 MLX 与 CPU 诊断。') from None
+        finally:
+            if payload['operation'] == 'asr':
+                result = json.loads(diagnostic.read_text())
+                self.asr_chunks.append({'start_ms': payload['start_ms'], **result})
+                used = {row['backend'] for row in self.asr_chunks if row['backend'] is not None}
+                atomic_json(self.job / 'debug-asr.json', {
+                    'backend': next(iter(used), None) if len(used) < 2 else 'mixed',
+                    'chunks': self.asr_chunks,
+                })
 
     def acquire(self, config):
         source = config['source']
@@ -304,6 +512,59 @@ class StudioEngine:
         with wave.open(str(wav)) as audio:
             return round(audio.getnframes() / audio.getframerate() * 1000)
 
+    def locked_source(self, selector, wav=None):
+        path = self.job / 'source-identity.json'
+        prior = None
+        if path.exists() or path.is_symlink():
+            try:
+                if path.is_symlink():
+                    raise ValueError
+                prior = decode_json_object(path.read_bytes())
+            except (ValueError, OSError, RecursionError):
+                raise StudioInputError('已有来源身份无法核验，请保留原任务并核对音源') from None
+        media_fields = {'sha256', 'bytes', 'duration_ms'}
+        if prior is not None and (
+            not isinstance(prior, dict)
+            or {k: v for k, v in prior.items() if k not in media_fields} != selector
+        ):
+            raise StudioInputError('来源已经改变，请为新来源创建新任务')
+        if wav is None:
+            return prior
+        identity = {**selector, 'sha256': sha256_file(wav), 'bytes': wav.stat().st_size,
+                    'duration_ms': self.duration_ms(wav)}
+        if prior is not None and prior != identity:
+            raise StudioInputError('来源已经改变，或旧任务缺少音频锁，请创建新任务')
+        if prior is None:
+            atomic_json(path, identity)
+        return identity
+
+    def validate_coverage(self, document, identity):
+        try:
+            overflow = check_source_coverage(document, identity)
+            checkpoint = self.job / 'translation-source.json'
+            if checkpoint.exists() or checkpoint.is_symlink():
+                if checkpoint.is_symlink():
+                    raise ValueError('原始分段无法核验')
+                saved = decode_json_object(checkpoint.read_bytes())
+                draft = saved.get('draft')
+                if (not isinstance(draft, dict) or saved.get('digest') != fingerprint(draft)
+                        or draft.get('media_sha256') != identity['sha256']):
+                    raise ValueError('原始分段无法核验')
+                original_overflow = check_source_coverage(draft, identity)
+                overflow = list(dict.fromkeys([*overflow, *original_overflow]))
+                if max(row['end_ms'] for row in document['segments']) < max(
+                    row['end_ms'] for row in draft['segments']
+                ) and not overflow:
+                    raise ValueError('译稿末段早于原始分段；请保留完整时轴')
+        except ValueError as error:
+            raise StudioError('source_coverage_unverified', str(error)) from None
+        if overflow:
+            atomic_json(self.job / 'debug-source-coverage.json', {
+                'duration_ms': identity['duration_ms'], 'source_sha256': identity['sha256'],
+                'last_end_ms': document['segments'][-1]['end_ms'], 'overflow_segment_ids': overflow,
+            })
+            raise StudioError('source_coverage_failed', '译稿有段落超出锁定音源时长；请核对来源与时轴，禁止删尾过闸。')
+
     def transcribe(self, wav, config):
         kind = config['source']['kind']
         if kind == 'web' and isinstance(config['source'].get('value'), str) and _is_exact_youtube_url(config['source']['value']):
@@ -320,14 +581,15 @@ class StudioEngine:
                 if pieces:
                     return pieces, 'subtitles'
                 reason = '英文字幕文件为空或无法解析'
-            except Cancelled:
+            except (Cancelled, asyncio.CancelledError):
                 raise
             except Exception as error:
-                reason = f'{type(error).__name__}: {str(error)[:180]}'
+                reason = failure_details(error)[1]
+                if reason == _FAILURE_MESSAGE:
+                    reason = '英文字幕读取或解析失败'
             try:
                 atomic_json(self.job / 'debug-subtitle-fallback.json', {
                     'reason': reason or 'unknown',
-                    'source': config['source'].get('value'),
                     'updated_at': time.time(),
                 })
             except OSError:
@@ -340,6 +602,7 @@ class StudioEngine:
         with wave.open(str(wav)) as audio:
             seconds = audio.getnframes() / audio.getframerate()
         pieces = []
+        self.asr_chunks = []
         # Small fixed chunks keep ASR memory bounded. Offsets preserve source time.
         asr_total = max(1, int(seconds / 60) + 1)
         for index, start in enumerate(range(0, int(seconds) + 1, 60)):
@@ -348,8 +611,10 @@ class StudioEngine:
             self.progress('asr', index, asr_total)
             chunk = self.temp / 'asr.wav'
             output = self.temp / 'asr.json'
+            output.unlink(missing_ok=True)
             self.ffmpeg('-ss', start, '-i', wav, '-t', 60, chunk)
-            self.worker({'operation': 'asr', 'audio': str(chunk), 'output': str(output), 'model': config.get('asr_model', ASR_MODEL)})
+            self.worker({'operation': 'asr', 'audio': str(chunk), 'output': str(output),
+                         'start_ms': start * 1000, 'model': config.get('asr_model', ASR_MODEL)})
             current = asr_pieces(json.loads(output.read_text())['segments'], start * 1000)
             pieces.extend(current)
         return [CaptionPiece(p.start_ms, p.end_ms, p.text, i) for i, p in enumerate(pieces)], 'asr'
@@ -365,7 +630,22 @@ class StudioEngine:
 
     def diarize_with_progress(self, wav, bounds):
         """Run sherpa chunks with stage progress; keep threshold + cancel wiring."""
+        runtime_script = Path(diarization_runtime.__file__).resolve()
+        if runtime_script != ROOT / 'scripts/diarization_runtime.py':
+            raise StudioError('runtime_mismatch', '声纹模块来自另一工作树，已停止执行。')
+        atomic_json(self.job / 'debug-runtime.json', {
+            'engine': str(Path(__file__).resolve()),
+            'diarization_runtime': str(runtime_script),
+            'diarization_runtime_sha256': sha256_file(runtime_script),
+        })
+        fold_report = {'expected_speakers': bounds.exact, 'folds': []}
+        fold_path = self.job / 'debug-speaker-folds.json'
+        atomic_json(fold_path, fold_report)
         runtime = ensure_diarization_runtime(runner=self.runner)
+
+        def on_fold(event):
+            fold_report['folds'].append(event)
+            atomic_json(fold_path, fold_report)
 
         def popen_factory(command, **kwargs):
             args = list(command)
@@ -388,6 +668,7 @@ class StudioEngine:
                 runner=self.runner,
                 popen_factory=popen_factory,
                 progress_callback=on_progress,
+                fold_callback=on_fold,
             )
         finally:
             self.process = None
@@ -457,7 +738,7 @@ class StudioEngine:
             return None
         raise StudioInputError('书听不生成整本一条 MP3。章节已写入 book.json，按章合成留到下一版。')
 
-    def prepare(self, config, wav):
+    def prepare(self, config, wav=None, *, source_identity=None):
         if config.get('content_type') == 'book':
             raise StudioInputError('书听禁止声纹分析')
         # Default cluster threshold strategy (do not raise to "fix" oversplit):
@@ -473,6 +754,108 @@ class StudioEngine:
         self.diarization_threshold = float(config.get('diarization_threshold', default_threshold))
         if not 0 < self.diarization_threshold < 2:
             raise StudioInputError('声纹聚类阈值须介于 0 和 2 之间')
+        checkpoint = self.job / 'translation-source.json'
+        chunks_dir = self.job / 'translations'
+        journal = TranslationJournal(self.job)
+        if (self.job / 'document.json').exists():
+            raise StudioRecoveryError(
+                'translation_document_exists', '已保留现有译稿与复核记录，重新识别请使用新任务',
+            )
+        resuming = checkpoint.exists() or checkpoint.is_symlink()
+        if not resuming:
+            if self._has_unbound_translation(chunks_dir, journal):
+                raise StudioRecoveryError(
+                    'translation_legacy_unverified',
+                    '旧任务缺少可核验的原分段，现有缓存已保留，需先核对旧请求与来源',
+                )
+            wav = self.acquire(config) if wav is None else wav
+            if source_identity is not None:
+                source_identity = self.locked_source(source_identity, wav)
+            draft = self._prepare_source(config, wav)
+        elif source_identity is not None:
+            # Remote URLs can resolve to new bytes. Verify before reusing a checkpoint.
+            if source_identity.get('kind') in ('youtube', 'web'):
+                wav = self.acquire(config) if wav is None else wav
+            source_identity = self.locked_source(source_identity, wav)
+            if not source_identity or not source_identity.get('duration_ms'):
+                raise StudioRecoveryError('translation_source_mismatch', '旧任务缺少可核验的音源时长锁，原稿与缓存已保留')
+        provider = config.get('provider', 'deepseek')
+        client = create_translation_client(
+            provider, budget=TranslationBudget(self.job),
+            credential_loader=lambda: self.credential(provider), request_journal=journal,
+        )
+        binding = fingerprint({
+            'version': 1,
+            'source': source_identity if source_identity is not None else config.get('source'),
+            'expected_speakers': expected_speakers(config),
+            'diarization_threshold': self.diarization_threshold,
+            'asr_model': config.get('asr_model', ASR_MODEL),
+            'male_only': use_male_slots(config),
+            'requires_voice_mapping': requires_voice_mapping(config),
+            'translation_identity': client.translation_identity,
+        })
+        if resuming:
+            self.progress('translation')
+            draft = load_source(checkpoint, binding, lambda name: sha256_file(self.owned(name)))
+
+        spoken = [
+            SubtitleSegment(
+                id=record['id'], start_ms=record['start_ms'], end_ms=record['end_ms'], text=record['text'],
+                speaker_id=record.get('speaker_id'), ambiguous=bool(record.get('ambiguous')),
+            )
+            for record in draft['segments'] if not record.get('is_ad')
+        ]
+        if not spoken:
+            raise StudioInputError('整段都被识别成口播广告，没有可朗读的对白')
+        plan = [[segment.id for segment in chunk] for chunk in chunk_segments(spoken)]
+        if resuming:
+            if plan != draft.get('translation_plan'):
+                raise StudioRecoveryError('translation_source_mismatch', '续做分块边界已变化，原稿与缓存已保留')
+        else:
+            draft['translation_plan'] = plan
+            save_source(checkpoint, binding, draft)
+
+        self.progress('translation', 0, len(spoken))
+
+        def translate(batch):
+            self.check_cancel()
+            try:
+                return client.translate(batch)
+            except TranslationValidationError:
+                raise StudioRecoveryError(
+                    'translation_response_invalid', '翻译响应结构无法核验，需先核对原请求',
+                    journal.last_evidence,
+                ) from None
+
+        translated = translate_with_resume(
+            spoken, chunks_dir, translate, translation_identity=client.translation_identity,
+            preserve_invalid=True,
+            on_chunk=lambda completed: self.progress('translation', completed, len(spoken)),
+        )
+        document = {key: draft[key] for key in ('schema_version', 'transcript_source', 'speakers', 'references')}
+        document['segments'] = [
+            {**record, 'chinese': '' if record.get('is_ad') else translated[record['id']]}
+            for record in draft['segments']
+        ]
+        atomic_json(self.job / 'document.json', document)
+        return document
+
+    def _has_unbound_translation(self, chunks_dir, journal):
+        if chunks_dir.exists() or chunks_dir.is_symlink() or journal.path.exists() or journal.path.is_symlink():
+            return True
+        # An old request may be evidenced even if its cache directory is gone.
+        prior = self.job / 'debug-failure.json'
+        if prior.is_symlink():
+            return True
+        try:
+            status = json.loads(prior.read_bytes())
+        except FileNotFoundError:
+            return False
+        except (OSError, ValueError, RecursionError):
+            return True
+        return not isinstance(status, dict) or status.get('stage') == 'translation'
+
+    def _prepare_source(self, config, wav):
         self.progress('transcript')
         pieces, transcript_source = self.transcribe(wav, config)
         if not pieces:
@@ -517,30 +900,6 @@ class StudioEngine:
         validate_speaker_ids(config, (record.get('speaker_id') for record in records))
         # Structural checks still run. Exact raw cluster count does not, because an ad read is an extra id.
         validate_diarization(turns, duration_ms=self.duration_ms(wav), bounds=SpeakerBounds(minimum=1, maximum=6), assignments=assignments)
-        spoken = [
-            SubtitleSegment(
-                id=record['id'], start_ms=record['start_ms'], end_ms=record['end_ms'], text=record['text'],
-                speaker_id=record.get('speaker_id'), ambiguous=bool(record.get('ambiguous')),
-            )
-            for record in records if not record.get('is_ad')
-        ]
-        if not spoken:
-            raise StudioInputError('整段都被识别成口播广告，没有可朗读的对白')
-        self.progress('translation', 0, len(spoken))
-        provider = config.get('provider', 'deepseek')
-        client = create_translation_client(provider, api_key=self.credential(provider))
-        translated_count = 0
-        def translate(batch):
-            nonlocal translated_count
-            self.check_cancel()
-            result = client.translate(batch)
-            translated_count += len(batch)
-            self.progress('translation', translated_count, len(spoken))
-            return result
-        translated = translate_with_resume(spoken, self.job / 'translations', translate, translation_identity=client.translation_identity)
-        if translated_count < len(spoken):
-            # Cache hits never call translate(); snap progress to done for ETA UI.
-            self.progress('translation', len(spoken), len(spoken))
         reference_pieces = self.reference_pieces if self.reference_pieces is not None else pieces
         reference_assignments = align_caption_pieces(reference_pieces, turns) if self.reference_pieces is not None else assignments
         refs = select_references(reference_pieces, reference_assignments, turns)
@@ -558,16 +917,13 @@ class StudioEngine:
         voice_slots = assign_studio_voices(
             [record.get('speaker_id') for record in records],
             male_only=use_male_slots(config),
+            require_mapping=requires_voice_mapping(config),
         )
-        document = {'schema_version': 1, 'transcript_source': transcript_source,
-                    'segments': [{
-                        **record,
-                        'chinese': '' if record.get('is_ad') else translated[record['id']],
-                        'speaker_id': record.get('speaker_id'),
-                    } for record in records],
-                    'speakers': {speaker: {'voice_slot': slot} for speaker, slot in voice_slots.items()}, 'references': references}
-        atomic_json(self.job / 'document.json', document)
-        return document
+        return {
+            'schema_version': 1, 'transcript_source': transcript_source,
+            'segments': records, 'media_sha256': sha256_file(wav), 'references': references,
+            'speakers': {speaker: {'voice_slot': slot} for speaker, slot in voice_slots.items()},
+        }
 
     def owned(self, relative):
         path = (self.job / relative).resolve()
@@ -592,7 +948,23 @@ class StudioEngine:
         except RuntimeError:
             return False
 
+    async def synthesize(self, backend, request, output):
+        # The server sets a cancellation flag or marker while Edge can be sleeping.
+        self.check_cancel()
+        task = asyncio.create_task(backend.synthesize(request, output))
+        try:
+            while not task.done():
+                await asyncio.wait({task}, timeout=.15)
+                self.check_cancel()
+        except (Cancelled, asyncio.CancelledError):
+            task.cancel()
+            # Retrieve an exception if a cancellation marker won a completion race.
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+        return task.result()
+
     def render(self, config, document, preview=None, accept_unreviewed=False):
+        self.progress('synthesis')
         validate_speaker_voices(config, document)
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
@@ -604,10 +976,11 @@ class StudioEngine:
         selected = segments if preview is None else select_preview_segments(segments, int(preview))
         if not selected:
             raise StudioInputError('试听段数必须大于零')
+        self.total = len(selected)
         backend_name = config.get('tts', 'edge')
         pending = [segment['id'] for segment in selected if segment.get('ambiguous')]
         if pending and not accept_unreviewed:
-            raise StudioInputError(f'有 {len(pending)} 段说话人待核对。可全部按当前说话人确认，或带风险继续后再试听或生成')
+            raise StudioInputError(f'有 {len(pending)} 段说话人待核对。请拆段、逐段修正或凭证确认，再试听或生成。')
         model = config.get('clone_model', CLONE_MODEL)
         backend = None
         if backend_name != 'clone':
@@ -616,10 +989,11 @@ class StudioEngine:
         cache.mkdir(exist_ok=True)
         clips = []
         for index, segment in enumerate(selected):
+            self.progress('synthesis', index, len(selected), segment_id=segment['id'])
             self.check_cancel()
             text = segment['chinese'].strip()
             if not text:
-                raise StudioInputError(f"{segment['id']} 译文为空")
+                raise StudioInputError('片段译文为空')
             spoken = clean_tts_text(text) if backend_name == 'edge' else text
             speaker = segment['speaker_id']
             voice = document['speakers'][speaker]
@@ -630,38 +1004,58 @@ class StudioEngine:
                 identity['spoken'] = spoken
             if backend is None:
                 if ref is None:
-                    raise StudioInputError(f'{speaker} 没有干净的参考声音，请换用系统音色或选择参考片段')
+                    raise StudioInputError('说话人没有干净的参考声音，请换用系统音色或选择参考片段')
                 reference = self.owned(ref['path'])
                 identity['reference'] = {'sha256': sha256_file(reference), 'text': ref['text']}
             target = cache / (fingerprint(identity) + '.wav')
-            self.progress('synthesis', index, len(selected), segment_id=segment['id'])
             if not self.valid_audio(target):
                 if backend is not None and backend_name == 'edge' and not speakable_tts(spoken):
                     write_pcm_silence(target)
                     if not self.valid_audio(target):
-                        raise StudioInputError(f"{segment['id']} 音频无效，请重试")
+                        raise StudioInputError('片段音频无效，请重试')
                 else:
                     raw = self.temp / ('synthesis.wav' if backend is None else 'synthesis' + backend.file_suffix)
                     if backend is None:
                         self.worker({'operation': 'tts', 'model': model, 'text': text, 'reference': str(reference), 'reference_text': ref['text'], 'output': str(raw)})
                     else:
-                        asyncio.run(backend.synthesize(SynthesisRequest(spoken, voice.get('voice_slot', 'male_1'), config.get('style', 'conversation')), raw))
+                        request = SynthesisRequest(spoken, voice.get('voice_slot', 'male_1'), config.get('style', 'conversation'))
+                        asyncio.run(self.synthesize(backend, request, raw))
                     staged = self.temp / 'normalized.wav'
                     self.ffmpeg('-i', raw, '-ac', 1, '-ar', 24000, '-c:a', 'pcm_s16le', staged)
                     if not self.valid_audio(staged):
-                        raise StudioInputError(f"{segment['id']} 音频无效，请重试")
+                        raise StudioInputError('片段音频无效，请重试')
                     staged.replace(target)
             clips.append(target)
+        self.progress('export', len(selected), len(selected))
         listing = self.temp / 'concat.txt'
         # Cache paths consist only of hex names; concat manifest cannot inject directives.
         listing.write_text(''.join("file '" + str(p).replace("'", "'\\''") + "'\n" for p in clips))
-        self.progress('export', len(selected), len(selected))
         staged = self.temp / 'output.mp3'
         self.ffmpeg('-f', 'concat', '-safe', 0, '-i', listing, '-c:a', 'libmp3lame', '-b:a', '128k', staged)
         if not self.valid_audio(staged):
             raise StudioInputError('完整音频校验失败，已有导出保持不变')
         target = self.job / ('preview.mp3' if preview is not None else 'output.mp3')
+        source_lock = self.job / 'source-identity.json'
+        receipt_path = self.job / 'render-identity.json'
+        if preview is None and source_lock.is_file():
+            frames = 0
+            timeline = []
+            for segment, clip in zip(selected, clips, strict=True):
+                with wave.open(str(clip)) as audio:
+                    if audio.getframerate() != SILENCE_RATE:
+                        raise StudioInputError('片段音频采样率与合成时轴不一致')
+                    end = frames + audio.getnframes()
+                timeline.append({'id': segment['id'], 'start_frame': frames, 'end_frame': end})
+                frames = end
+            receipt = self.temp / 'render-identity.json'
+            atomic_json(receipt, {
+                'schema_version': 1, 'audio_sha256': sha256_file(staged),
+                'document_sha256': fingerprint(document), 'source_identity_sha256': sha256_file(source_lock),
+                'sample_rate': SILENCE_RATE, 'timeline': timeline,
+            })
         staged.replace(target)
+        if preview is None and source_lock.is_file():
+            receipt.replace(receipt_path)
         return target
 
     def remember_video_info(self, info, provider='deepseek'):
@@ -699,17 +1093,21 @@ class StudioEngine:
         except Exception:
             return
 
-    def publish_private_library(self):
+    def publish_private_library(self, library_root=None):
         """Copy a finished full episode to iCloud. Never changes the job result."""
         try:
             import studio_publish_icloud
             try:
                 studio_publish_icloud.ensure_publishable_title(self.job)
+            except Cancelled:
+                raise
             except Exception:
                 pass
-            result = studio_publish_icloud.publish_job(self.job)
+            result = studio_publish_icloud.publish_job(self.job, library_root=library_root)
+        except Cancelled:
+            raise
         except Exception as error:
-            message = f'{type(error).__name__}: {error}'[:500]
+            message = failure_details(error)[1]
             print(f'私人听：发布失败（成品已保留，任务仍成功）：{message}', flush=True)
             try:
                 import studio_publish_icloud
@@ -717,7 +1115,7 @@ class StudioEngine:
             except Exception:
                 pass
             return None
-        print(f"私人听：已发布「{result.get('title', '')}」→ {result.get('episode_dir', '')}", flush=True)
+        print('私人听：已发布到 iCloud 资料库。', flush=True)
         return result
 
     def push_private_device(self, published):
@@ -730,60 +1128,95 @@ class StudioEngine:
         except Exception:
             pass
 
-    def run(self, config, action='run', preview=None, accept_unreviewed=False):
-        self.temp.mkdir(exist_ok=True)
+    def run(self, config, action='run', preview=None, accept_unreviewed=False, *, publish=True, library_root=None):
+        if config.get('content_type') == 'book':
+            return self._run(config, action, preview, accept_unreviewed, publish, library_root)
+        with podcast_job_lock(self.job):
+            return self._run(config, action, preview, accept_unreviewed, publish, library_root)
+
+    def _run(self, config, action, preview, accept_unreviewed, publish, library_root):
+        terminal_stage = None
         try:
             self.progress('source')
+            self.temp.mkdir(exist_ok=True)
             self.check_cancel()
             source_identity = dict(config['source'])
-            if source_identity.get('kind') == 'text':
+            if config.get('content_type') == 'book':
+                if source_identity.get('kind') != 'text':
+                    raise StudioInputError('书听只读你放进任务的文本，不会下载或抓取书源')
                 owned = self.owned_text(source_identity.get('value'))
                 source_identity['value'] = str(owned)
                 source_identity['sha256'] = sha256_file(owned)
-            elif source_identity.get('kind') == 'local':
-                source_identity['sha256'] = sha256_file(Path(source_identity['value']).expanduser())
-            identity_path = self.job / 'source-identity.json'
-            if identity_path.exists() and json.loads(identity_path.read_text()) != source_identity:
-                raise StudioInputError('来源已经改变，请为新来源创建新任务')
-            atomic_json(identity_path, source_identity)
-            if config.get('content_type') == 'book':
-                return self.finish_book(config, action)
-            document_path = self.job / 'document.json'
-            if action == 'prepare' or not document_path.exists():
-                wav = self.acquire(config)
-                document = self.prepare(config, wav)
+                identity_path = self.job / 'source-identity.json'
+                if identity_path.exists() and json.loads(identity_path.read_text()) != source_identity:
+                    raise StudioInputError('来源已经改变，请为新来源创建新任务')
+                if not identity_path.exists():
+                    atomic_json(identity_path, source_identity)
+                output = self.finish_book(config, action)
             else:
-                document = json.loads(document_path.read_text())
-            output = None
-            if action != 'prepare':
-                output = self.render(config, document, preview, accept_unreviewed=accept_unreviewed)
-            # Preview stays on the Mac. Only a full output.mp3 is offered to the phone.
-            published = None
-            if preview is None and output is not None and Path(output).name == 'output.mp3':
-                published = self.publish_private_library()
-            self.progress('complete', output=str(output) if output else None)
-            self.push_private_device(published)
-            return output
-        except Cancelled:
-            self.progress('cancelled', message='任务已取消；已完成片段可继续复用')
+                if source_identity.get('kind') == 'local':
+                    source_identity['input_sha256'] = sha256_file(Path(source_identity['value']).expanduser())
+                self.locked_source(source_identity)
+                document_path = self.job / 'document.json'
+                if action == 'prepare' or not document_path.exists():
+                    document = self.prepare(config, source_identity=source_identity)
+                else:
+                    document = json.loads(document_path.read_text())
+                output = None
+                if action != 'prepare':
+                    locked = self.locked_source(source_identity)
+                    self.validate_coverage(document, locked)
+                    output = self.render(config, document, preview, accept_unreviewed=accept_unreviewed)
+                # Preview stays on the Mac. Only a full output.mp3 is offered to the phone.
+                published = None
+                if publish and preview is None and output is not None and Path(output).name == 'output.mp3':
+                    if self.locked_source(source_identity) != locked:
+                        raise StudioError('source_coverage_unverified', '合成期间音源身份发生变化，已停止发布。')
+                    self.validate_coverage(document, locked)
+                    if not any(row.get('ambiguous') for row in document['segments']):
+                        self.progress('publish', self.completed, self.total)
+                        published = self.publish_private_library(library_root)
+                self.progress('complete', output=str(output) if output else None)
+                if published:
+                    self.push_private_device(published)
+        except (Cancelled, asyncio.CancelledError):
+            terminal_stage = 'cancelled'
+            self.progress(terminal_stage, message='任务已取消；已完成片段可继续复用')
             raise
         except Exception as error:
-            # Durable local diagnosis (Chinese app strings / type names — not stderr dumps).
-            try:
-                atomic_json(self.job / 'debug-failure.json', {
-                    'stage': self.stage,
-                    'exc_type': type(error).__name__,
-                    'exc_message': str(error)[:500],
-                    'updated_at': time.time(),
-                })
-            except OSError:
-                pass
-            visible = user_facing_message(error)
-            # Never serialize arbitrary exception strings: SDKs may embed credentials.
-            self.progress('failed', failed_stage=self.stage, error_code=error.code if isinstance(error, (StudioError, SpeakerGateError)) else ('invalid_input' if isinstance(error, (ValueError, FileNotFoundError)) else self.stage + '_failed'), message=visible or '处理失败，请检查当前阶段、依赖和模型配置后重试', **self._book_cursor())
+            terminal_stage = 'failed'
+            self.record_failure(error)
+            visible = user_facing_message(error) or _FAILURE_MESSAGE
+            if isinstance(error, (StudioError, SpeakerGateError, StudioRecoveryError)):
+                code = error.code
+            elif isinstance(error, (ValueError, FileNotFoundError)):
+                code = 'invalid_input'
+            else:
+                code = self.stage + '_failed'
+            if isinstance(error, StudioRecoveryError) and error.evidence:
+                ids = [sid for value in error.evidence.get('segment_ids', [])
+                       if (sid := diagnostic_segment_id(value))]
+                if ids:
+                    span = ids[0] if len(ids) == 1 else f'{ids[0]}–{ids[-1]}'
+                    visible = f'{visible}（{span}）'
+            self.progress(
+                terminal_stage, failed_stage=self.stage, error_code=code, message=visible,
+                **(self._book_cursor() if config.get('content_type') == 'book' else {}),
+            )
             raise
         finally:
-            shutil.rmtree(self.temp, ignore_errors=False)
+            try:
+                if self.temp.exists():
+                    shutil.rmtree(self.temp)
+            except OSError as error:
+                self.record_cleanup_failure('temporary', error, stage=terminal_stage or self.stage)
+        try:
+            active = self.job / 'debug-failure.json'
+            self._archive_debug_failure(active)
+            active.unlink(missing_ok=True)
+        except OSError as error:
+            self.record_cleanup_failure('debug', error, stage=self.stage)
+        return output
 
 
 def main():
@@ -793,6 +1226,7 @@ def main():
     parser.add_argument('--action', choices=['run', 'prepare', 'render'], default='run')
     parser.add_argument('--preview', type=int)
     parser.add_argument('--accept-unreviewed', action='store_true')
+    parser.add_argument('--publish-library', type=Path)
     args = parser.parse_args()
     engine = StudioEngine(args.job_dir)
     def cancel(*_):
@@ -800,10 +1234,15 @@ def main():
     signal.signal(signal.SIGTERM, cancel)
     signal.signal(signal.SIGINT, cancel)
     try:
-        engine.run(json.loads(Path(args.config).read_text()), args.action, args.preview, accept_unreviewed=args.accept_unreviewed)
+        engine.run(json.loads(Path(args.config).read_text()), args.action, args.preview,
+                   accept_unreviewed=args.accept_unreviewed, publish=args.publish_library is not None,
+                   library_root=args.publish_library)
         return 0
-    except Cancelled:
+    except (Cancelled, asyncio.CancelledError):
         return 130
+    except StudioRecoveryError as error:
+        print(user_facing_message(error) or _FAILURE_MESSAGE, flush=True)
+        return 1
     except Exception:
         print('任务失败，请查看 progress.json 中的阶段并检查配置后重试', flush=True)
         return 1

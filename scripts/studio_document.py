@@ -174,3 +174,22 @@ def render_contract_errors(document: dict) -> list[str]:
             errors.append(f"{ident} 与前段时间轴重叠")
         previous_end = end_ms
     return errors
+
+
+def check_source_coverage(document, identity):
+    """Check every source-timeline row, including ads, against the locked audio."""
+    duration = identity.get('duration_ms') if isinstance(identity, dict) else None
+    if (type(duration) is not int or duration <= 0
+            or type(identity.get('bytes')) is not int or identity['bytes'] <= 0
+            or not isinstance(identity.get('sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', identity['sha256'])):
+        raise ValueError('缺少可核验的音源时长锁，请核对原始音频')
+    rows = document.get('segments') if isinstance(document, dict) else None
+    if not isinstance(rows, list) or not rows:
+        raise ValueError('译稿缺少可核验的时间轴')
+    if any(not isinstance(row, dict) or not isinstance(row.get('id'), str)
+           or not row['id'] or type(row.get('start_ms')) is not int
+           or type(row.get('end_ms')) is not int
+           or not 0 <= row['start_ms'] < row['end_ms'] for row in rows):
+        raise ValueError('译稿时间轴无效')
+    return [row['id'] for row in rows if row['end_ms'] > duration]

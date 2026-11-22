@@ -1,0 +1,18 @@
+{
+  "chapters": 2,
+  "text_blocks": 7,
+  "non_spine_note": "OEBPS/notes.xhtml#n1",
+  "reading_order": [
+    "OEBPS/ch1.xhtml",
+    "OEBPS/ch2.xhtml"
+  ],
+  "table_values": [
+    "North",
+    "3",
+    "South",
+    "0"
+  ],
+  "notes_policy": "chapter-end; original href/fragment retained",
+  "translation": "not yet generated",
+  "audio": "not yet generated"
+}

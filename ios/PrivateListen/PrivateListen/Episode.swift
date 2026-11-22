@@ -3,7 +3,7 @@ import Foundation
 struct Episode: Identifiable, Hashable {
     var id: String
     var title: String
-    /// Explicit show from library.json / episode.json when present.
+    /// Explicit show from library.json when present.
     var show: String?
     var guests: [String]
     /// Theme lens ids from library.json when present; otherwise derived at filter time.
@@ -14,15 +14,33 @@ struct Episode: Identifiable, Hashable {
     var downloading: Bool
     var artworkFile: String?
     var artworkKind: String?
+    var pendingTranscript: PendingTranscriptReference?
+    var mediaRevision: String? = nil
+    var revisionFiles: Set<String>? = nil
+
+    func publishedAsset(_ name: String) -> URL? {
+        guard revisionFiles?.contains(name) != false else { return nil }
+        return audioURL.deletingLastPathComponent().appendingPathComponent(name)
+    }
+
+    /// Unmapped audio changes get a fresh cursor. Legacy marks keep their existing keys.
+    var mediaKey: String { mediaRevision.map { "\(id).\($0)" } ?? id }
+
+    func matchesMedia(_ other: Episode) -> Bool {
+        mediaKey == other.mediaKey && audioURL == other.audioURL
+    }
 
     var artworkURL: URL? {
         guard let artworkFile, ["cover.jpg", "cover.png", "cover.webp"].contains(artworkFile) else { return nil }
-        return audioURL.deletingLastPathComponent().appendingPathComponent(artworkFile)
+        return publishedAsset(artworkFile)
     }
 
-    static func == (lhs: Episode, rhs: Episode) -> Bool { lhs.id == rhs.id }
+    static func == (lhs: Episode, rhs: Episode) -> Bool { lhs.matchesMedia(rhs) }
 
-    func hash(into hasher: inout Hasher) { hasher.combine(id) }
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(mediaKey)
+        hasher.combine(audioURL)
+    }
 
     var dateLabel: String {
         if createdAt.timeIntervalSince1970 <= 0 { return "日期未知" }
@@ -59,6 +77,11 @@ struct Episode: Identifiable, Hashable {
     }
 }
 
+enum PendingTranscriptReference: Equatable, Sendable {
+    case invalid
+    case package(id: String, duration: Double, count: Int)
+}
+
 func listenClock(_ seconds: Double) -> String {
     guard seconds.isFinite, seconds > 0 else { return "0:00" }
     let total = Int(seconds.rounded(.down))
@@ -72,6 +95,17 @@ func listenClock(_ seconds: Double) -> String {
 }
 
 enum EpisodeID {
+    static func isRevisionDigest(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+    }
+
+    static func isMediaKey(_ key: String) -> Bool {
+        let parts = key.split(separator: ".", omittingEmptySubsequences: false)
+        guard let id = parts.first, isSafe(String(id)) else { return false }
+        if parts.count == 1 { return true }
+        return parts.count == 2 && isRevisionDigest(String(parts[1]))
+    }
+
     static func isSafe(_ id: String) -> Bool {
         let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
         return (1...80).contains(id.count) && id.unicodeScalars.allSatisfy { allowed.contains($0) }
@@ -81,12 +115,9 @@ enum EpisodeID {
 enum LocalAudio {
     static func isPlayable(_ url: URL) -> Bool {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .ubiquitousItemDownloadingStatusKey, .fileSizeKey]
-        guard let values = try? url.resourceValues(forKeys: keys) else {
-            return FileManager.default.fileExists(atPath: url.path)
-        }
-        if values.isRegularFile == false { return false }
+        guard let values = try? URL(fileURLWithPath: url.path).resourceValues(forKeys: keys),
+              values.isRegularFile == true, let size = values.fileSize, size > 0 else { return false }
         if let status = values.ubiquitousItemDownloadingStatus, status != .current { return false }
-        if let size = values.fileSize, size <= 0 { return false }
         return true
     }
 }

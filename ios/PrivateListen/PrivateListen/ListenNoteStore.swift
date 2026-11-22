@@ -93,12 +93,10 @@ final class ListenNoteStore: ObservableObject {
         return f
     }()
 
-    private var fileURL: URL {
-        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(Self.fileName)
-    }
+    private let fileURL: URL
 
-    init() {
+    init(directory: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]) {
+        fileURL = directory.appendingPathComponent(Self.fileName)
         reload()
     }
 
@@ -129,31 +127,49 @@ final class ListenNoteStore: ObservableObject {
         return n.tags.contains { $0.localizedCaseInsensitiveContains(q) }
     }
 
+    /// The editor shows legacy headline + body in one field. Opening and closing
+    /// an unchanged draft must preserve the original record, including its timestamp.
+    func saveDraft(episodeId: String, text: String, tags: [String]) -> Bool {
+        let body = ListenNote.trimmed(text)
+        let tags = ListenNote.normalizeTags(tags)
+        if let note = notes[episodeId],
+           body == ListenNoteDownstream.mergedDisplayText(headline: note.headline, body: note.body),
+           tags == note.tags {
+            return true
+        }
+        return upsert(episodeId: episodeId, headline: ListenNoteDownstream.firstLine(body), body: body, tags: tags)
+    }
+
     /// 空内容则删除条目；否则 upsert。永不触发深抽/ListenMark。
-    func upsert(episodeId: String, headline: String, body: String, tags: [String]) {
+    @discardableResult
+    func upsert(episodeId: String, headline: String, body: String, tags: [String]) -> Bool {
         let h = ListenNote.trimmed(headline)
         let b = ListenNote.trimmed(body)
         let t = ListenNote.normalizeTags(tags)
         if h.isEmpty && b.isEmpty && t.isEmpty {
-            if notes.removeValue(forKey: episodeId) != nil {
-                persist()
-            }
-            return
+            return clear(episodeId: episodeId)
         }
         let now = Self.iso.string(from: Date())
-        notes[episodeId] = ListenNote(
+        var updated = notes
+        updated[episodeId] = ListenNote(
             episodeId: episodeId,
             headline: h,
             body: b,
             tags: t,
             updatedAt: now
         )
-        persist()
+        guard persist(notes: updated, promptDismissed: promptDismissed) else { return false }
+        notes = updated
+        return true
     }
 
-    func clear(episodeId: String) {
-        guard notes.removeValue(forKey: episodeId) != nil else { return }
-        persist()
+    @discardableResult
+    func clear(episodeId: String) -> Bool {
+        var updated = notes
+        guard updated.removeValue(forKey: episodeId) != nil else { return true }
+        guard persist(notes: updated, promptDismissed: promptDismissed) else { return false }
+        notes = updated
+        return true
     }
 
     func isPromptDismissed(episodeId: String) -> Bool {
@@ -161,8 +177,10 @@ final class ListenNoteStore: ObservableObject {
     }
 
     func dismissPrompt(episodeId: String) {
-        promptDismissed[episodeId] = Self.iso.string(from: Date())
-        persist()
+        var updated = promptDismissed
+        updated[episodeId] = Self.iso.string(from: Date())
+        guard persist(notes: notes, promptDismissed: updated) else { return }
+        promptDismissed = updated
         UIEventLog.note("listen_note_prompt_dismiss", episodeId: episodeId)
     }
 
@@ -182,7 +200,7 @@ final class ListenNoteStore: ObservableObject {
         shareExcludedFileNames.contains(name)
     }
 
-    private func persist() {
+    private func persist(notes: [String: ListenNote], promptDismissed: [String: String]) -> Bool {
         let now = Self.iso.string(from: Date())
         let doc = FileDoc(
             schema: Self.schema,
@@ -193,17 +211,12 @@ final class ListenNoteStore: ObservableObject {
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        guard let data = try? encoder.encode(doc) else { return }
-        let dir = fileURL.deletingLastPathComponent()
-        let temporary = dir.appendingPathComponent(
-            ".listen_notes.json.\(ProcessInfo.processInfo.processIdentifier).tmp"
-        )
         do {
-            try data.write(to: temporary, options: .atomic)
-            _ = try? FileManager.default.removeItem(at: fileURL)
-            try FileManager.default.moveItem(at: temporary, to: fileURL)
+            let data = try encoder.encode(doc)
+            try data.write(to: fileURL, options: .atomic)
+            return true
         } catch {
-            try? FileManager.default.removeItem(at: temporary)
+            return false
         }
     }
 }

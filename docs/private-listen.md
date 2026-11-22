@@ -22,17 +22,11 @@
 
 ## 什么时候会发布
 
-只在**完整**成品写好之后：
+工作台和收件箱为完整成品传入目标资料库。独立引擎命令默认只在任务目录导出。完整发布要求译稿、音源锁与合成时轴通过校验，逐段说话人复核完成。
 
-- 引擎 `run` / `render` 成功，且没有 `--preview`
-- 工作台里「生成」成功（不是「试听」，也不是只准备译稿）
+首次发布将音频、节目清单、可用的封面和渲染证据写入 `episodes/<任务编号>/`。发布器按 `created_at` 倒序写入 `library.json`。
 
-发布做这几件事：
-
-1. 把 `output.mp3` **复制**到 `episodes/<任务编号>/`（不用硬链接，避免 iCloud 占位文件和同一 inode 不同步）。
-2. 放一张封面：任务里自带的图，否则 YouTube 缩略图，再不行就用标题画一张。封面失败不影响音频发布。
-3. 写 `episode.json`。
-4. 扫描全部 `episodes/*/episode.json`，按 `created_at` 新的在前，原子替换 `library.json`。
+同 ID 的音频或译稿改版先在同库的暂存目录校验，然后写成 `revisions/<任务编号>/<修订哈希>/`。每个对象包含 MP3、稿件、音源锁、合成帧时轴与节目清单。当前版由 `library.json` 中的 `media_revision.path` 唯一指向。上一版路径由 `previous_path` 保留。未提交的对象不进入索引，重建索引时也不从修订目录自动捡取。缺少续听映射时，`resume_policy=reset_unmapped`，新版目录项不继承旧续听秒数。现有 iPhone 客户端仍从固定的旧目录读取，这一合同先用于候选发布器和隔离库。
 
 `episode.json` 至少包含：
 
@@ -62,7 +56,7 @@
 
 前提是 App 里选过 iCloud 的这个文件夹。没选过，或者授权失效了，列表顶上会写「现在只显示连 Mac 时拷进来的本机副本」，点那一行在 iCloud 云盘里选「中文播客私人库」即可。右上角按钮这时也叫「选择资料库」，选好后才变成「重新选择」。
 
-**2. 连着 Mac 时直接拷（备用）。** iCloud 发布成功后（引擎 `run` / `render`、工作台的补发、`studio_publish_icloud.py` 命令行都算），Mac 会用 `xcrun devicectl` 找已配对、当前能连上的真机 iPhone / iPad，把这一期拷进私人听 App 自己的容器：
+**2. 连着 Mac 时直接拷（备用）。** 首次发布到 iCloud 成功且启用了直连同步时，Mac 会用 `xcrun devicectl` 找已配对、当前能连上的真机 iPhone / iPad，把这一期拷进私人听 App 自己的容器：
 
 ```text
 <App 容器>/Documents/中文播客私人库/

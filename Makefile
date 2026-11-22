@@ -1,9 +1,11 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
-.PHONY: test test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen shengjian-source-gate shengjian-before-claim-ready
+.PHONY: test test-public test-podcast test-translation-offline test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books shengjian-source-gate shengjian-before-claim-ready
+.PHONY: shengjian-require-remote-tip
 
-test: test-public test-podcast test-tts test-extract-display test-continue-ux test-point-listen shengjian-source-gate
-	@$(PYTHON) -m unittest tests.test_studio_engine tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
+test: test-public test-podcast test-translation-offline test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books shengjian-source-gate
+	@$(PYTHON) -m unittest tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
+	@$(PYTHON) -m unittest tests.test_shengjian_remote_tip
 	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh bin/setup-studio.sh bin/中文播客工作台.command
 	@echo "All tests passed."
 
@@ -18,6 +20,9 @@ test-podcast:
 	@$(PYTHON) tests/test_diarization_regression.py
 	@$(PYTHON) tests/test_temporary_audio.py
 	@$(PYTHON) tests/test_podcast_cn.py
+
+test-translation-offline:
+	@$(PYTHON) -I -B tests/run_translation_checks.py
 
 test-tts:
 	@$(PYTHON) -m unittest \
@@ -66,6 +71,8 @@ test-continue-ux:
 		/tmp/continue-ux-probe && \
 		"$$SWIFTC" -parse-as-library -o /tmp/library-list-probe \
 			ios/PrivateListen/PrivateListen/LibraryStore.swift \
+			ios/PrivateListen/PrivateListen/LibrarySnapshot.swift \
+			ios/PrivateListen/PrivateListen/PendingTranscript.swift \
 			ios/PrivateListen/PrivateListen/Episode.swift \
 			ios/PrivateListen/PrivateListen/DiscoverCatalog.swift \
 			ios/PrivateListen/Shared/InboxDrop.swift \
@@ -74,6 +81,61 @@ test-continue-ux:
 			ios/PrivateListen/PrivateListenTests/LibraryListProbe.swift && \
 		/tmp/library-list-probe; \
 	fi
+
+test-player-listen-note-ui:
+	@$(PYTHON) -m unittest discover -s tests -p test_player_listen_note_ui_policy.py
+	@SWIFTC=$$(command -v swiftc || true); \
+	if [ -z "$$SWIFTC" ] && command -v xcrun >/dev/null 2>&1; then \
+		SWIFTC=$$(xcrun --find swiftc 2>/dev/null || true); \
+	fi; \
+	if [ -z "$$SWIFTC" ]; then \
+		if [ "$${SHENGJIAN_REQUIRE_SWIFTC:-}" = 1 ]; then \
+			echo "swiftc not found; 装机/宣称可听前不能跳过播放和听后感探针" >&2; exit 1; \
+		fi; \
+		echo "swiftc not found; python mirror already covered player/listen-note UI policy"; \
+	else \
+		"$$SWIFTC" -parse-as-library -o /tmp/player-playback-policy-probe \
+			ios/PrivateListen/PrivateListen/ContinueListening.swift \
+			ios/PrivateListen/PrivateListen/PlayerPlaybackPolicy.swift \
+			ios/PrivateListen/PrivateListenTests/PlayerPlaybackPolicyProbe.swift && \
+		/tmp/player-playback-policy-probe && \
+		"$$SWIFTC" -parse-as-library -o /tmp/listen-note-editor-policy-probe \
+			ios/PrivateListen/PrivateListen/ListenNoteEditorPolicy.swift \
+			ios/PrivateListen/PrivateListen/ListenNoteStore.swift \
+			ios/PrivateListen/PrivateListen/ListenNoteDownstream.swift \
+			ios/PrivateListen/PrivateListen/ListenNoteCompat.swift \
+			ios/PrivateListen/PrivateListen/Episode.swift \
+			ios/PrivateListen/PrivateListen/DiscoverCatalog.swift \
+			ios/PrivateListen/PrivateListenTests/ListenNoteEditorPolicyProbe.swift && \
+		/tmp/listen-note-editor-policy-probe; \
+	fi
+
+
+# Native execution of the App's real catalog and disk commit paths.
+.PHONY: test-library-snapshot
+test-library-snapshot:
+	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/shengjian-snapshot-probe.XXXXXX") && \
+	trap 'rm -rf "$$tmp"' EXIT && \
+	mkdir -p "$$tmp/adapter-payloads" "$$tmp/adapter-docs" && \
+	printf 'adapter-audio' > "$$tmp/adapter-payloads/output.mp3" && \
+	printf '{"body":"adapter"}' > "$$tmp/adapter-payloads/document.json" && \
+	printf '{}' > "$$tmp/adapter-payloads/source-identity.json" && \
+	printf '{}' > "$$tmp/adapter-payloads/render-identity.json" && \
+	printf '{"id":"ep-adapter"}' > "$$tmp/adapter-payloads/episode.json" && \
+	python3.12 scripts/push_staging_adapter.py --documents "$$tmp/adapter-docs" --tx adapter-tx-1 --id ep-adapter --title "Adapter Episode" --payloads "$$tmp/adapter-payloads" && \
+	python3.12 -m unittest tests.test_push_staging_adapter && \
+	swiftc -parse-as-library -o "$$tmp/library-snapshot" \
+		ios/PrivateListen/PrivateListen/LibraryStore.swift \
+		ios/PrivateListen/PrivateListen/LibrarySnapshot.swift \
+		ios/PrivateListen/PrivateListen/Episode.swift \
+		ios/PrivateListen/PrivateListen/DiscoverCatalog.swift \
+		ios/PrivateListen/PrivateListen/PendingTranscript.swift \
+		ios/PrivateListen/Shared/InboxDrop.swift \
+		ios/PrivateListen/PrivateListen/ContinueListening.swift \
+		ios/PrivateListen/PrivateListen/NortonDeviceFourProbe.swift \
+		ios/PrivateListen/PrivateListenUnitTests/LibrarySnapshotChecks.swift \
+		ios/PrivateListen/PrivateListenTests/LibrarySnapshotProbe.swift && \
+	"$$tmp/library-snapshot" --adapter-documents "$$tmp/adapter-docs" $(if $(MIGRATION_FIXTURE),--migration-fixture "$(MIGRATION_FIXTURE)") $(if $(SNAPSHOT_FIXTURE_DOCUMENTS),"$(SNAPSHOT_FIXTURE_DOCUMENTS)")
 
 # 点段跳听：实际本地音频绑定 + PL-D* + seek/播放完成边界；AVFoundation 验证需要 macOS。
 test-point-listen:
@@ -96,8 +158,35 @@ test-point-listen:
 
 # 声间装机 / 宣称可听前必须跑。没有平台/编译器则失败，不能跳过；真机 UI 四连另验。
 shengjian-before-claim-ready:
-	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-continue-ux test-extract-display test-point-listen shengjian-source-gate
+	@if [ -n "$(or $(TIP),$(SHA))" ]; then $(MAKE) shengjian-require-remote-tip; fi
+	@SHENGJIAN_REQUIRE_SWIFTC=1 $(MAKE) test-library-snapshot test-continue-ux test-extract-display test-point-listen test-player-listen-note-ui test-books shengjian-source-gate
 	@echo "声间：装机/宣称可听前检查通过（继续播放旅程 + 听后感 + mock 不冒充 ready）。"
 
 shengjian-source-gate:
 	@bash attention/shengjian-pre-claim-ready.sh
+
+shengjian-require-remote-tip: export SHENGJIAN_REMOTE_TIP := $(or $(value TIP),$(value SHA))
+shengjian-require-remote-tip:
+	@$(PYTHON) scripts/shengjian_remote_tip.py -- "$$SHENGJIAN_REMOTE_TIP"
+
+# Isolated, no-provider book tests; native IO runs only against a self-authored draft package.
+test-books:
+	@$(PYTHON) tests/test_book_integration.py
+	@$(PYTHON) tests/test_book_preinstall.py
+	@if [ "$$(uname -s)" != Darwin ] || ! command -v swiftc >/dev/null 2>&1; then \
+		if [ "$${SHENGJIAN_REQUIRE_SWIFTC:-}" = 1 ]; then echo "book native probes require macOS + swiftc" >&2; exit 1; fi; \
+		echo "skip book native probes (requires macOS + swiftc)"; \
+	else \
+		tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/shengjian-book-probe.XXXXXX") && \
+		package=$$(PYTHONPATH=scripts $(PYTHON) tests/book_import_fixture.py "$$tmp") && \
+		swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListenTests/BookProgressProbe.swift -o "$$tmp/progress" && "$$tmp/progress" && \
+		swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListen/BookStore.swift ios/PrivateListen/PrivateListenTests/BookImportProbe.swift -o "$$tmp/import" && "$$tmp/import" "$$package" "$$tmp/documents"; \
+	fi
+
+# Explicit authorized real-package input; all IO remains inside a fresh temporary probe directory.
+.PHONY: test-book-preinstall
+test-book-preinstall:
+	@test -n "$(BOOK_JOURNEY_PACKAGE)" && test -n "$(BOOK_JOURNEY_DRAFT)" || (echo "Set authorized BOOK_JOURNEY_PACKAGE and BOOK_JOURNEY_DRAFT; no provider is called"; exit 1)
+	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/shengjian-preinstall.XXXXXX") && \
+	swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListen/BookStore.swift ios/PrivateListen/PrivateListenTests/BookPreinstallJourneys.swift -o "$$tmp/journeys" && \
+	"$$tmp/journeys" "$(BOOK_JOURNEY_PACKAGE)" "$(BOOK_JOURNEY_DRAFT)" "$$tmp/data"

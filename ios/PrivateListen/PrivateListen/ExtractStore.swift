@@ -1,7 +1,7 @@
 import Combine
 import Foundation
 
-/// 按 episode 独立 `extract.json`（§13.2）；星标触发深抽；听完 light；取消星标撤 queued。
+/// 已发布的提炼包只读。本机提炼与标注按音频修订存于 Application Support。
 /// 已就绪的要点同时记一份本机 LKG。库刷新 / iCloud 占位 / 失败壳不能把详情打回「点星开始提炼」。
 /// 无 Live API key 时不跑 MockExtractor，也不把占位四条写成 ready deep。
 @MainActor
@@ -57,21 +57,22 @@ final class ExtractStore: ObservableObject {
     }
 
     func load(episode: Episode) {
-        let disk = readPacket(in: episode.audioURL.deletingLastPathComponent())
+        guard episode.pendingTranscript == nil else { return }
+        let disk = readPacket(for: episode)
         guard let merged = ExtractDisplay.merge(
             disk: disk,
-            memory: packets[episode.id],
-            lkg: lastKnownReady[episode.id]
+            memory: packets[episode.mediaKey],
+            lkg: lastKnownReady[episode.mediaKey]
         ) else { return }
-        rememberIfShowable(episode.id, merged)
-        packets[episode.id] = merged
+        rememberIfShowable(episode.mediaKey, merged)
+        packets[episode.mediaKey] = merged
     }
 
     func reloadAll(episodes: [Episode]) {
-        let reads = episodes.map { episode in
+        let reads = episodes.filter { $0.pendingTranscript == nil }.map { episode in
             ExtractDisplay.DiskRead(
-                id: episode.id,
-                packet: readPacket(in: episode.audioURL.deletingLastPathComponent())
+                id: episode.mediaKey,
+                packet: readPacket(for: episode)
             )
         }
         let merged = ExtractDisplay.reload(previous: packets, lkg: lastKnownReady, reads: reads)
@@ -83,6 +84,7 @@ final class ExtractStore: ObservableObject {
 
     /// 星标 → deep（有译稿才跑）。取消星标且 queued/running → 撤销不扣满额。
     func toggleStar(episode: Episode, lensIds: [String] = [], schemaOverride: ExtractSchemaID? = nil) {
+        guard episode.pendingTranscript == nil else { return }
         if starred.contains(episode.id) {
             unstar(episode: episode)
         } else {
@@ -91,12 +93,11 @@ final class ExtractStore: ObservableObject {
     }
 
     func star(episode: Episode, lensIds: [String] = [], schemaOverride: ExtractSchemaID? = nil) {
+        guard episode.pendingTranscript == nil else { return }
         starred.insert(episode.id)
         persistStars()
         let resolved = ExtractSchemaMap.resolve(lensIds: lensIds, explicit: schemaOverride)
-        let folder = episode.audioURL.deletingLastPathComponent()
-        let hasTranscript = Self.hasTranscript(in: folder)
-        guard hasTranscript else {
+        guard Self.hasTranscript(for: episode) else {
             let failed = failedPacket(
                 episode: episode,
                 schema: resolved.schemaId,
@@ -104,7 +105,7 @@ final class ExtractStore: ObservableObject {
                 summary: "无译稿，无法深抽。请先完成听译。"
             )
             banner = failed.summaryLine
-            publishIfNoShowable(episode.id, failed, folder: folder)
+            publishIfNoShowable(episode, failed)
             return
         }
         let queued = ExtractionPacket(
@@ -119,26 +120,26 @@ final class ExtractStore: ObservableObject {
             claims: [], methods: [], entities: [], quotes: [], openQuestions: [],
             secondarySchemas: resolved.secondary.map(\.rawValue)
         )
-        beginJob(episode: episode, queued: queued, folder: folder, schema: resolved.schemaId)
+        beginJob(episode: episode, queued: queued, schema: resolved.schemaId)
     }
 
     func unstar(episode: Episode) {
         starred.remove(episode.id)
         persistStars()
-        jobTokens[episode.id] = nil
-        jobs[episode.id] = nil
-        refreshing.remove(episode.id)
-        runningTasks[episode.id]?.cancel()
-        runningTasks[episode.id] = nil
-        guard var packet = packets[episode.id] else { return }
+        jobTokens[episode.mediaKey] = nil
+        jobs[episode.mediaKey] = nil
+        refreshing.remove(episode.mediaKey)
+        runningTasks[episode.mediaKey]?.cancel()
+        runningTasks[episode.mediaKey] = nil
+        guard var packet = packets[episode.mediaKey] else { return }
         if packet.mode == .deep || packet.mode == .manual {
             if packet.status == .queued || packet.status == .running {
                 packet.status = .failed
                 packet.failureReason = "cancelled_unstar"
                 packet.costUnits = 0
                 packet.summaryLine = "已取消星标，深抽任务已撤销"
-                packets[episode.id] = packet
-                save(packet, folder: episode.audioURL.deletingLastPathComponent())
+                packets[episode.mediaKey] = packet
+                save(packet, episode: episode)
             }
         }
     }
@@ -146,34 +147,35 @@ final class ExtractStore: ObservableObject {
     /// 听完近结尾（沿用 duration-15s）→ light；轻摘一览，点星可深抽。
     /// 已有 deep 要点时不写轻摘，避免盖掉 `extract.json`。
     func maybeLightOnFinished(episode: Episode, seconds: Double, duration: Double) {
+        guard episode.pendingTranscript == nil else { return }
         guard duration > 1, seconds >= max(0, duration - 15) else { return }
-        if let existing = packet(for: episode.id) {
+        if let existing = packet(for: episode.mediaKey) {
             if existing.mode != .light, ExtractDisplay.isShowable(existing) { return }
             if existing.status == .queued || existing.status == .running { return }
             if existing.mode == .light, existing.status == .ready { return }
         }
-        let folder = episode.audioURL.deletingLastPathComponent()
-        if let disk = readPacket(in: folder), disk.mode != .light, ExtractDisplay.isShowable(disk) {
-            rememberIfShowable(episode.id, disk)
-            packets[episode.id] = disk
+        if let disk = readPacket(for: episode), disk.mode != .light, ExtractDisplay.isShowable(disk) {
+            rememberIfShowable(episode.mediaKey, disk)
+            packets[episode.mediaKey] = disk
             return
         }
         let schema = ExtractSchemaMap.resolve(lensIds: []).schemaId
         let light = MockExtractor.lightSummary(workId: episode.id, schema: schema, title: episode.title)
-        guard ExtractDisplay.shouldReplaceFile(existing: lastKnownReady[episode.id] ?? packets[episode.id], incoming: light) else {
+        guard ExtractDisplay.shouldReplaceFile(existing: lastKnownReady[episode.mediaKey] ?? packets[episode.mediaKey], incoming: light) else {
             return
         }
-        packets[episode.id] = light
-        save(light, folder: folder)
+        packets[episode.mediaKey] = light
+        save(light, episode: episode)
     }
 
     /// 详情「本集改主题重抽」。
     func reextract(episode: Episode, schema: ExtractSchemaID) {
-        if var old = packets[episode.id] {
+        guard episode.pendingTranscript == nil else { return }
+        if var old = packets[episode.mediaKey] {
             old.status = .stale
-            packets[episode.id] = old
-            rememberIfShowable(episode.id, old)
-            save(old, folder: episode.audioURL.deletingLastPathComponent())
+            packets[episode.mediaKey] = old
+            rememberIfShowable(episode.mediaKey, old)
+            save(old, episode: episode)
         }
         if !starred.contains(episode.id) {
             starred.insert(episode.id)
@@ -183,62 +185,69 @@ final class ExtractStore: ObservableObject {
     }
 
     func setItemStatus(episode: Episode, itemId: String, status: ItemStatus) {
-        guard var packet = packets[episode.id] else { return }
+        guard var packet = packets[episode.mediaKey] else { return }
         packet.claims = packet.claims.map { var x = $0; if x.id == itemId { x.status = status }; return x }
         packet.methods = packet.methods.map { var x = $0; if x.id == itemId { x.status = status }; return x }
         packet.entities = packet.entities.map { var x = $0; if x.id == itemId { x.status = status }; return x }
         packet.quotes = packet.quotes.map { var x = $0; if x.id == itemId { x.status = status }; return x }
         packet.openQuestions = packet.openQuestions.map { var x = $0; if x.id == itemId { x.status = status }; return x }
         packet.pendingConfirmCount = packet.computedPendingCount
-        packets[episode.id] = packet
-        rememberIfShowable(episode.id, packet)
-        save(packet, folder: episode.audioURL.deletingLastPathComponent())
+        packets[episode.mediaKey] = packet
+        rememberIfShowable(episode.mediaKey, packet)
+        save(packet, episode: episode)
     }
 
     func exportMarkdown(for episode: Episode) -> String? {
-        guard let packet = packet(for: episode.id) else { return nil }
+        guard let packet = packet(for: episode.mediaKey) else { return nil }
         return Self.markdown(from: packet)
     }
 
     // MARK: - private
 
-    private func beginJob(episode: Episode, queued: ExtractionPacket, folder: URL, schema: ExtractSchemaID) {
+    private func beginJob(episode: Episode, queued: ExtractionPacket, schema: ExtractSchemaID) {
         let token = UUID()
-        jobTokens[episode.id] = token
-        jobs[episode.id] = queued
-        refreshing.insert(episode.id)
-        publishIfNoShowable(episode.id, queued, folder: folder)
+        jobTokens[episode.mediaKey] = token
+        jobs[episode.mediaKey] = queued
+        refreshing.insert(episode.mediaKey)
+        publishIfNoShowable(episode, queued)
         runDeep(episode: episode, schema: schema, token: token)
     }
 
     /// 没有可展示要点时才把排队/失败壳放上界面并落盘。已有要点则继续展示，不改 `extract.json`。
-    private func publishIfNoShowable(_ id: String, _ shell: ExtractionPacket, folder: URL) {
+    private func publishIfNoShowable(_ episode: Episode, _ shell: ExtractionPacket) {
+        let id = episode.mediaKey
         let display = ExtractDisplay.merge(disk: nil, memory: packets[id], lkg: lastKnownReady[id])
         if let display, ExtractDisplay.isShowable(display) {
             packets[id] = display
             return
         }
         packets[id] = shell
-        save(shell, folder: folder)
+        save(shell, episode: episode)
         if let kept = lastKnownReady[id], ExtractDisplay.isShowable(kept) {
             packets[id] = kept
         }
     }
 
     private func runDeep(episode: Episode, schema: ExtractSchemaID, token: UUID) {
-        runningTasks[episode.id]?.cancel()
-        let folder = episode.audioURL.deletingLastPathComponent()
-        runningTasks[episode.id] = Task { @MainActor in
-            guard jobTokens[episode.id] == token, var job = jobs[episode.id] else { return }
+        runningTasks[episode.mediaKey]?.cancel()
+        runningTasks[episode.mediaKey] = Task { @MainActor in
+            guard jobTokens[episode.mediaKey] == token, var job = jobs[episode.mediaKey] else { return }
             job.status = .running
-            jobs[episode.id] = job
-            publishIfNoShowable(episode.id, job, folder: folder)
+            jobs[episode.mediaKey] = job
+            publishIfNoShowable(episode, job)
             do {
                 if Task.isCancelled { throw ExtractRuntimeError.cancelled }
                 guard case .live(let key) = ExtractorGate.route(apiKey: ExtractorGate.apiKey) else {
                     throw ExtractRuntimeError.missingApiKey
                 }
-                let transcript = Self.readTranscript(in: folder) ?? Self.mockTranscript(for: schema)
+                let transcript: String
+                if let published = Self.readTranscript(for: episode) {
+                    transcript = published
+                } else if episode.mediaRevision == nil {
+                    transcript = Self.mockTranscript(for: schema)
+                } else {
+                    throw ExtractRuntimeError.noTranscript
+                }
                 let extractor: any EpisodeExtracting = LiveExtractor(apiKey: key)
                 var ready = try await extractor.deepExtract(
                     workId: episode.id,
@@ -246,17 +255,17 @@ final class ExtractStore: ObservableObject {
                     transcript: transcript,
                     durationSec: episode.durationSec ?? 600
                 )
-                guard jobTokens[episode.id] == token else { return }
+                guard jobTokens[episode.mediaKey] == token else { return }
                 if Task.isCancelled {
-                    jobs[episode.id] = nil
-                    jobTokens[episode.id] = nil
-                    refreshing.remove(episode.id)
+                    jobs[episode.mediaKey] = nil
+                    jobTokens[episode.mediaKey] = nil
+                    refreshing.remove(episode.mediaKey)
                     return
                 }
                 guard ExtractDisplay.readyDeepForDisk(apiKey: key, packet: ready) != nil else {
                     throw ExtractRuntimeError.missingApiKey
                 }
-                if let old = packet(for: episode.id),
+                if let old = packet(for: episode.mediaKey),
                    !ExtractDisplay.isPlaceholderDeep(old),
                    old.status == .ready || old.status == .stale {
                     ready = Self.merge(old: old, incoming: ready)
@@ -264,22 +273,22 @@ final class ExtractStore: ObservableObject {
                 guard ExtractDisplay.readyDeepForDisk(apiKey: key, packet: ready) != nil else {
                     throw ExtractRuntimeError.missingApiKey
                 }
-                jobs[episode.id] = nil
-                jobTokens[episode.id] = nil
-                refreshing.remove(episode.id)
-                rememberIfShowable(episode.id, ready)
-                packets[episode.id] = ready
-                save(ready, folder: folder)
+                jobs[episode.mediaKey] = nil
+                jobTokens[episode.mediaKey] = nil
+                refreshing.remove(episode.mediaKey)
+                rememberIfShowable(episode.mediaKey, ready)
+                packets[episode.mediaKey] = ready
+                save(ready, episode: episode)
             } catch is CancellationError {
-                guard jobTokens[episode.id] == token else { return }
-                jobs[episode.id] = nil
-                jobTokens[episode.id] = nil
-                refreshing.remove(episode.id)
+                guard jobTokens[episode.mediaKey] == token else { return }
+                jobs[episode.mediaKey] = nil
+                jobTokens[episode.mediaKey] = nil
+                refreshing.remove(episode.mediaKey)
             } catch {
-                guard jobTokens[episode.id] == token else { return }
-                jobs[episode.id] = nil
-                jobTokens[episode.id] = nil
-                refreshing.remove(episode.id)
+                guard jobTokens[episode.mediaKey] == token else { return }
+                jobs[episode.mediaKey] = nil
+                jobTokens[episode.mediaKey] = nil
+                refreshing.remove(episode.mediaKey)
                 let reason: String
                 switch error as? ExtractRuntimeError {
                 case .noTranscript:
@@ -296,7 +305,7 @@ final class ExtractStore: ObservableObject {
                     summary: error.localizedDescription
                 )
                 banner = failed.summaryLine
-                publishIfNoShowable(episode.id, failed, folder: folder)
+                publishIfNoShowable(episode, failed)
             }
         }
     }
@@ -317,10 +326,11 @@ final class ExtractStore: ObservableObject {
 
     /// 先读 `extract.json`，没有可展示要点时再看 `extract.live.json`。
     /// 排队/失败壳不会压过另一份里已经就绪的 deep。
-    private func readPacket(in folder: URL) -> ExtractionPacket? {
-        let canonical = readOne(folder.appendingPathComponent("extract.json"))
-        let live = readOne(folder.appendingPathComponent("extract.live.json"))
-        return ExtractDisplay.merge(disk: canonical, memory: live, lkg: nil)
+    private func readPacket(for episode: Episode) -> ExtractionPacket? {
+        let local = localPacketURL(for: episode).flatMap { readOne($0) }
+        let canonical = episode.publishedAsset("extract.json").flatMap { readOne($0) }
+        let live = episode.publishedAsset("extract.live.json").flatMap { readOne($0) }
+        return ExtractDisplay.merge(disk: local, memory: canonical, lkg: live)
     }
 
     private func readOne(_ url: URL) -> ExtractionPacket? {
@@ -353,16 +363,16 @@ final class ExtractStore: ObservableObject {
         return result
     }
 
-    private func save(_ packet: ExtractionPacket, folder: URL) {
-        let id = folder.lastPathComponent
-        let onDisk = readPacket(in: folder)
+    private func save(_ packet: ExtractionPacket, episode: Episode) {
+        let id = episode.mediaKey
+        let onDisk = readPacket(for: episode)
         let remembered = lastKnownReady[id]
         if ExtractDisplay.blocksFileWrite(disk: onDisk, remembered: remembered, incoming: packet) {
             if let onDisk { rememberIfShowable(id, onDisk) }
             if let remembered { rememberIfShowable(id, remembered) }
             return
         }
-        let url = folder.appendingPathComponent("extract.json")
+        guard let url = localPacketURL(for: episode) else { return }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         guard let data = try? encoder.encode(packet) else { return }
@@ -371,7 +381,7 @@ final class ExtractStore: ObservableObject {
     }
 
     private func rememberIfShowable(_ id: String, _ packet: ExtractionPacket) {
-        guard EpisodeID.isSafe(id), ExtractDisplay.isShowable(packet) else { return }
+        guard EpisodeID.isMediaKey(id), ExtractDisplay.isShowable(packet) else { return }
         if packet.mode == .light,
            let existing = lastKnownReady[id],
            existing.mode != .light,
@@ -393,7 +403,7 @@ final class ExtractStore: ObservableObject {
               let files = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return }
         for url in files where url.pathExtension == "json" {
             let id = url.deletingPathExtension().lastPathComponent
-            guard EpisodeID.isSafe(id),
+            guard EpisodeID.isMediaKey(id),
                   let data = try? Data(contentsOf: url),
                   let packet = ExtractPacketDecoding.decode(data),
                   ExtractDisplay.isShowable(packet) else { continue }
@@ -404,17 +414,26 @@ final class ExtractStore: ObservableObject {
         }
     }
 
+    private func localPacketURL(for episode: Episode) -> URL? {
+        guard EpisodeID.isMediaKey(episode.mediaKey) else { return nil }
+        return supportDirectory("PrivateListenLocalExtracts")?.appendingPathComponent("\(episode.mediaKey).json")
+    }
+
     private func lkgDirectory() -> URL? {
+        supportDirectory("PrivateListenExtractLKG")
+    }
+
+    private func supportDirectory(_ name: String) -> URL? {
         guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
-        let dir = base.appendingPathComponent("PrivateListenExtractLKG", isDirectory: true)
+        let dir = base.appendingPathComponent(name)
         do {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir
         } catch {
             return nil
         }
-        return dir
     }
 
     private func persistStars() {
@@ -424,16 +443,17 @@ final class ExtractStore: ObservableObject {
         }
     }
 
-    nonisolated static func hasTranscript(in folder: URL) -> Bool {
+    nonisolated static func hasTranscript(for episode: Episode) -> Bool {
         let candidates = [
             "transcript_zh.json", "transcript.json", "translation.json",
-            "translations.json", "mock_transcript.txt"
+            "translations.json", "mock_transcript.txt", "document.json"
         ]
         let fm = FileManager.default
         for name in candidates {
-            let url = folder.appendingPathComponent(name)
-            if fm.fileExists(atPath: url.path) { return true }
+            if let url = episode.publishedAsset(name), fm.fileExists(atPath: url.path) { return true }
         }
+        guard episode.mediaRevision == nil else { return false }
+        let folder = episode.audioURL.deletingLastPathComponent()
         // MVP 冒烟：若存在 `.allow_mock_extract` 或 DEBUG 默认允许 mock 译稿
         if fm.fileExists(atPath: folder.appendingPathComponent(".allow_mock_extract").path) {
             return true
@@ -445,19 +465,25 @@ final class ExtractStore: ObservableObject {
         #endif
     }
 
-    nonisolated static func readTranscript(in folder: URL) -> String? {
-        let txt = folder.appendingPathComponent("mock_transcript.txt")
-        if let data = try? Data(contentsOf: txt), let s = String(data: data, encoding: .utf8), !s.isEmpty {
+    nonisolated static func readTranscript(for episode: Episode) -> String? {
+        if let txt = episode.publishedAsset("mock_transcript.txt"), let data = try? Data(contentsOf: txt), let s = String(data: data, encoding: .utf8), !s.isEmpty {
             return s
         }
-        for name in ["transcript_zh.json", "transcript.json"] {
-            let url = folder.appendingPathComponent(name)
-            if let data = try? Data(contentsOf: url),
+        for name in ["document.json", "transcript_zh.json", "transcript.json"] {
+            if let url = episode.publishedAsset(name), let data = try? Data(contentsOf: url),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 if let text = obj["text"] as? String, !text.isEmpty { return text }
                 if let segs = obj["segments"] as? [[String: Any]] {
-                    let joined = segs.compactMap { $0["zh"] as? String ?? $0["text"] as? String }.joined()
-                    if !joined.isEmpty { return joined }
+                    if name == "document.json" {
+                        let spoken = segs.filter { $0["is_ad"] as? Bool != true }
+                        let translated = spoken.compactMap { $0["chinese"] as? String }
+                        let joined = translated.joined(separator: "\n")
+                        if translated.count == spoken.count,
+                           !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return joined }
+                    } else {
+                        let joined = segs.compactMap { $0["zh"] as? String ?? $0["text"] as? String }.joined()
+                        if !joined.isEmpty { return joined }
+                    }
                 }
             }
         }

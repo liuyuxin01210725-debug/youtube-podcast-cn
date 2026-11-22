@@ -5,12 +5,12 @@ struct PointListenChecks {
     static func main() async throws {
         // Boundary first: seek-only never reaches the original near-end reducer.
         for target in [584.9, 585.0, 590.0] {
-            var gate = JumpContinueProgress()
-            gate.didLand(at: target)
+            var gate = PodcastProgressGate()
             precondition(!gate.allowsCheckpoint)
-            precondition(!gate.observe(seconds: target, isPlaying: true))
-            precondition(!gate.observe(seconds: target + 0.5, isPlaying: false))
-            precondition(gate.observe(seconds: target + 0.05, isPlaying: true))
+            precondition(!gate.observe(seconds: target + 0.5))
+            gate.beginPlayback(at: target)
+            precondition(!gate.observe(seconds: target))
+            precondition(gate.observe(seconds: target + 0.05))
             let marks = ContinueListening.record(marks: [:], id: "fixture", seconds: target + 0.05,
                 duration: 600, touchedAt: 1, clipSuppressListenMark: false)
             precondition(marks["fixture"]?.finished == (target >= 585))

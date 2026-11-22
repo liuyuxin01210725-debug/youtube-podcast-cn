@@ -208,15 +208,18 @@ def server_busy(jobs: Path) -> bool:
 
 
 def engine_command(job: Path) -> list[str]:
+    from studio_publish_icloud import default_library_root
+
     python = ROOT / '.venv' / 'bin' / 'python'
     if not python.is_file():
         python = Path(sys.executable)
     return [
-        str(python),
+        str(python), '-E',
         str(ROOT / 'scripts' / 'studio_engine.py'),
         '--job-dir', str(job),
         '--config', str(job / 'config.json'),
         '--action', 'run',
+        '--publish-library', str(default_library_root().resolve()),
     ]
 
 

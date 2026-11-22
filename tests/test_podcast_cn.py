@@ -296,67 +296,28 @@ class ProviderConfigTests(unittest.TestCase):
             podcast_cn.get_provider_config("kimi")
 
 
+BUDGET_TEST_NOW = 1795049900
+
+
+def synthetic_budget(path):
+    budget = podcast_cn.TranslationBudget
+    budget.provision(
+        path, authorization_id="12345678-1234-4123-8123-1234567890ab",
+        fee_mode="cny_token_only", cap_microunits=2_200_000, prior_microunits=0,
+        verified_at=BUDGET_TEST_NOW - 60, expires_at=BUDGET_TEST_NOW + 60,
+    )
+    return budget(path)
+
+
 class TranslationClientTests(unittest.TestCase):
-    @staticmethod
-    def response_payload() -> dict:
-        return {
-            "choices": [
-                {
-                    "message": {
-                        "content": json.dumps(
-                            {
-                                "translations": [
-                                    {"id": "seg-000001", "text": "你好"},
-                                    {"id": "seg-000002", "text": "世界"},
-                                ]
-                            },
-                            ensure_ascii=False,
-                        )
-                    }
-                }
-            ]
-        }
-
-    def test_qwen_posts_compatible_structured_request(self) -> None:
-        requests: list[tuple[urllib.request.Request, float]] = []
-        response_payload = self.response_payload()
-
-        class FakeResponse:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc_value, traceback):
-                return False
-
-            def read(self):
-                return json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
-
-        def fake_opener(request, timeout):
-            requests.append((request, timeout))
-            return FakeResponse()
-
+    def test_qwen_with_unverified_pricing_stops_before_the_opener(self) -> None:
+        opener = mock.Mock()
         client = podcast_cn.OpenAICompatibleTranslationClient(
-            "qwen", api_key="qwen-test-secret", opener=fake_opener
+            "qwen", api_key="qwen-test-secret", opener=opener
         )
-        segments = [
-            podcast_cn.SubtitleSegment("seg-000001", 0, 1000, "Hello"),
-            podcast_cn.SubtitleSegment("seg-000002", 1000, 2000, "world"),
-        ]
-
-        translated = client.translate(segments)
-
-        self.assertEqual(translated, {"seg-000001": "你好", "seg-000002": "世界"})
-        request, timeout = requests[0]
-        self.assertEqual(
-            request.full_url,
-            "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
-        )
-        self.assertEqual(timeout, 120)
-        self.assertEqual(request.get_header("Authorization"), "Bearer qwen-test-secret")
-        body = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(body["model"], "qwen-plus")
-        self.assertEqual(body["response_format"], {"type": "json_object"})
-        self.assertNotIn("qwen-test-secret", request.data.decode("utf-8"))
+        with self.assertRaisesRegex(podcast_cn.PodcastPipelineError, "未经核实"):
+            client.translate([podcast_cn.SubtitleSegment("seg-000001", 0, 1000, "Hello")])
+        opener.assert_not_called()
 
     def test_qwen_reads_model_and_base_url_from_environment(self) -> None:
         environment = {
@@ -411,7 +372,7 @@ class TranslationClientTests(unittest.TestCase):
         segment = podcast_cn.SubtitleSegment("seg-000001", 0, 1000, "Hello")
 
         with self.assertRaisesRegex(
-            podcast_cn.PodcastPipelineError, "通义千问"
+            podcast_cn.PodcastPipelineError, "未经核实"
         ) as raised:
             client.translate([segment])
 
@@ -420,8 +381,11 @@ class TranslationClientTests(unittest.TestCase):
     def test_translate_title_keeps_brand_names_out_of_the_user_message(self) -> None:
         requests: list[tuple[urllib.request.Request, float]] = []
         response_payload = {
+            "model": "deepseek-flash",
+            "usage": {"prompt_tokens": 210, "completion_tokens": 50, "total_tokens": 260},
             "choices": [
                 {
+                    "finish_reason": "stop",
                     "message": {
                         "content": json.dumps(
                             {"title": "肌酸专家：肌酸是减肥的秘密"},
@@ -433,24 +397,28 @@ class TranslationClientTests(unittest.TestCase):
         }
 
         class FakeResponse:
+            status = 200
+
             def __enter__(self):
                 return self
 
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, size):
                 return json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
 
         def fake_opener(request, timeout):
             requests.append((request, timeout))
             return FakeResponse()
 
-        client = podcast_cn.OpenAICompatibleTranslationClient(
-            "deepseek", api_key="title-secret", opener=fake_opener
-        )
         topic = "Creatine Expert: Creatine Is The Secret To Weight Loss"
-        self.assertEqual(client.translate_title(topic), "肌酸专家：肌酸是减肥的秘密")
+        with tempfile.TemporaryDirectory() as path, mock.patch("translation_budget.time.time", return_value=BUDGET_TEST_NOW):
+            client = podcast_cn.OpenAICompatibleTranslationClient(
+                "deepseek", api_key="title-secret", model="deepseek-flash",
+                base_url="https://api.deepseek.com", budget=synthetic_budget(path), opener=fake_opener,
+            )
+            self.assertEqual(client.translate_title(topic), "肌酸专家：肌酸是减肥的秘密")
         request, timeout = requests[0]
         self.assertEqual(timeout, 45)
         body = json.loads(request.data.decode("utf-8"))
@@ -473,8 +441,11 @@ class DeepSeekClientTests(unittest.TestCase):
     def test_posts_structured_translation_and_validates_response(self) -> None:
         requests: list[tuple[urllib.request.Request, float]] = []
         response_payload = {
+            "model": "deepseek-flash",
+            "usage": {"prompt_tokens": 210, "completion_tokens": 50, "total_tokens": 260},
             "choices": [
                 {
+                    "finish_reason": "stop",
                     "message": {
                         "content": "```json\n"
                         + json.dumps(
@@ -493,13 +464,15 @@ class DeepSeekClientTests(unittest.TestCase):
         }
 
         class FakeResponse:
+            status = 200
+
             def __enter__(self):
                 return self
 
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, size):
                 return json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
 
         def fake_opener(request, timeout):
@@ -510,11 +483,12 @@ class DeepSeekClientTests(unittest.TestCase):
             podcast_cn.SubtitleSegment("seg-000001", 0, 1000, "Hello"),
             podcast_cn.SubtitleSegment("seg-000002", 1000, 2000, "world"),
         ]
-        client = podcast_cn.DeepSeekClient(
-            api_key="test-secret-key", opener=fake_opener
-        )
-
-        translated = client.translate(segments)
+        with tempfile.TemporaryDirectory() as path, mock.patch("translation_budget.time.time", return_value=BUDGET_TEST_NOW):
+            client = podcast_cn.DeepSeekClient(
+                api_key="test-secret-key", model="deepseek-flash", base_url="https://api.deepseek.com",
+                budget=synthetic_budget(path), opener=fake_opener,
+            )
+            translated = client.translate(segments)
 
         self.assertEqual(translated, {"seg-000001": "你好", "seg-000002": "世界"})
         request, timeout = requests[0]
@@ -522,7 +496,7 @@ class DeepSeekClientTests(unittest.TestCase):
         self.assertEqual(timeout, 120)
         self.assertEqual(request.get_header("Authorization"), "Bearer test-secret-key")
         body = json.loads(request.data.decode("utf-8"))
-        self.assertEqual(body["model"], "deepseek-chat")
+        self.assertEqual(body["model"], "deepseek-flash")
         self.assertEqual(body["response_format"], {"type": "json_object"})
         user_payload = json.loads(body["messages"][1]["content"])
         self.assertEqual(
@@ -632,59 +606,38 @@ class TranslationResumeTests(unittest.TestCase):
                         translation_identity=original_identity,
                     )
 
-                    calls = []
+                    cache_path = chunk_dir / "chunk-0001.json"
+                    before = cache_path.read_bytes()
+                    changed_translator = mock.Mock()
+                    with self.assertRaisesRegex(podcast_cn.TranslationValidationError, "已保留"):
+                        podcast_cn.translate_with_resume(
+                            self.segments,
+                            chunk_dir,
+                            changed_translator,
+                            max_chars=4,
+                            translation_identity=changed_identity,
+                        )
+                    changed_translator.assert_not_called()
+                    self.assertEqual(cache_path.read_bytes(), before)
 
-                    def changed_translator(segments):
-                        calls.append([segment.id for segment in segments])
-                        return self.translate_chunk(segments)
-
-                    podcast_cn.translate_with_resume(
-                        self.segments,
-                        chunk_dir,
-                        changed_translator,
-                        max_chars=4,
-                        translation_identity=changed_identity,
-                    )
-
-                    self.assertEqual(
-                        calls,
-                        [["seg-000001"], ["seg-000002"], ["seg-000003"]],
-                    )
-                    cached = json.loads(
-                        (chunk_dir / "chunk-0001.json").read_text(encoding="utf-8")
-                    )
-                    self.assertEqual(cached["translation_identity"], changed_identity)
-                    self.assertNotIn("API_KEY", json.dumps(cached))
-
-    def test_retranslates_only_cache_whose_source_hash_is_wrong(self) -> None:
+    def test_reports_and_preserves_cache_whose_source_hash_is_wrong(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             chunk_dir = Path(tmp)
             podcast_cn.translate_with_resume(
-                self.segments,
-                chunk_dir,
-                self.translate_chunk,
-                max_chars=4,
+                self.segments, chunk_dir, self.translate_chunk, max_chars=4,
             )
             cache_path = chunk_dir / "chunk-0001.json"
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
             cached["source_hash"] = "wrong"
             cache_path.write_text(json.dumps(cached), encoding="utf-8")
-            calls = []
-
-            def recording_translator(segments):
-                calls.append([segment.id for segment in segments])
-                return self.translate_chunk(segments)
-
-            podcast_cn.translate_with_resume(
-                self.segments,
-                chunk_dir,
-                recording_translator,
-                max_chars=4,
-            )
-
-            self.assertEqual(calls, [["seg-000001"]])
-            repaired = json.loads(cache_path.read_text(encoding="utf-8"))
-            self.assertNotEqual(repaired["source_hash"], "wrong")
+            before = cache_path.read_bytes()
+            recording_translator = mock.Mock()
+            with self.assertRaisesRegex(podcast_cn.TranslationValidationError, "已保留"):
+                podcast_cn.translate_with_resume(
+                    self.segments, chunk_dir, recording_translator, max_chars=4,
+                )
+            recording_translator.assert_not_called()
+            self.assertEqual(cache_path.read_bytes(), before)
 
     def test_does_not_write_captured_api_secret_to_chunk_files(self) -> None:
         secret = "deepseek-secret-never-persist"
@@ -893,7 +846,7 @@ class EpisodePreparationTests(unittest.TestCase):
             )
             self.assertNotIn(secret, persisted)
 
-    def test_retranslates_completed_transcript_when_identity_changes(self) -> None:
+    def test_preserves_completed_transcript_when_identity_changes(self) -> None:
         fixture_text = FIXTURE.read_text(encoding="utf-8")
         url = "https://www.youtube.com/watch?v=abc123"
         info = {
@@ -947,32 +900,23 @@ class EpisodePreparationTests(unittest.TestCase):
                 translation_identity=deepseek_identity,
                 diarize="off",
             )
-            podcast_cn.prepare_episode(
-                url,
-                output_root,
-                runner=fake_runner,
-                translator=translator("qwen"),
-                translation_identity=qwen_identity,
-                diarize="off",
-            )
-
-            self.assertEqual(calls, ["deepseek", "qwen"])
             job_dir = output_root / ".podcast-jobs/abc123"
-            transcript = (job_dir / "transcript.zh.md").read_text(encoding="utf-8")
-            self.assertIn("qwen-seg-000001", transcript)
-            self.assertNotIn("deepseek-seg-000001", transcript)
-            translation_metadata = json.loads(
-                (job_dir / "translation-metadata.json").read_text(encoding="utf-8")
-            )
-            self.assertEqual(
-                translation_metadata["translation_identity"], qwen_identity
-            )
-            self.assertEqual(translation_metadata["provider"], "qwen")
-            self.assertEqual(translation_metadata["model"], "qwen-plus")
-            self.assertEqual(
-                translation_metadata["base_url"],
-                "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            )
+            paths = [job_dir / "transcript.zh.md", job_dir / "translation-metadata.json"]
+            before = [path.read_bytes() for path in paths]
+            with self.assertRaisesRegex(podcast_cn.TranslationValidationError, "已保留"):
+                podcast_cn.prepare_episode(
+                    url,
+                    output_root,
+                    runner=fake_runner,
+                    translator=translator("qwen"),
+                    translation_identity=qwen_identity,
+                    diarize="off",
+                )
+
+            self.assertEqual(calls, ["deepseek"])
+            self.assertEqual([path.read_bytes() for path in paths], before)
+            self.assertIn(b"deepseek-seg-000001", before[0])
+            self.assertEqual(json.loads(before[1])["translation_identity"], deepseek_identity)
 
 
 class DiarizationPipelineTests(unittest.TestCase):
@@ -1551,7 +1495,7 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(
             requirements,
             [
-                "edge-tts==7.2.8",
+                "edge-tts==7.3.1",
                 "pydub==0.25.1",
                 'audioop-lts==0.2.2; python_version >= "3.13"',
                 "yt-dlp==2026.8.19",

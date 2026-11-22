@@ -43,6 +43,7 @@ struct MiniPlayerBar: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("打开 \(episode.title)")
+                .accessibilityIdentifier("library.miniPlayer.open")
                 Button(action: onToggle) {
                     Image(systemName: isPlaying ? "pause.fill" : "play.fill")
                         .font(.title3)
@@ -51,6 +52,7 @@ struct MiniPlayerBar: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isPlaying ? "暂停" : "继续播放")
+                .accessibilityIdentifier("library.miniPlayer.transport")
             }
             .padding(.leading, 12)
             .padding(.trailing, 4)

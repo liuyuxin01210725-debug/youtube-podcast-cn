@@ -42,7 +42,14 @@ struct ContinueUXProbe {
             "播放头没动过不算继续播放",
             noZero.allSatisfy { $0.id != "z" } && noZero.first?.id == "b"
         )
-        check("已听完不进继续播放", shown.allSatisfy { $0.id != "c" })
+        check("无复听游标的已听完不进继续播放", shown.allSatisfy { $0.id != "c" })
+        var withReplay = marks
+        withReplay["c"]?.replaySeconds = 0.45
+        let replay = ContinueListening.items(marks: withReplay, durations: durations, dismissed: [])
+        check("复听参与原有排序，卡片位置和剩余时长用复听游标",
+              replay.map(\.id) == ["c"] && replay.first?.seconds == 0.45 && replay.first?.remaining == 89.55)
+        withReplay["c"]?.replaySeconds = .nan
+        check("无效复听游标不占卡位", ContinueListening.items(marks: withReplay, durations: durations, dismissed: []).map(\.id) == ["b"])
         check("没有触摸时间的排在有时间的后面", shown.map(\.id) == ["b", "a", "d"])
         check(
             "剩余文案",

@@ -9,11 +9,11 @@ struct ExtractDetailSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
-            if let packet = extracts.packet(for: episode.id) {
+            if let packet = extracts.packet(for: episode.mediaKey) {
                 Text(ExtractDisplay.detailStatusLabel(packet))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if extracts.refreshing.contains(episode.id) {
+                if extracts.refreshing.contains(episode.mediaKey) {
                     Text("正在更新提炼…").font(.caption).foregroundStyle(.secondary)
                 }
                 if ExtractDisplay.isShowable(packet) {
@@ -139,8 +139,8 @@ private struct PointListenRows: View {
     private func verify() async {
         index = nil
         audio = nil
-        let url = episode.audioURL.deletingLastPathComponent().appendingPathComponent(PointListening.indexFileName)
-        guard FileManager.default.fileExists(atPath: url.path) else {
+        guard let url = episode.publishedAsset(PointListening.indexFileName),
+              FileManager.default.fileExists(atPath: url.path) else {
             verificationText = "尚无成片绑定索引，以下仅供阅读。"
             return
         }

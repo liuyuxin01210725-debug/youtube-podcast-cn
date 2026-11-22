@@ -2,21 +2,29 @@ import SwiftUI
 
 /// 播放页「听后感」：输入极简（单一多行框）；价值在写完后的下游动作卡。
 struct ListenNoteSection: View {
+    static let editorScrollID = "listenNoteEditor"
+
     let episodeId: String
     let isFinished: Bool
+    var recordsOnOpen = true
+    @Binding var isEditing: Bool
     @EnvironmentObject private var listenNotes: ListenNoteStore
     @EnvironmentObject private var library: LibraryStore
 
     @State private var draftText: String = ""
     @State private var tags: [String] = []
+    @State private var loadedEpisodeId: String?
     @State private var commitTask: Task<Void, Never>?
     @State private var savedFlash = false
+    @State private var saveFailed = false
     @State private var confirmClear = false
     @State private var hideDownstream = false
     @State private var insightSaved = false
     @State private var libraryHit: ListenNoteDownstream.LibraryHit?
     @State private var libraryChecked = false
-    @FocusState private var focused: Bool
+    @State private var editedDraft = false
+    /// Bumped on load / episode switch so the editor reveals the end of a long note.
+    @State private var revealEndToken = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -28,7 +36,11 @@ struct ListenNoteSection: View {
                 Text("听后感")
                     .font(.headline)
                 Spacer(minLength: 0)
-                if savedFlash {
+                if saveFailed {
+                    Text("听后感保存失败")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if savedFlash {
                     Text("已记下")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
@@ -47,18 +59,31 @@ struct ListenNoteSection: View {
                         .padding(.vertical, 16)
                         .allowsHitTesting(false)
                 }
-                TextEditor(text: $draftText)
-                    .frame(minHeight: 88, maxHeight: 160)
-                    .padding(8)
-                    .scrollContentBackground(.hidden)
-                    .focused($focused)
-                    .accessibilityLabel("听后感")
+                // Fixed height + UITextView: scrolls the full body inside the player ScrollView,
+                // and reopens / first-focuses at the end so append is safe.
+                ListenNoteEditor(
+                    text: Binding(get: { draftText }, set: {
+                        editedDraft = true
+                        draftText = $0
+                    }),
+                    revealEndToken: revealEndToken
+                ) { editing in
+                    if isEditing, !editing {
+                        commitNow(flash: true)
+                    }
+                    isEditing = editing
+                }
+                .frame(height: 160)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 4)
+                .accessibilityLabel("听后感")
             }
             .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
                     .stroke(Color.primary.opacity(0.08), lineWidth: 1)
             )
+            .id(Self.editorScrollID)
 
             if hasDraftContent {
                 HStack {
@@ -77,20 +102,19 @@ struct ListenNoteSection: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .onAppear(perform: loadFromStore)
         .onChange(of: episodeId) { _, _ in
-            commit()
+            commitTask?.cancel()
+            _ = commit()
             loadFromStore()
             savedFlash = false
             hideDownstream = false
         }
         .onChange(of: draftText) { _, _ in scheduleCommit() }
-        .onChange(of: focused) { old, new in
-            if old == true, new == false {
-                commitNow(flash: true)
-            }
+        .onDisappear {
+            commitTask?.cancel()
+            _ = commit()
         }
-        .onDisappear { commit() }
         .onAppear {
-            if listenNotes.shouldShowFinishedPrompt(episodeId: episodeId, isFinished: isFinished) {
+            if recordsOnOpen, listenNotes.shouldShowFinishedPrompt(episodeId: episodeId, isFinished: isFinished) {
                 listenNotes.markPromptShown(episodeId: episodeId)
             }
         }
@@ -100,12 +124,17 @@ struct ListenNoteSection: View {
             titleVisibility: .visible
         ) {
             Button("清除", role: .destructive) {
+                commitTask?.cancel()
+                guard listenNotes.clear(episodeId: episodeId) else {
+                    saveFailed = true
+                    return
+                }
+                saveFailed = false
                 draftText = ""
                 tags = []
                 libraryHit = nil
                 libraryChecked = false
                 insightSaved = false
-                listenNotes.clear(episodeId: episodeId)
                 UIEventLog.note("listen_note_clear", episodeId: episodeId)
                 flashSaved()
             }
@@ -142,6 +171,7 @@ struct ListenNoteSection: View {
             // 极轻：标待回看（只加 tag，不占「动作卡」名额以外的视觉重量）
             if !tags.contains(where: { $0 == "待回看" }) {
                 Button {
+                    editedDraft = true
                     tags = ListenNote.normalizeTags(tags + ["待回看"])
                     commitNow(flash: true)
                     UIEventLog.note(
@@ -163,7 +193,7 @@ struct ListenNoteSection: View {
         }
         .padding(12)
         .background(Color.accentColor.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .onAppear { refreshDownstream(writeInsightIfNeeded: true) }
+        .onAppear { refreshDownstream(writeInsightIfNeeded: recordsOnOpen) }
         .onChange(of: draftText) { _, _ in
             // 文案变了：重新匹配；insights 在 commit 时写
             libraryChecked = false
@@ -238,9 +268,10 @@ struct ListenNoteSection: View {
             Spacer(minLength: 0)
             if !insightSaved {
                 Button("写下") {
-                    _ = ListenNoteDownstream.writeInsight(episodeId: episodeId, noteText: draftText)
-                    insightSaved = true
-                    flashSaved()
+                    commitTask?.cancel()
+                    guard commit() else { return }
+                    insightSaved = ListenNoteDownstream.writeInsight(episodeId: episodeId, noteText: draftText) != nil
+                    if insightSaved { flashSaved() }
                 }
                 .font(.caption.weight(.semibold))
             }
@@ -268,17 +299,19 @@ struct ListenNoteSection: View {
                 noteLookup: { listenNotes.note(for: $0) }
             )
             libraryChecked = true
-            if let hit = libraryHit {
-                UIEventLog.note(
-                    "listen_note_library_hit",
-                    episodeId: episodeId,
-                    fields: [
-                        "to_episode_id": hit.episodeId,
-                        "source": hit.source,
-                    ]
-                )
-            } else {
-                UIEventLog.note("listen_note_library_miss", episodeId: episodeId)
+            if recordsOnOpen || editedDraft {
+                if let hit = libraryHit {
+                    UIEventLog.note(
+                        "listen_note_library_hit",
+                        episodeId: episodeId,
+                        fields: [
+                            "to_episode_id": hit.episodeId,
+                            "source": hit.source,
+                        ]
+                    )
+                } else {
+                    UIEventLog.note("listen_note_library_miss", episodeId: episodeId)
+                }
             }
         }
         if writeInsightIfNeeded {
@@ -323,6 +356,10 @@ struct ListenNoteSection: View {
     }
 
     private func loadFromStore() {
+        guard loadedEpisodeId != episodeId else { return }
+        loadedEpisodeId = episodeId
+        editedDraft = false
+        saveFailed = false
         if let n = listenNotes.note(for: episodeId) {
             draftText = ListenNoteDownstream.mergedDisplayText(headline: n.headline, body: n.body)
             tags = n.tags
@@ -331,12 +368,16 @@ struct ListenNoteSection: View {
             if n.hasContent {
                 refreshDownstream(writeInsightIfNeeded: false)
             }
+            if ListenNoteEditorPolicy.shouldRevealEndOnLoad(text: draftText) {
+                revealEndToken += 1
+            }
         } else {
             draftText = ""
             tags = []
             libraryHit = nil
             libraryChecked = false
             insightSaved = false
+            revealEndToken += 1
         }
     }
 
@@ -345,13 +386,14 @@ struct ListenNoteSection: View {
         commitTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
-            commit()
+            _ = commit()
         }
     }
 
     private func commitNow(flash: Bool) {
         commitTask?.cancel()
-        commit()
+        guard recordsOnOpen || editedDraft else { return }
+        guard commit() else { return }
         if flash { flashSaved() }
         if hasDraftContent {
             // 保存后刷新下游 + 自动写 insights
@@ -360,18 +402,12 @@ struct ListenNoteSection: View {
         }
     }
 
-    private func commit() {
-        let text = draftText
-        let trimmed = ListenNote.trimmed(text)
-        // 单字段收敛：全文进 body；首行填 headline（兼容旧列表摘要 / 搜索）
-        let headline = trimmed.isEmpty ? "" : ListenNoteDownstream.firstLine(trimmed)
-        let body = trimmed
-        listenNotes.upsert(
-            episodeId: episodeId,
-            headline: headline,
-            body: body,
-            tags: tags
-        )
+    private func commit() -> Bool {
+        guard let loadedEpisodeId else { return false }
+        guard recordsOnOpen || editedDraft else { return true }
+        let saved = listenNotes.saveDraft(episodeId: loadedEpisodeId, text: draftText, tags: tags)
+        saveFailed = !saved
+        return saved
     }
 
     private func flashSaved() {

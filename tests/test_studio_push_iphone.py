@@ -20,7 +20,10 @@ from studio_push_iphone import (
     push_episodes,
     reachable_devices,
 )
-from studio_publish_icloud import publish_job
+from studio_publish_icloud import RENDER_FILES, publish_job
+
+EPISODE_RESOURCES = ['output.mp3', 'cover.jpg', *sorted(RENDER_FILES), 'episode.json']
+PUSH_EVENTS = ['backup', *(['copy'] * len(EPISODE_RESOURCES)), 'cas']
 
 WIRED = {
     'identifier': 'AAAA-WIRED',
@@ -55,7 +58,7 @@ WIFI = {
 
 
 class FakeDevicectl:
-    """Answers the three devicectl subcommands the push uses and records copies."""
+    """Synthetic phone with a readable index and a test-only CAS callback."""
 
     def __init__(self, devices=(), installed=True, fail_copy=None, list_code=0):
         self.devices = list(devices)
@@ -63,7 +66,10 @@ class FakeDevicectl:
         self.fail_copy = fail_copy
         self.list_code = list_code
         self.copies = []
+        self.assets = {}
         self.commands = []
+        self.events = []
+        self.index = b'{"episodes":[{"id":"phone-only","show":"Existing Show"}]}\n'
 
     def __call__(self, command, timeout):
         self.commands.append(command)
@@ -79,20 +85,42 @@ class FakeDevicectl:
                 apps = [{'bundleIdentifier': BUNDLE_ID}] if self.installed else []
                 output.write_text(json.dumps({'result': {'apps': apps}}), encoding='utf-8')
                 return 0, '', ''
+        if command[2:5] == ['device', 'copy', 'from']:
+            source = command[command.index('--source') + 1]
+            backup = Path(command[command.index('--destination') + 1])
+            if source == f'{DEVICE_LIBRARY}/library.json':
+                backup.write_bytes(self.index)
+                self.events.append('read-commit' if 'cas' in self.events else 'backup')
+            else:
+                backup.write_bytes(self.assets[source])
+            return 0, '', ''
         if command[2:5] == ['device', 'copy', 'to']:
             device = command[command.index('--device') + 1]
             destination = command[command.index('--destination') + 1]
             source = command[command.index('--source') + 1]
             if self.fail_copy and self.fail_copy in destination:
                 return 1, '', 'ERROR: The device is locked.'
+            assert 'backup' in self.events
+            assert destination != f'{DEVICE_LIBRARY}/library.json'
+            self.assets[destination] = Path(source).read_bytes()
             self.copies.append((device, Path(source).name, destination, timeout))
+            self.events.append('copy')
             return 0, '', ''
         return 1, '', 'unexpected'
+
+    def atomic_commit(self, device, merged, expected):
+        assert device == 'AAAA-WIRED'
+        assert self.events[0] == 'backup'
+        self.events.append('cas')
+        if self.index != expected:
+            return 'snapshot changed'
+        self.index = merged
+        return None
 
     @staticmethod
     def assert_shape(command):
         assert command[:2] == ['xcrun', 'devicectl'], command
-        if command[2:5] == ['device', 'copy', 'to']:
+        if command[2:4] == ['device', 'copy']:
             assert command[command.index('--domain-type') + 1] == 'appDataContainer'
             assert command[command.index('--domain-identifier') + 1] == BUNDLE_ID
 
@@ -104,6 +132,8 @@ def published_library(root, ident='07c1dddbdc684968b69199ad4f32e86b', cover=True
     (episode / 'output.mp3').write_bytes(b'mp3')
     if cover:
         (episode / 'cover.jpg').write_bytes(b'jpg')
+    for name in RENDER_FILES:
+        (episode / name).write_text('{}', encoding='utf-8')
     (episode / 'episode.json').write_text(json.dumps({'id': ident, 'title': '马克·库班 · The Diary Of A CEO', 'created_at': '2026-10-27T00:00:00+00:00', 'file': 'output.mp3'}), encoding='utf-8')
     (library / 'library.json').write_text(json.dumps({'episodes': [{'id': ident}]}), encoding='utf-8')
     return library, episode
@@ -137,24 +167,48 @@ class PushTests(unittest.TestCase):
             (episode / '.output.mp3.123.partial').write_bytes(b'x')
             names = [destination for _, destination in episode_files(episode)]
             ident = episode.name
-            self.assertEqual(names, [f'episodes/{ident}/output.mp3', f'episodes/{ident}/cover.jpg', f'episodes/{ident}/episode.json'])
+            self.assertEqual(names, [f'episodes/{ident}/{name}' for name in EPISODE_RESOURCES])
 
-    def test_copies_episode_then_library_into_app_documents(self):
+    def test_backup_then_episode_resources_then_injected_atomic_commit(self):
         with tempfile.TemporaryDirectory() as root:
             library, episode = published_library(root)
             fake = FakeDevicectl([WIRED])
-            summary = push_episodes([episode], library, runner=fake)
+            original = fake.index
+            summary = push_episodes([episode], library, runner=fake, backup_root=Path(root) / 'backups',
+                                    atomic_commit=fake.atomic_commit)
             self.assertTrue(summary['ok'])
+            self.assertEqual(Path(summary['devices'][0]['backup']).read_bytes(), original)
+            self.assertEqual(fake.events, [*PUSH_EVENTS, 'read-commit'])
+            self.assertCountEqual(json.loads(fake.index)['episodes'], [
+                {'id': 'phone-only', 'show': 'Existing Show'}, {'id': episode.name},
+            ])
             ident = episode.name
             self.assertEqual([copy[2] for copy in fake.copies], [
-                f'{DEVICE_LIBRARY}/episodes/{ident}/output.mp3',
-                f'{DEVICE_LIBRARY}/episodes/{ident}/cover.jpg',
-                f'{DEVICE_LIBRARY}/episodes/{ident}/episode.json',
-                f'{DEVICE_LIBRARY}/library.json',
+                f'{DEVICE_LIBRARY}/episodes/{ident}/{name}' for name in EPISODE_RESOURCES
             ])
             self.assertTrue(DEVICE_LIBRARY.startswith('Documents/'))
             self.assertTrue(all(copy[0] == 'AAAA-WIRED' for copy in fake.copies))
             self.assertGreater(fake.copies[0][3], fake.copies[-1][3])
+
+    def test_snapshot_mismatch_never_reports_index_committed(self):
+        with tempfile.TemporaryDirectory() as root:
+            library, episode = published_library(root)
+            fake = FakeDevicectl([WIRED])
+            original = fake.index
+            moved_index = b'{"episodes":[{"id":"phone-new"}]}'
+
+            def reject_stale_snapshot(device, merged, expected):
+                self.assertEqual(expected, original)
+                fake.index = moved_index
+                return fake.atomic_commit(device, merged, expected)
+
+            summary = push_episodes([episode], library, runner=fake, backup_root=Path(root) / 'backups',
+                                    atomic_commit=reject_stale_snapshot)
+            self.assertFalse(summary['ok'])
+            self.assertIn('snapshot changed', summary['reason'])
+            self.assertEqual(fake.index, moved_index)
+            self.assertEqual(Path(summary['devices'][0]['backup']).read_bytes(), original)
+            self.assertEqual(fake.events, PUSH_EVENTS)
 
     def test_no_device_is_soft(self):
         with tempfile.TemporaryDirectory() as root:
@@ -178,16 +232,24 @@ class PushTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             library, episode = published_library(root)
             fake = FakeDevicectl([WIRED], installed=None)
-            self.assertTrue(push_episodes([episode], library, runner=fake)['ok'])
+            summary = push_episodes([episode], library, runner=fake, backup_root=Path(root) / 'backups',
+                                    atomic_commit=fake.atomic_commit)
+            self.assertTrue(summary['ok'])
+            self.assertEqual(fake.events, [*PUSH_EVENTS, 'read-commit'])
 
     def test_copy_failure_stops_before_listing_that_episode(self):
         with tempfile.TemporaryDirectory() as root:
             library, episode = published_library(root)
             fake = FakeDevicectl([WIRED], fail_copy='output.mp3')
-            summary = push_episodes([episode], library, runner=fake)
+            original = fake.index
+            summary = push_episodes([episode], library, runner=fake, backup_root=Path(root) / 'backups',
+                                    atomic_commit=fake.atomic_commit)
             self.assertFalse(summary['ok'])
             self.assertIn('locked', summary['reason'])
             self.assertEqual(fake.copies, [])
+            self.assertEqual(fake.events, ['backup'])
+            self.assertEqual(fake.index, original)
+            self.assertEqual(Path(summary['devices'][0]['backup']).read_bytes(), original)
 
     def test_episode_without_audio_is_not_pushed(self):
         with tempfile.TemporaryDirectory() as root:
@@ -234,20 +296,60 @@ class HookTests(unittest.TestCase):
         (job / 'output.mp3').write_bytes(b'full-audio')
         return job
 
+    def render_fixture(self, job):
+        from studio_engine import fingerprint, sha256_file
+
+        config = {'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=MM-C3JqCXBk'},
+                  'expected_speakers': 1}
+        doc = {'segments': [{'id': 'seg-000001', 'speaker_id': 'host', 'start_ms': 0, 'end_ms': 1000}],
+               'speakers': {'host': {'voice_slot': 'male_1'}}}
+        lock = job / 'source-identity.json'
+        fixture = {
+            'config.json': config,
+            'document.json': doc,
+            lock.name: {**config['source'], 'sha256': 'a' * 64, 'bytes': 100, 'duration_ms': 1000},
+        }
+        for name, data in fixture.items():
+            (job / name).write_text(json.dumps(data), encoding='utf-8')
+        mp3 = job / 'output.mp3'
+        if mp3.exists():
+            (job / 'render-identity.json').write_text(json.dumps({
+                'schema_version': 1, 'sample_rate': 24000,
+                'audio_sha256': sha256_file(mp3), 'document_sha256': fingerprint(doc),
+                'source_identity_sha256': sha256_file(lock),
+                'timeline': [{'id': 'seg-000001', 'start_frame': 0, 'end_frame': 24000}],
+            }), encoding='utf-8')
+        return config
+
     def test_after_publish_records_status_and_never_raises(self):
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
             job = self.make_job(root)
-            with patch('studio_publish_icloud.shutil.which', return_value=None), patch('studio_artwork.download_image', return_value=None):
+            self.render_fixture(job)
+            with (
+                patch('studio_publish_icloud.probe_duration_sec', return_value=1.0),
+                patch('studio_artwork.attach_cover', return_value=None),
+            ):
                 result = publish_job(job, library)
             fake = FakeDevicectl([WIRED])
             lines = []
-            with patch.dict(os.environ, {'PRIVATE_LISTEN_DEVICE_PUSH': '1'}), patch.object(studio_push_iphone, 'devicectl_available', return_value=True):
+            original = fake.index
+            with (
+                patch.dict(os.environ, {'PRIVATE_LISTEN_DEVICE_PUSH': '1'}),
+                patch.object(studio_push_iphone, 'devicectl_available', return_value=True),
+                patch.object(Path, 'home', return_value=Path(root)),
+            ):
                 summary = push_after_publish(result, job, runner=fake, announce=lambda text, **_: lines.append(text))
-            self.assertTrue(summary['ok'])
-            self.assertIn('不取经的小刘', lines[0])
+            self.assertFalse(summary['ok'])
+            self.assertTrue(summary['staged'])
+            self.assertIn('等待 App 前台校验和提交', lines[0])
             status = json.loads((job / STATUS_NAME).read_text(encoding='utf-8'))
-            self.assertTrue(status['ok'])
-            self.assertIn(f'{DEVICE_LIBRARY}/library.json', [copy[2] for copy in fake.copies])
+            self.assertFalse(status['ok'])
+            self.assertTrue(status['staged'])
+            self.assertEqual(Path(status['devices'][0]['backup']).read_bytes(), original)
+            self.assertEqual(fake.index, original)
+            self.assertEqual(fake.events[0], 'backup')
+            self.assertTrue(all(target.startswith('Documents/.push-staging/') for _, _, target, _ in fake.copies))
+            self.assertTrue(fake.copies[-1][2].endswith('/ready'))
             self.assertTrue(json.loads((job / 'private-listen.json').read_text(encoding='utf-8'))['ok'])
 
             def explode(command, timeout):
@@ -273,11 +375,10 @@ class HookTests(unittest.TestCase):
         from studio_engine import StudioEngine
         with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as library:
             engine = StudioEngine(Path(root) / '07c1dddbdc684968b69199ad4f32e86b')
-            (engine.job / 'document.json').write_text('{}', encoding='utf-8')
             (engine.job / 'state.json').write_text(json.dumps({'title': '马克·库班'}), encoding='utf-8')
             mp3 = engine.job / 'output.mp3'
             mp3.write_bytes(b'full-audio')
-            config = {'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=MM-C3JqCXBk'}}
+            config = self.render_fixture(engine.job)
             seen = []
 
             def fake_push(result, job_dir, **_):
@@ -285,7 +386,12 @@ class HookTests(unittest.TestCase):
                 seen.append((progress['stage'], result['id']))
                 raise RuntimeError('cable pulled')
 
-            with patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}), patch.object(engine, 'render', return_value=mp3), patch('studio_push_iphone.push_after_publish', side_effect=fake_push):
+            with (
+                patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}),
+                patch.object(engine, 'render', return_value=mp3),
+                patch('studio_publish_icloud.probe_duration_sec', return_value=1.0),
+                patch('studio_push_iphone.push_after_publish', side_effect=fake_push),
+            ):
                 self.assertEqual(engine.run(config, 'render'), mp3)
             self.assertEqual(seen, [('complete', engine.job.name)])
             self.assertTrue(json.loads((engine.job / 'private-listen.json').read_text(encoding='utf-8'))['ok'])
@@ -294,26 +400,42 @@ class HookTests(unittest.TestCase):
         from studio_engine import StudioEngine
         with tempfile.TemporaryDirectory() as root:
             engine = StudioEngine(Path(root) / 'job-preview')
-            (engine.job / 'document.json').write_text('{}', encoding='utf-8')
             preview = engine.job / 'preview.mp3'
             preview.write_bytes(b'preview')
-            config = {'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=MM-C3JqCXBk'}}
+            config = self.render_fixture(engine.job)
             with patch.object(engine, 'render', return_value=preview), patch('studio_push_iphone.push_after_publish') as push:
                 engine.run(config, 'render', preview=2)
             push.assert_not_called()
 
-    def test_server_retry_pushes_after_successful_publish(self):
-        from studio_server import Studio
+    def test_server_does_not_publish_or_push_missing_receipt_after_engine_exit(self):
+        from studio_server import Studio, write
         with tempfile.TemporaryDirectory() as jobs, tempfile.TemporaryDirectory() as library:
-            studio = Studio(jobs)
-            job = Path(jobs) / 'abc123'
-            job.mkdir()
-            (job / 'output.mp3').write_bytes(b'audio')
-            with patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}), patch('studio_push_iphone.push_after_publish') as push, redirect_stdout(io.StringIO()):
-                studio.retry_private_listen(job)
-            push.assert_called_once()
-            self.assertEqual(push.call_args.args[0]['id'], 'abc123')
-            self.assertEqual(Path(push.call_args.args[1]), job)
+            for exit_code in (0, 1):
+                with self.subTest(exit_code=exit_code):
+                    studio = Studio(jobs, engine=['/bin/true'], recover=False)
+                    ident = f'job-{exit_code}'
+                    job = Path(jobs) / ident
+                    job.mkdir()
+                    write(job / 'state.json', {'status': 'queued', 'action': 'render'})
+                    (job / 'output.mp3').write_bytes(b'old or independently rendered fixture audio')
+
+                    def finish(_):
+                        studio.stop = True
+                        return exit_code, False
+
+                    with (
+                        patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}),
+                        patch('studio_server.subprocess.Popen') as launch,
+                        patch('studio_server.wait_for_engine', side_effect=finish),
+                        patch('studio_publish_icloud.publish_job') as publish,
+                        patch('studio_push_iphone.push_after_publish') as push,
+                    ):
+                        studio.worker()
+                    command = launch.call_args.args[0]
+                    self.assertEqual(command[command.index('--publish-library') + 1], str(Path(library).resolve()))
+                    publish.assert_not_called()
+                    push.assert_not_called()
+                    self.assertFalse((Path(library) / 'library.json').exists())
 
     def test_cli_publish_offers_device_copy_unless_disabled(self):
         from studio_publish_icloud import main
@@ -328,20 +450,30 @@ class HookTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
-    def test_all_pushes_every_library_episode(self):
+    def test_all_stages_every_library_episode_and_leaves_catalog_for_app(self):
         with tempfile.TemporaryDirectory() as root:
             library, _ = published_library(root, 'job-a')
-            second = library / 'episodes' / 'job-b'
-            second.mkdir()
-            (second / 'output.mp3').write_bytes(b'mp3')
+            published_library(root, 'job-b', cover=False)
+            (library / 'library.json').write_text('{"episodes":[{"id":"job-a"},{"id":"job-b"}]}')
             fake = FakeDevicectl([WIRED])
-            with patch.object(studio_push_iphone, 'devicectl_available', return_value=True), redirect_stdout(io.StringIO()):
+            original = fake.index
+            stdout = io.StringIO()
+            with (
+                patch.object(studio_push_iphone, 'devicectl_available', return_value=True),
+                patch.object(studio_push_iphone, 'push_episodes', wraps=push_episodes) as push,
+                patch.object(Path, 'home', return_value=Path(root)),
+                redirect_stdout(stdout),
+            ):
                 code = studio_push_iphone.main(['--all', '--library', str(library)], runner=fake)
             self.assertEqual(code, 0)
-            copied = [copy[2] for copy in fake.copies]
-            self.assertIn(f'{DEVICE_LIBRARY}/episodes/job-a/output.mp3', copied)
-            self.assertIn(f'{DEVICE_LIBRARY}/episodes/job-b/output.mp3', copied)
-            self.assertEqual(copied[-1], f'{DEVICE_LIBRARY}/library.json')
+            self.assertIn('等待 App 前台校验和提交', stdout.getvalue())
+            push.assert_called_once_with(None, library, runner=fake, backup_root=None, atomic_commit=None)
+            manifest_path = next(path for path in fake.assets if path.endswith('/manifest.json'))
+            self.assertEqual([item['id'] for item in json.loads(fake.assets[manifest_path])['packages']],
+                             ['job-a', 'job-b'])
+            self.assertEqual(fake.events[0], 'backup')
+            self.assertTrue(fake.copies[-1][2].endswith('/ready'))
+            self.assertEqual(fake.index, original)
 
     def test_bad_episode_id_is_rejected(self):
         with redirect_stderr(io.StringIO()):

@@ -1,16 +1,17 @@
 import Foundation
 
 /// Rules for 资料库「继续播放」.
-/// The rail reads ListenMark only (seconds, finished, swipe-dismiss). It does not
+/// The rail reads saved progress and swipe-dismiss state. It does not
 /// follow the 「听这段」 playhead. `PlayerModel` still refuses to write ListenMark
 /// while a clip is active; `record` repeats that gate so the probe can lock it.
-/// The default rail is one card: the latest unfinished episode whose playhead moved,
+/// The rail is one card: the latest unfinished listen or saved replay cursor,
 /// including a short play under the 5s 「在听」chip.
 enum ContinueListening {
     struct Mark: Equatable {
         var seconds: Double
         var finished: Bool
         var touchedAt: TimeInterval
+        var replaySeconds: Double? = nil
     }
 
     struct Item: Equatable, Identifiable {
@@ -25,8 +26,8 @@ enum ContinueListening {
     /// continue tap seeks back to ListenMark. Wider than the 5s progress checkpoint
     /// so ordinary playback still toggles, while a jump (听这段) seeks back.
     static let resumeTolerance = 8.0
-    /// One resume card. Most recently touched unfinished episode wins.
-    /// Swipe-dismiss still only hides that card; the next unfinished one can take the slot.
+    /// One resume card. Most recently touched eligible episode wins.
+    /// Swipe-dismiss still only hides that card; the next eligible one can take the slot.
     static let displayLimit = 1
     /// Playhead must have moved. Zero does not steal the slot (open and leave
     /// before any audio). This is not the 5s 「在听」chip; a few seconds count.
@@ -50,7 +51,7 @@ enum ContinueListening {
         return true
     }
 
-    /// Unfinished, playhead moved, not swipe-dismissed.
+    /// A positive unfinished playhead or an explicit replay cursor, unless swipe-dismissed.
     /// Most recently touched first. Unknown touch time sinks below dated marks.
     /// Under 5 seconds still qualifies; `LibraryStore.isInProgress` keeps the 5s chip.
     static func items(
@@ -62,13 +63,14 @@ enum ContinueListening {
         let cap = max(0, limit)
         let ranked = marks.compactMap { id, mark -> Item? in
             guard !dismissed.contains(id) else { return nil }
-            guard mark.seconds.isFinite, mark.seconds > minimumPlayedSeconds, !mark.finished else { return nil }
+            let seconds = mark.finished ? (mark.replaySeconds ?? 0) : mark.seconds
+            guard seconds.isFinite, seconds > minimumPlayedSeconds else { return nil }
             let duration = durations[id] ?? 0
-            let remaining: Double? = duration > 1 ? max(0, duration - mark.seconds) : nil
-            let fraction: Double? = duration > 1 ? min(1, max(0, mark.seconds / duration)) : nil
+            let remaining: Double? = duration > 1 ? max(0, duration - seconds) : nil
+            let fraction: Double? = duration > 1 ? min(1, max(0, seconds / duration)) : nil
             return Item(
                 id: id,
-                seconds: mark.seconds,
+                seconds: seconds,
                 remaining: remaining,
                 fraction: fraction,
                 touchedAt: mark.touchedAt
@@ -115,7 +117,7 @@ enum ContinueListening {
         !clipSuppressListenMark
     }
 
-    /// Mirrors `LibraryStore.reducing` finished rule (within 15s of the end).
+    /// Models the unfinished point-listen rule (within 15s of the end).
     /// When `clipSuppressListenMark` is true the map is returned unchanged.
     static func record(
         marks: [String: Mark],
@@ -219,5 +221,26 @@ enum ContinueListening {
             return String(format: "%d:%02d:%02d", hours, minutes, secs)
         }
         return String(format: "%d:%02d", minutes, secs)
+    }
+}
+
+/// Arm on transport start, after any seek has landed. A loaded or scrubbed
+/// playhead only becomes a checkpoint once playback advances the live clock.
+struct PodcastProgressGate {
+    private var playbackStart: Double?
+    private(set) var allowsCheckpoint = false
+
+    mutating func beginPlayback(at seconds: Double) {
+        guard !allowsCheckpoint, playbackStart == nil, seconds.isFinite, seconds >= 0 else { return }
+        playbackStart = seconds
+    }
+
+    mutating func reset() { self = Self() }
+
+    mutating func observe(seconds: Double) -> Bool {
+        if allowsCheckpoint { return true }
+        guard let playbackStart, seconds.isFinite, seconds > playbackStart + 0.01 else { return false }
+        allowsCheckpoint = true
+        return true
     }
 }
