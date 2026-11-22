@@ -248,10 +248,11 @@ enum LibrarySnapshotChecks {
         try expect(oldHandle.readToEnd() == Data("legacy audio".utf8), "open old playback handle keeps old bytes")
         try expect(Data(contentsOf: old.audioURL) == Data("legacy audio".utf8), "old URL remains reusable")
         try expect(Data(contentsOf: oldText) == Data("legacy transcript".utf8), "previous path remains immutable")
-        try expect(store.resumeSeconds(for: id) == 0 && store.continueEntries(in: store.episodes).isEmpty,
-                   "reset_unmapped has no inherited progress")
+        let adoptedContinue = store.continueEntries(in: store.episodes).first
+        try expect(store.resumeSeconds(for: id) == 51 && adoptedContinue?.id == id && adoptedContinue?.seconds == 51,
+                   "the first revision adopts the bare-ID mark and appears in Continue")
         store.remember(episode: old, seconds: 66, duration: 120, finished: false)
-        try expect(store.resumeSeconds(for: new) == 0 && store.resumeSeconds(for: old) == 66,
+        try expect(store.resumeSeconds(for: new) == 51 && store.resumeSeconds(for: old) == 66,
                    "outgoing playback callback cannot overwrite new progress")
         store.remember(episode: new, seconds: 9, duration: 120, finished: false)
         let reopened = LibraryStore(defaults: defaults, loadLibraryOnInit: false, documentsDirectory: scratch)
