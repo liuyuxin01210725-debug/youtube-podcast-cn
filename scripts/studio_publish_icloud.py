@@ -850,6 +850,42 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
     return final, row
 
 
+
+def _require_audio_preflight(src, job):
+    """Default path to publish-ready: run ffmpeg preflight and refuse BLOCK/REVIEW."""
+    from shengjian_audio_preflight import refuse_if_blocked_or_review, run_preflight, PreflightError
+    report = run_preflight(src, output_dir=Path(job) / 'preflight')
+    try:
+        refuse_if_blocked_or_review(report)
+    except PreflightError as error:
+        raise PublishError(str(error)) from error
+    return report
+
+
+def _snapshot_library_or_refuse(library):
+    from shengjian_library_snapshot import SnapshotError, snapshot
+    dest = Path(tempfile.mkdtemp(prefix='.shengjian-pub-snap-', dir=str(Path(library).parent)))
+    dest.rmdir()
+    try:
+        return snapshot(dest, library=library, label='publish_job')
+    except SnapshotError as error:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        raise PublishError(f'备份失败，拒绝合并: {error}') from error
+
+
+def _restore_library_snapshot(snap, library):
+    if not snap:
+        return
+    from shengjian_library_snapshot import restore
+    restore(snap, library=library, measure=True)
+
+
+def _discard_library_snapshot(snap):
+    if snap and Path(snap).exists():
+        shutil.rmtree(snap, ignore_errors=True)
+
+
 def publish_job(job_dir, library_root=None) -> dict:
     """Publish a staged render. A same-ID revision only switches the catalog."""
     job = Path(job_dir).expanduser().resolve()
@@ -868,11 +904,19 @@ def publish_job(job_dir, library_root=None) -> dict:
         library.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise PublishError(f'无法创建 iCloud 资料库：{error}') from error
+    _require_audio_preflight(src, job)
+    snap = _snapshot_library_or_refuse(library)
     try:
-        with original_pending.library_lock(library):
-            episode_dir, record = _publish_job_locked(job, src, library)
-    except (OSError, original_pending.IntakeError) as error:
-        raise PublishError(f'写入节目清单失败：{error}') from error
+        try:
+            with original_pending.library_lock(library):
+                episode_dir, record = _publish_job_locked(job, src, library)
+        except (OSError, original_pending.IntakeError) as error:
+            raise PublishError(f'写入节目清单失败：{error}') from error
+    except Exception:
+        _restore_library_snapshot(snap, library)
+        raise
+    finally:
+        _discard_library_snapshot(snap)
     try:
         record_status(job, ok=True, episode_dir=str(episode_dir), episode_id=job_id)
     except OSError:

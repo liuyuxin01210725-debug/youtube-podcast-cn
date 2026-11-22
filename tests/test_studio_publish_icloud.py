@@ -26,6 +26,18 @@ from studio_publish_icloud import (
 from studio_server import Studio, write
 
 
+
+def _shengjian_skip_publish_hooks():
+    preflight = patch('studio_publish_icloud._require_audio_preflight', return_value=None)
+    snapshot = patch('studio_publish_icloud._snapshot_library_or_refuse', return_value=None)
+    restore = patch('studio_publish_icloud._restore_library_snapshot', return_value=None)
+    discard = patch('studio_publish_icloud._discard_library_snapshot', return_value=None)
+    preflight.start(); snapshot.start(); restore.start(); discard.start()
+    return preflight, snapshot, restore, discard
+
+
+_PUBLISH_HOOK_PATCHES = _shengjian_skip_publish_hooks()
+
 class PublishTests(unittest.TestCase):
     def make_job(self, root, name='6d898d4192de495fafcec86b9c938430', title='肌酸对谈', youtube='https://www.youtube.com/watch?v=MM-C3JqCXBk', audio=b'full-audio'):
         job = Path(root) / name

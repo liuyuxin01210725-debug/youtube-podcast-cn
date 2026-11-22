@@ -50,5 +50,9 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>GIT_SHORT_SHA</key>
+	<string>$(GIT_SHORT_SHA)</string>
+	<key>BUILD_TIMESTAMP</key>
+	<string>$(BUILD_TIMESTAMP)</string>
 </dict>
 </plist>

@@ -1,9 +1,9 @@
 PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
 .PHONY: test test-public test-podcast test-translation-offline test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books shengjian-source-gate shengjian-before-claim-ready
-.PHONY: shengjian-require-remote-tip
+.PHONY: shengjian-require-remote-tip shengjian-sign-iphoneos shengjian-build-gate test-shengjian-build-audio
 
-test: test-public test-podcast test-translation-offline test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books shengjian-source-gate
+test: test-public test-podcast test-translation-offline test-tts test-extract-display test-continue-ux test-point-listen test-player-listen-note-ui test-books test-shengjian-build-audio shengjian-source-gate
 	@$(PYTHON) -m unittest tests.test_studio_server tests.test_studio_inbox tests.test_studio_books tests.test_studio_ads tests.test_studio_progress tests.test_studio_push_iphone tests.test_studio_lenses tests.test_studio_articles tests.test_studio_extract
 	@$(PYTHON) -m unittest tests.test_shengjian_remote_tip
 	@bash -n install.sh bin/podcast-cn.sh bin/setup-podcast-diarization.sh bin/setup-podcast-model.sh bin/setup-podcast-deepseek.sh bin/setup-podcast-qwen.sh bin/tts-cn.sh bin/setup-studio.sh bin/中文播客工作台.command
@@ -191,3 +191,16 @@ test-book-preinstall:
 	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/shengjian-preinstall.XXXXXX") && \
 	swiftc -parse-as-library ios/PrivateListen/PrivateListen/BookProgress.swift ios/PrivateListen/PrivateListen/BookStore.swift ios/PrivateListen/PrivateListenTests/BookPreinstallJourneys.swift -o "$$tmp/journeys" && \
 	"$$tmp/journeys" "$(BOOK_JOURNEY_PACKAGE)" "$(BOOK_JOURNEY_DRAFT)" "$$tmp/data"
+
+
+# 声间官方 iphoneos 签包入口。必须走门禁：干净工作区 + 安全分支远端 tip。
+# 不更新 dist/CURRENT。OUTPUT 必须是隔离目录。
+shengjian-build-gate:
+	@$(PYTHON) scripts/shengjian_build_gate.py --cwd .
+
+shengjian-sign-iphoneos:
+	@test -n "$(OUTPUT)" || (echo "Set OUTPUT to an isolated directory; this entry never writes CURRENT" >&2; exit 2)
+	@$(PYTHON) scripts/shengjian_sign_iphoneos.py --output "$(OUTPUT)" --cwd . $(if $(EXPECTED_SHA),--expected-sha $(EXPECTED_SHA),)
+
+test-shengjian-build-audio:
+	@$(PYTHON) -m unittest tests.test_shengjian_build_gate tests.test_shengjian_sign_iphoneos tests.test_shengjian_library_snapshot tests.test_shengjian_audio_preflight tests.test_shengjian_publish_hooks

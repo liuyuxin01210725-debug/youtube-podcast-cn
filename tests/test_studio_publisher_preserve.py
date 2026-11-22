@@ -10,6 +10,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import studio_publish_icloud as publisher
 
 
+@pytest.fixture(autouse=True)
+def _shengjian_skip_publish_hooks(monkeypatch):
+    monkeypatch.setattr(publisher, '_require_audio_preflight', lambda *a, **k: None)
+    monkeypatch.setattr(publisher, '_snapshot_library_or_refuse', lambda *a, **k: None)
+    monkeypatch.setattr(publisher, '_restore_library_snapshot', lambda *a, **k: None)
+    monkeypatch.setattr(publisher, '_discard_library_snapshot', lambda *a, **k: None)
+
+
 def write_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False), encoding='utf-8')
 

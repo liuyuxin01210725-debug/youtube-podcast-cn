@@ -17,6 +17,7 @@ struct LibraryView: View {
     @State private var picking = false
     @State private var pickingBook = false
     @State private var showExtractDesign = false
+    @State private var showAbout = false
     @State private var filter: LibraryShelf.Chip = LibraryShelf.defaultChip
     @State private var searchText = ""
     @State private var searchPresented = false
@@ -79,6 +80,7 @@ struct LibraryView: View {
                         Button(library.hasCloudFolder ? "重新选择资料库" : "选择资料库") {
                             picking = true
                         }
+                        Button("关于") { showAbout = true }
                     } label: {
                         Image(systemName: "ellipsis.circle")
                     }
@@ -160,6 +162,16 @@ struct LibraryView: View {
             #endif
             .navigationDestination(isPresented: $showExtractDesign) {
                 ExtractDesignView()
+            }
+            .sheet(isPresented: $showAbout) {
+                NavigationStack {
+                    AboutBuildStampView()
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("完成") { showAbout = false }
+                            }
+                        }
+                }
             }
         }
     }
