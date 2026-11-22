@@ -1,6 +1,11 @@
 import Foundation
 
 struct Episode: Identifiable, Hashable {
+    enum UnavailableReason: String {
+        case audio = "当前音轨缺失或校验失败"
+        case revision = "节目版本无法验证"
+    }
+
     var id: String
     var title: String
     /// Explicit show from library.json when present.
@@ -17,6 +22,7 @@ struct Episode: Identifiable, Hashable {
     var pendingTranscript: PendingTranscriptReference?
     var mediaRevision: String? = nil
     var revisionFiles: Set<String>? = nil
+    var unavailableReason: UnavailableReason? = nil
 
     func publishedAsset(_ name: String) -> URL? {
         guard revisionFiles?.contains(name) != false else { return nil }
@@ -67,7 +73,7 @@ struct Episode: Identifiable, Hashable {
     }
 
     var isPlayableNow: Bool {
-        !downloading && LocalAudio.isPlayable(audioURL)
+        unavailableReason == nil && !downloading && LocalAudio.isPlayable(audioURL)
     }
 
     /// Effective lens ids: JSON first, else catalog match on owned content.

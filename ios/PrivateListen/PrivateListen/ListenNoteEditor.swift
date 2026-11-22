@@ -7,6 +7,7 @@ struct ListenNoteEditor: UIViewRepresentable {
     @Binding var text: String
     /// Bumped when the episode (or a freshly loaded body) should reveal the end.
     var revealEndToken: Int
+    var isEditable = true
     var onEditingChanged: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator {
@@ -29,12 +30,14 @@ struct ListenNoteEditor: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 4
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.accessibilityLabel = "听后感"
+        view.isEditable = isEditable
         view.text = text
         return view
     }
 
     func updateUIView(_ uiView: UITextView, context: Context) {
         context.coordinator.parent = self
+        uiView.isEditable = isEditable
         let coordinator = context.coordinator
 
         if coordinator.appliedRevealToken != revealEndToken {

@@ -122,6 +122,11 @@ struct LibraryView: View {
             .onChange(of: library.episodes.map(\.id)) { _, _ in
                 sanitizeFilter()
             }
+            .onReceive(library.$episodes) { episodes in
+                guard let current = player.currentEpisode, current.unavailableReason == nil,
+                      let unavailable = episodes.first(where: { $0.id == current.id && $0.unavailableReason != nil }) else { return }
+                player.open(unavailable, resumeAt: library.resumeSeconds(for: unavailable), force: true, autoplay: false)
+            }
             .task(id: scenePhase) {
                 guard scenePhase == .active else { return }
                 while !Task.isCancelled {
@@ -501,7 +506,8 @@ struct LibraryView: View {
     }
 
     private var miniEpisode: Episode? {
-        player.currentEpisode
+        guard let current = player.currentEpisode, current.unavailableReason == nil else { return nil }
+        return current
     }
 
     private var miniFraction: Double? {
@@ -513,6 +519,7 @@ struct LibraryView: View {
 
     /// Continue pill uses ListenMark. If 「听这段」 left the playhead elsewhere, seek back.
     private func playFromLibrary(_ episode: Episode) {
+        guard episode.unavailableReason == nil else { return }
         library.acknowledgeContinue(episode)
         let resumeAt = library.resumeSeconds(for: episode)
         guard episode.isPlayableNow else {
@@ -582,6 +589,7 @@ struct LibraryView: View {
     }
 
     private func rowSecondary(_ episode: Episode) -> String {
+        if let unavailable = episode.unavailableReason { return unavailable.rawValue }
         let remaining: String?
         if library.isInProgress(episode.id), let duration = episode.durationSec, duration > 1 {
             remaining = ContinueListening.remainingLabel(

@@ -121,15 +121,23 @@ private struct PointListenRows: View {
                 .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
             }
         }
-        .task(id: Source(packet: packet, url: episode.audioURL)) { await verify() }
+        .task(id: Source(packet: packet, url: episode.audioURL, indexURL: indexURL)) { await verify() }
     }
 
     private struct Source: Hashable {
         let packet: ExtractionPacket
         let url: URL
+        let indexURL: URL?
+    }
+
+    private var indexURL: URL? {
+        guard episode.unavailableReason == nil else { return nil }
+        return episode.publishedAsset(PointListening.indexFileName)
     }
 
     private func refusal(_ row: ListenViewpoint) -> String? {
+        if let unavailable = episode.unavailableReason { return unavailable.rawValue }
+        guard indexURL != nil else { return "尚无成片绑定索引" }
         if let audio, !audio.isCurrent { return "成片已变化，请重新打开本集核对" }
         return PointListening.refusal(row: row, index: index, packet: packet, episodeID: episode.id,
             audioHash: audio?.sha256, duration: audio?.duration ?? 0)
@@ -139,7 +147,7 @@ private struct PointListenRows: View {
     private func verify() async {
         index = nil
         audio = nil
-        guard let url = episode.publishedAsset(PointListening.indexFileName),
+        guard let url = indexURL,
               FileManager.default.fileExists(atPath: url.path) else {
             verificationText = "尚无成片绑定索引，以下仅供阅读。"
             return

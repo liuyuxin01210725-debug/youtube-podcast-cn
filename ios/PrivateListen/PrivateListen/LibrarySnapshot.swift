@@ -1,4 +1,5 @@
 import CryptoKit
+import CoreFoundation
 import Foundation
 
 /// The catalog owns membership and metadata. The revision manifest binds its
@@ -7,25 +8,55 @@ struct LibrarySnapshot {
     let records: [EpisodeRecord]
     let object: [String: Any]
     let rows: [[String: Any]]
+    let invalidRevisionIDs: Set<String>
 
-    init(_ data: Data) throws {
+    init(_ data: Data, allowInvalidRevisions: Bool = false) throws {
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let rows = object["episodes"] as? [[String: Any]] else {
             throw LibrarySnapshotError.invalidCatalog
         }
-        let records = try JSONDecoder.privateListen().decode(EpisodeLibrary.self, from: data).episodes
+        if object["schema"] != nil || object["generation"] != nil {
+            guard object["schema"] as? String == PushStaging.schema,
+                  let number = object["generation"] as? NSNumber,
+                  CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  let generation = number as? Int, generation > 0 else {
+                throw LibrarySnapshotError.invalidCatalog
+            }
+        }
+        let decoder = JSONDecoder.privateListen()
+        var records: [EpisodeRecord]
+        do {
+            records = try decoder.decode(EpisodeLibrary.self, from: data).episodes
+        } catch where allowInvalidRevisions {
+            // Decode the catalog metadata separately so an ill-typed revision
+            // field can disable its own episode without hiding the shelf.
+            records = try rows.map { row in
+                var fields = row
+                let raw = fields.removeValue(forKey: "media_revision")
+                var record = try decoder.decode(EpisodeRecord.self, from: Self.json(fields))
+                if let raw, let revision = raw as? [String: Any] {
+                    record.mediaRevision = try? decoder.decode(MediaRevision.self, from: Self.json(revision))
+                }
+                return record
+            }
+        }
         var seen: Set<String> = []
+        var invalidRevisionIDs: Set<String> = []
         for (record, row) in zip(records, rows) {
             guard let id = record.catalogID, EpisodeID.isSafe(id), seen.insert(id).inserted,
-                  record.file == nil || record.file == "output.mp3",
-                  (row["media_revision"] == nil ? record.mediaRevision == nil : record.mediaRevision?.isValid(for: id) == true),
-                  record.mediaRevision == nil || record.pendingReference(for: id) == nil else {
+                  record.file == nil || record.file == "output.mp3" else {
                 throw LibrarySnapshotError.invalidCatalog
+            }
+            if row["media_revision"] != nil,
+               record.mediaRevision?.isValid(for: id) != true || record.pendingReference(for: id) != nil {
+                guard allowInvalidRevisions else { throw LibrarySnapshotError.invalidCatalog }
+                invalidRevisionIDs.insert(id)
             }
         }
         self.records = records
         self.object = object
         self.rows = rows
+        self.invalidRevisionIDs = invalidRevisionIDs
     }
 
     func preservingExtensions(from current: LibrarySnapshot?) throws -> Data {
@@ -91,6 +122,9 @@ private struct EpisodeLibrary: Decodable {
 }
 
 struct MediaRevision: Decodable {
+    static let requiredFiles: Set<String> = [
+        "output.mp3", "document.json", "source-identity.json", "render-identity.json", "episode.json"
+    ]
     let sha256: String
     let path: String
     let previousPath: String
@@ -111,8 +145,7 @@ struct MediaRevision: Decodable {
         guard EpisodeID.isRevisionDigest(sha256), (path == prefix + sha256 || path == objectPath),
               previousOK,
               resumePolicy == "reset_unmapped",
-              Set(["output.mp3", "document.json", "source-identity.json", "render-identity.json", "episode.json"])
-                .isSubset(of: files.keys),
+              Self.requiredFiles.isSubset(of: files.keys),
               files.allSatisfy({ name, hash in
                   !name.hasPrefix(".") && !name.isEmpty &&
                   name.utf8.allSatisfy { (45...46).contains($0) || (48...57).contains($0)
@@ -127,19 +160,25 @@ struct MediaRevision: Decodable {
     }
 
     @MainActor
-    func validateAssets(in folder: URL, downloading: Bool, verifier: RevisionAssetVerifier) throws {
+    func verifiedFiles(in folder: URL, downloading: Bool, verifier: RevisionAssetVerifier,
+                       allowMissing: Bool) throws -> Set<String> {
         if downloading {
             try? FileManager.default.startDownloadingUbiquitousItem(at: folder)
         }
-        let assets = try files.map { name, digest in (try LibrarySnapshot.path(name, in: folder), digest) }
-        if downloading {
-            for (asset, _) in assets where !LocalAudio.isPlayable(asset) {
-                try? FileManager.default.startDownloadingUbiquitousItem(at: asset)
+        var verified = Set<String>()
+        for (name, digest) in files {
+            do {
+                let asset = try LibrarySnapshot.path(name, in: folder)
+                if downloading && !LocalAudio.isPlayable(asset) {
+                    try? FileManager.default.startDownloadingUbiquitousItem(at: asset)
+                }
+                try verifier.validate(asset, digest: digest)
+                verified.insert(name)
+            } catch where allowMissing {
+                continue
             }
         }
-        for (asset, digest) in assets {
-            try verifier.validate(asset, digest: digest)
-        }
+        return verified
     }
 }
 

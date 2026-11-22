@@ -36,7 +36,11 @@ struct ListenNoteSection: View {
                 Text("听后感")
                     .font(.headline)
                 Spacer(minLength: 0)
-                if saveFailed {
+                if listenNotes.isReadOnly {
+                    Text("只读")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if saveFailed {
                     Text("听后感保存失败")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -47,6 +51,12 @@ struct ListenNoteSection: View {
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
                         .accessibilityLabel("听后感已保存")
                 }
+            }
+            if listenNotes.isReadOnly {
+                Text("听后感读取或写入受限，原文件已保留。")
+                    .font(.footnote)
+                Button("重新读取") { listenNotes.reload() }
+                    .font(.footnote)
             }
 
             // 单一多行输入：placeholder 即引导；无芯片/长说明/双层展开
@@ -66,7 +76,8 @@ struct ListenNoteSection: View {
                         editedDraft = true
                         draftText = $0
                     }),
-                    revealEndToken: revealEndToken
+                    revealEndToken: revealEndToken,
+                    isEditable: !listenNotes.isReadOnly
                 ) { editing in
                     if isEditing, !editing {
                         commitNow(flash: true)
@@ -85,7 +96,7 @@ struct ListenNoteSection: View {
             )
             .id(Self.editorScrollID)
 
-            if hasDraftContent {
+            if hasDraftContent && !listenNotes.isReadOnly {
                 HStack {
                     Spacer(minLength: 0)
                     Button("清除听后感", role: .destructive) {
@@ -95,7 +106,7 @@ struct ListenNoteSection: View {
                 }
             }
 
-            if hasDraftContent && !hideDownstream {
+            if hasDraftContent && !hideDownstream && !listenNotes.isReadOnly {
                 downstreamCards
             }
         }
@@ -109,6 +120,13 @@ struct ListenNoteSection: View {
             hideDownstream = false
         }
         .onChange(of: draftText) { _, _ in scheduleCommit() }
+        .onChange(of: listenNotes.isReadOnly) { _, isReadOnly in
+            commitTask?.cancel()
+            if !isReadOnly {
+                loadedEpisodeId = nil
+                loadFromStore()
+            }
+        }
         .onDisappear {
             commitTask?.cancel()
             _ = commit()
@@ -383,6 +401,7 @@ struct ListenNoteSection: View {
 
     private func scheduleCommit() {
         commitTask?.cancel()
+        guard editedDraft, !listenNotes.isReadOnly else { return }
         commitTask = Task { @MainActor in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled else { return }
@@ -392,7 +411,7 @@ struct ListenNoteSection: View {
 
     private func commitNow(flash: Bool) {
         commitTask?.cancel()
-        guard recordsOnOpen || editedDraft else { return }
+        guard editedDraft, !listenNotes.isReadOnly else { return }
         guard commit() else { return }
         if flash { flashSaved() }
         if hasDraftContent {
@@ -404,7 +423,8 @@ struct ListenNoteSection: View {
 
     private func commit() -> Bool {
         guard let loadedEpisodeId else { return false }
-        guard recordsOnOpen || editedDraft else { return true }
+        guard !listenNotes.isReadOnly else { return false }
+        guard editedDraft else { return true }
         let saved = listenNotes.saveDraft(episodeId: loadedEpisodeId, text: draftText, tags: tags)
         saveFailed = !saved
         return saved

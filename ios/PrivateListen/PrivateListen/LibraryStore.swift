@@ -173,7 +173,7 @@ final class LibraryStore: ObservableObject {
     private func adoptLegacyListenMarks(in episodes: [Episode]) {
         var changed = false
         var touchesChanged = false
-        for episode in episodes {
+        for episode in episodes where episode.unavailableReason == nil {
             let key = episode.mediaKey
             guard key != episode.id, progress[key] == nil else { continue }
             guard !Self.hasRevisionQualifiedKey(in: progress, episodeID: episode.id) else { continue }
@@ -256,12 +256,14 @@ final class LibraryStore: ObservableObject {
     /// Returns whether this sample changed the episode from unfinished to finished.
     @discardableResult
     func remember(id: String, seconds: Double, duration: Double, finished: Bool? = nil) -> Bool {
-        remember(mediaKey: mediaKey(for: id), seconds: seconds, duration: duration, finished: finished)
+        guard visibleByID[id]?.unavailableReason == nil else { return false }
+        return remember(mediaKey: mediaKey(for: id), seconds: seconds, duration: duration, finished: finished)
     }
 
     @discardableResult
     func remember(episode: Episode, seconds: Double, duration: Double, finished: Bool? = nil) -> Bool {
-        remember(mediaKey: episode.mediaKey, seconds: seconds, duration: duration, finished: finished)
+        guard episode.unavailableReason == nil, visibleByID[episode.id]?.unavailableReason == nil else { return false }
+        return remember(mediaKey: episode.mediaKey, seconds: seconds, duration: duration, finished: finished)
     }
 
     private func remember(mediaKey: String, seconds: Double, duration: Double, finished: Bool?) -> Bool {
@@ -323,7 +325,7 @@ final class LibraryStore: ObservableObject {
     func continueEntries(in episodes: [Episode]) -> [ContinueListening.Item] {
         var marks: [String: ContinueListening.Mark] = [:]
         var durations: [String: Double] = [:]
-        for episode in episodes {
+        for episode in episodes where episode.unavailableReason == nil {
             guard let entry = listenMark(for: episode) else { continue }
             marks[episode.id] = ContinueListening.Mark(
                 seconds: entry.seconds,
@@ -526,13 +528,13 @@ final class LibraryStore: ObservableObject {
             }
         }
         let before = try catalogBytes()
-        let current = try before.map(LibrarySnapshot.init)
+        let current = try before.map { try LibrarySnapshot($0) }
         let proposed = try incoming.preservingExtensions(from: current)
         let snapshot = try LibrarySnapshot(proposed)
         let repeated = try current?.canonicalData() == proposed
         let actual = before.map(LibrarySnapshot.digest)
         guard repeated || actual == expectedSHA256 else { throw LibrarySnapshotError.staleCatalog }
-        let resolved = try Self.resolve(snapshot, from: root, localCopy: true, verifier: RevisionAssetVerifier())
+        let resolved = try Self.resolve(snapshot, from: root, localCopy: true, verifier: RevisionAssetVerifier(), strict: true)
         for episode in resolved {
             if let reference = episode.pendingTranscript {
                 _ = try PendingTranscript.read(id: episode.id, audioURL: episode.audioURL, reference: reference).get()
@@ -655,40 +657,66 @@ final class LibraryStore: ObservableObject {
             let bytes = !localCopy && fileManager.isUbiquitousItem(at: listing)
                 ? readData(listing) : try? Data(contentsOf: listing)
             guard let data = bytes else { return LoadedLibrary(waiting: !localCopy) }
-            let snapshot = try LibrarySnapshot(data)
-            let episodes = try resolve(snapshot, from: root, localCopy: localCopy, verifier: verifier)
-            return LoadedLibrary(episodes: episodes, accepted: true)
+            let snapshot = try LibrarySnapshot(data, allowInvalidRevisions: true)
+            let episodes = try resolve(snapshot, from: root, localCopy: localCopy, verifier: verifier, strict: false)
+            let waiting = !localCopy && episodes.contains { $0.unavailableReason != nil }
+            return LoadedLibrary(episodes: episodes, waiting: waiting, accepted: true)
         } catch {
             return LoadedLibrary(waiting: !localCopy)
         }
     }
 
     private static func resolve(_ snapshot: LibrarySnapshot, from root: URL, localCopy: Bool,
-                                verifier: RevisionAssetVerifier) throws -> [Episode] {
+                                verifier: RevisionAssetVerifier, strict: Bool) throws -> [Episode] {
         let fileManager = FileManager.default
         return try snapshot.records.map { record -> Episode in
             guard let id = record.catalogID else { throw LibrarySnapshotError.invalidCatalog }
-            let folder = try LibrarySnapshot.path(record.mediaRevision?.path ?? "episodes/\(id)", in: root, directory: true)
-            let audioURL = try LibrarySnapshot.path("output.mp3", in: folder)
-            if let revision = record.mediaRevision {
-                try revision.validateAssets(in: folder, downloading: !localCopy, verifier: verifier)
-            }
-            let local = LocalAudio.isPlayable(audioURL)
-            if !local {
-                guard !localCopy && record.mediaRevision == nil else { throw LibrarySnapshotError.incompleteRevision }
-                try? fileManager.startDownloadingUbiquitousItem(at: folder)
-                try? fileManager.startDownloadingUbiquitousItem(at: audioURL)
-            }
             let title = record.title?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let artworkFile = EpisodeArtwork.file(record.artwork, kind: record.artworkKind)
-            if let artworkFile {
-                if let revision = record.mediaRevision, revision.files[artworkFile] == nil {
-                    throw LibrarySnapshotError.invalidCatalog
+            let revision = record.mediaRevision
+            var audioURL = root
+            var unavailableReason: Episode.UnavailableReason?
+            var downloading = false
+            var revisionFiles: Set<String>?
+            var artworkFile = EpisodeArtwork.file(record.artwork, kind: record.artworkKind)
+            do {
+                guard !snapshot.invalidRevisionIDs.contains(id) else { throw LibrarySnapshotError.invalidCatalog }
+                let folder = try LibrarySnapshot.path(revision?.path ?? "episodes/\(id)", in: root, directory: true)
+                audioURL = try LibrarySnapshot.path("output.mp3", in: folder)
+                if let revision {
+                    let verified = try revision.verifiedFiles(
+                        in: folder, downloading: !localCopy, verifier: verifier, allowMissing: !strict
+                    )
+                    revisionFiles = verified
+                    if !verified.contains("output.mp3") {
+                        unavailableReason = .audio
+                    } else if !MediaRevision.requiredFiles.isSubset(of: verified) {
+                        unavailableReason = .revision
+                    }
+                } else if !LocalAudio.isPlayable(audioURL) {
+                    if !localCopy && (CloudFile.isWaiting(audioURL) || CloudFile.isWaiting(folder)) {
+                        downloading = true
+                        try? fileManager.startDownloadingUbiquitousItem(at: folder)
+                        try? fileManager.startDownloadingUbiquitousItem(at: audioURL)
+                    } else {
+                        guard !strict else { throw LibrarySnapshotError.incompleteRevision }
+                        unavailableReason = .audio
+                    }
                 }
-                let artworkURL = try LibrarySnapshot.path(artworkFile, in: folder)
-                if !localCopy && record.artworkKind != "placeholder" && !LocalAudio.isPlayable(artworkURL) {
-                    try? fileManager.startDownloadingUbiquitousItem(at: artworkURL)
+                if let name = artworkFile {
+                    do {
+                        guard revisionFiles?.contains(name) != false else { throw LibrarySnapshotError.invalidCatalog }
+                        let artworkURL = try LibrarySnapshot.path(name, in: folder)
+                        if !localCopy && record.artworkKind != "placeholder" && !LocalAudio.isPlayable(artworkURL) {
+                            try? fileManager.startDownloadingUbiquitousItem(at: artworkURL)
+                        }
+                    } catch where !strict {
+                        artworkFile = nil
+                    }
                 }
+            } catch where !strict {
+                unavailableReason = .revision
+                revisionFiles = []
+                artworkFile = nil
             }
             let show = record.show?.trimmingCharacters(in: .whitespacesAndNewlines)
             let guests = (record.guests ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
@@ -702,12 +730,13 @@ final class LibraryStore: ObservableObject {
                 createdAt: EpisodeDate.parse(record.createdAt) ?? Date(timeIntervalSince1970: 0),
                 durationSec: record.durationSec,
                 audioURL: audioURL,
-                downloading: !local,
+                downloading: downloading,
                 artworkFile: artworkFile,
                 artworkKind: record.artworkKind,
                 pendingTranscript: record.pendingReference(for: id),
-                mediaRevision: record.mediaRevision?.sha256,
-                revisionFiles: record.mediaRevision.map { Set($0.files.keys) }
+                mediaRevision: revision.flatMap { EpisodeID.isRevisionDigest($0.sha256) ? $0.sha256 : nil },
+                revisionFiles: revisionFiles,
+                unavailableReason: unavailableReason
             )
         }.sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
@@ -964,7 +993,7 @@ extension LibraryStore {
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             before = nil
         }
-        let current = try before.map(LibrarySnapshot.init)
+        let current = try before.map { try LibrarySnapshot($0) }
         let currentRows = Dictionary(uniqueKeysWithValues: (current?.records ?? []).compactMap { record in
             record.catalogID.map { ($0, record) }
         })

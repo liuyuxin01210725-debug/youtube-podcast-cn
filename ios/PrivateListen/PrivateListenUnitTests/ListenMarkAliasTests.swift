@@ -108,6 +108,55 @@ final class ListenMarkAliasTests: XCTestCase {
         XCTAssertEqual(persisted[episode.mediaKey]?.finished, false)
     }
 
+    func testDismissSurvivesRevisionChangeUntilAcknowledged() throws {
+        let (_, defaults, suite) = makeStore()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let old = makeEpisode(id: "ep-swap", revision: revisionA, duration: 1800)
+        let current = makeEpisode(id: old.id, revision: revisionB, duration: 1800)
+        try seedProgress(defaults, [
+            old.id: mark(seconds: 156, finished: false),
+            old.mediaKey: mark(seconds: 80, finished: false),
+        ])
+        let store = LibraryStore(defaults: defaults, loadLibraryOnInit: false)
+        XCTAssertEqual(store.continueEntries(in: [old]).first?.seconds, 80)
+        store.dismissContinue(old.id)
+        _ = store.remember(episode: current, seconds: 24, duration: 1800, finished: false)
+        let reopened = LibraryStore(defaults: defaults, loadLibraryOnInit: false)
+        XCTAssertEqual(reopened.resumeSeconds(for: current), 24)
+        XCTAssertTrue(reopened.continueEntries(in: [current]).isEmpty)
+        reopened.acknowledgeContinue(current)
+        XCTAssertEqual(reopened.continueEntries(in: [current]).first?.seconds, 24)
+        XCTAssertEqual(reopened.resumeSeconds(for: old), 80)
+    }
+
+    func testExplicitZeroRevisionMarkDoesNotFallBackToBareID() throws {
+        let (_, defaults, suite) = makeStore()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let current = makeEpisode(id: "ep-zero", revision: revisionB, duration: 1800)
+        try seedProgress(defaults, [
+            current.id: mark(seconds: 156, finished: false),
+            current.mediaKey: mark(seconds: 0, finished: false),
+        ])
+        let store = LibraryStore(defaults: defaults, loadLibraryOnInit: false)
+        XCTAssertEqual(store.resumeSeconds(for: current), 0)
+        XCTAssertFalse(store.isFinished(current))
+        XCTAssertTrue(store.continueEntries(in: [current]).isEmpty)
+    }
+
+    func testFinishedRevisionMarkDoesNotFallBackToBareID() throws {
+        let (_, defaults, suite) = makeStore()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let current = makeEpisode(id: "ep-done", revision: revisionB, duration: 1800)
+        try seedProgress(defaults, [
+            current.id: mark(seconds: 156, finished: false),
+            current.mediaKey: mark(seconds: 1800, finished: true),
+        ])
+        let store = LibraryStore(defaults: defaults, loadLibraryOnInit: false)
+        XCTAssertEqual(store.resumeSeconds(for: current), 0)
+        XCTAssertTrue(store.isFinished(current))
+        XCTAssertTrue(store.continueEntries(in: [current]).isEmpty)
+    }
+
     private func makeStore() -> (LibraryStore, UserDefaults, String) {
         let suite = "ListenMarkAliasTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

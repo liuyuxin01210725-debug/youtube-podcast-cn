@@ -86,6 +86,7 @@ final class ListenNoteStore: ObservableObject {
 
     @Published private(set) var notes: [String: ListenNote] = [:]
     @Published private(set) var promptDismissed: [String: String] = [:]
+    @Published private(set) var isReadOnly = false
 
     private static let iso: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
@@ -94,6 +95,7 @@ final class ListenNoteStore: ObservableObject {
     }()
 
     private let fileURL: URL
+    private var loadedBytes: Data?
 
     init(directory: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]) {
         fileURL = directory.appendingPathComponent(Self.fileName)
@@ -101,14 +103,37 @@ final class ListenNoteStore: ObservableObject {
     }
 
     func reload() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let doc = try? JSONDecoder().decode(FileDoc.self, from: data) else {
-            notes = [:]
-            promptDismissed = [:]
-            return
+        do {
+            guard let data = try readExistingFile() else {
+                // Once a file was present or failed to load, absence is not recovery.
+                if loadedBytes != nil { isReadOnly = true }
+                return
+            }
+            let doc = try JSONDecoder().decode(FileDoc.self, from: data)
+            guard doc.schema == Self.schema, doc.schemaVersion == Self.schemaVersion else {
+                isReadOnly = true
+                return
+            }
+            notes = doc.notes
+            promptDismissed = doc.promptDismissed
+            loadedBytes = data
+            isReadOnly = false
+        } catch {
+            isReadOnly = true
         }
-        notes = doc.notes
-        promptDismissed = doc.promptDismissed
+    }
+
+    private func readExistingFile() throws -> Data? {
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile || error.code == .fileNoSuchFile {
+            return nil
+        }
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return try Data(contentsOf: fileURL)
     }
 
     func note(for episodeId: String) -> ListenNote? {
@@ -130,6 +155,7 @@ final class ListenNoteStore: ObservableObject {
     /// The editor shows legacy headline + body in one field. Opening and closing
     /// an unchanged draft must preserve the original record, including its timestamp.
     func saveDraft(episodeId: String, text: String, tags: [String]) -> Bool {
+        guard !isReadOnly else { return false }
         let body = ListenNote.trimmed(text)
         let tags = ListenNote.normalizeTags(tags)
         if let note = notes[episodeId],
@@ -165,6 +191,7 @@ final class ListenNoteStore: ObservableObject {
 
     @discardableResult
     func clear(episodeId: String) -> Bool {
+        guard !isReadOnly else { return false }
         var updated = notes
         guard updated.removeValue(forKey: episodeId) != nil else { return true }
         guard persist(notes: updated, promptDismissed: promptDismissed) else { return false }
@@ -186,7 +213,7 @@ final class ListenNoteStore: ObservableObject {
 
     /// 是否应展示听完轻提示（一次机会：finished + 无感 + 未 dismiss）。
     func shouldShowFinishedPrompt(episodeId: String, isFinished: Bool) -> Bool {
-        guard isFinished else { return false }
+        guard isFinished, !isReadOnly else { return false }
         if isPromptDismissed(episodeId: episodeId) { return false }
         if let n = notes[episodeId], n.hasContent { return false }
         return true
@@ -201,6 +228,17 @@ final class ListenNoteStore: ObservableObject {
     }
 
     private func persist(notes: [String: ListenNote], promptDismissed: [String: String]) -> Bool {
+        guard !isReadOnly else { return false }
+        // Refuse writes against a file that changed since the last successful read.
+        do {
+            guard try readExistingFile() == loadedBytes else {
+                isReadOnly = true
+                return false
+            }
+        } catch {
+            isReadOnly = true
+            return false
+        }
         let now = Self.iso.string(from: Date())
         let doc = FileDoc(
             schema: Self.schema,
@@ -214,7 +252,11 @@ final class ListenNoteStore: ObservableObject {
         do {
             let data = try encoder.encode(doc)
             try data.write(to: fileURL, options: .atomic)
+            loadedBytes = data
             return true
+        } catch let error as CocoaError where error.code == .fileWriteNoPermission || error.code == .fileWriteVolumeReadOnly {
+            isReadOnly = true
+            return false
         } catch {
             return false
         }

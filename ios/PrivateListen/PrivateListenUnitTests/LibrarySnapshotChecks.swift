@@ -10,6 +10,120 @@ enum LibrarySnapshotChecks {
         let description: String
     }
 
+    static func runReadAvailability() throws {
+        let fm = FileManager.default
+        let scratch = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let listing = libraryListing(scratch)
+        let root = listing.deletingLastPathComponent()
+        let fixture = try stagingPackage(id: "degraded", title: "Fault injection", audio: "current audio", extras: "current",
+                                         additionalFiles: ["cover.jpg": Data("cover".utf8),
+                                                           "point-listen.json": Data("point index".utf8)])
+        let relative = "objects/\(fixture.revision)"
+        let folder = root.appendingPathComponent(relative, isDirectory: true)
+        let previous = "episodes/\(fixture.id)"
+        let other = ["id": "healthy", "title": "Healthy episode"]
+        for (path, audio) in [(previous, "previous audio"), ("episodes/healthy", "independent audio")] {
+            let directory = root.appendingPathComponent(path, isDirectory: true)
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            try Data(audio.utf8).write(to: directory.appendingPathComponent("output.mp3"))
+        }
+        let (store, defaults, suite) = try isolatedStore(scratch)
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            try? fm.removeItem(at: scratch)
+        }
+        try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        for (name, data) in fixture.files { try data.write(to: folder.appendingPathComponent(name)) }
+        var row: [String: Any] = ["id": fixture.id, "title": "Fault injection", "artwork": "cover.jpg",
+                                  "duration_sec": 90, "file": "output.mp3"]
+        let revision: [String: Any] = [
+            "sha256": fixture.revision, "path": relative, "previous_path": previous,
+            "resume_policy": "reset_unmapped", "files": fixture.files.mapValues(LibrarySnapshot.digest),
+        ]
+        row["media_revision"] = revision
+        let catalog: [String: Any] = ["schema": PushStaging.schema, "generation": 2, "episodes": [row, other]]
+        let healthyBytes = try json(catalog)
+        let digest = try store.commitLocalSnapshot(healthyBytes, expecting: nil)
+        guard let target = store.episodes.first(where: { $0.id == fixture.id }) else {
+            throw Failure(description: "healthy revision must load")
+        }
+        try expect(store.episodes.count == 2 && store.episodes.allSatisfy(\.isPlayableNow)
+                   && target.artworkURL != nil && target.publishedAsset("point-listen.json") != nil,
+                   "healthy catalog makes both episodes and optional assets available")
+        _ = store.remember(episode: target, seconds: 20, duration: 90, finished: false)
+        let progress = defaults.data(forKey: "PrivateListen.progress")
+
+        let cover = folder.appendingPathComponent("cover.jpg")
+        let point = folder.appendingPathComponent("point-listen.json")
+        try fm.removeItem(at: cover)
+        try Data("wrong point bytes".utf8).write(to: point)
+        let optionalDamage = LibraryStore.loadEpisodes(from: root, localCopy: true)
+        let noOptionalAssets = optionalDamage.episodes.first { $0.id == target.id }
+        try expect(optionalDamage.accepted && optionalDamage.episodes.count == 2 &&
+                   noOptionalAssets?.isPlayableNow == true && noOptionalAssets?.artworkURL == nil &&
+                   noOptionalAssets?.publishedAsset("point-listen.json") == nil,
+                   "missing cover and wrong-hash point index leave the episode playable")
+        try refuses { try store.commitLocalSnapshot(healthyBytes, expecting: digest) }
+        try fixture.files["cover.jpg"]!.write(to: cover)
+        try fixture.files["point-listen.json"]!.write(to: point)
+
+        let faults: [(String, Data?, Episode.UnavailableReason)] = [
+            ("output.mp3", nil, .audio),
+            ("output.mp3", Data("wrong audio bytes".utf8), .audio),
+            ("document.json", Data("wrong critical revision bytes".utf8), .revision),
+        ]
+        for (name, brokenBytes, reason) in faults {
+            let asset = folder.appendingPathComponent(name)
+            try fm.removeItem(at: asset)
+            if let brokenBytes { try brokenBytes.write(to: asset) }
+            store.reload()
+            let unplayable = store.episodes.first { $0.id == target.id }
+            try expect(store.episodes.count == 2 && store.episodes.filter(\.isPlayableNow).count == 1
+                       && unplayable?.unavailableReason == reason && unplayable?.audioURL == target.audioURL,
+                       "critical asset failure retains the row and the current pointer while disabling playback")
+            _ = store.remember(episode: target, seconds: 50, duration: 90, finished: false)
+            try expect(defaults.data(forKey: "PrivateListen.progress") == progress,
+                       "a stale playback callback cannot overwrite protected progress")
+            try refuses { try store.commitLocalSnapshot(healthyBytes, expecting: digest) }
+            try expect(LibrarySnapshot.digest(Data(contentsOf: listing)) == digest,
+                       "strict commit does not replace the catalog under asset damage")
+            try fixture.files[name]!.write(to: asset)
+        }
+
+        let legacyAudio = root.appendingPathComponent("episodes/healthy/output.mp3")
+        try fm.removeItem(at: legacyAudio)
+        for localCopy in [true, false] {
+            let loaded = LibraryStore.loadEpisodes(from: root, localCopy: localCopy)
+            try expect(loaded.accepted && loaded.episodes.filter(\.isPlayableNow).count == 1
+                       && loaded.episodes.first(where: { $0.id == "healthy" })?.unavailableReason == .audio,
+                       "absent legacy audio is unavailable for both readers")
+        }
+        try Data("independent audio".utf8).write(to: legacyAudio)
+
+        var unsafeRevision = revision
+        unsafeRevision["path"] = "../\(relative)"
+        for badRevision in [unsafeRevision as Any, "malformed revision" as Any] {
+            var bad = catalog
+            row["media_revision"] = badRevision
+            bad["episodes"] = [row, other]
+            try json(bad).write(to: listing)
+            let loaded = LibraryStore.loadEpisodes(from: root, localCopy: true)
+            let unavailable = loaded.episodes.first { $0.id == target.id }
+            try expect(loaded.accepted && loaded.episodes.count == 2 && loaded.episodes.filter(\.isPlayableNow).count == 1
+                       && unavailable?.unavailableReason == .revision && unavailable?.publishedAsset("output.mp3") == nil,
+                       "unsafe or malformed revision records cannot fall back to the old audio")
+        }
+        for (key, value) in [("schema", "wrong.schema" as Any), ("generation", 0 as Any),
+                             ("generation", true as Any), ("generation", "2" as Any),
+                             ("generation", 2.5 as Any), ("generation", NSNull() as Any)] {
+            var bad = catalog
+            bad[key] = value
+            try json(bad).write(to: listing)
+            try expect(!LibraryStore.loadEpisodes(from: root, localCopy: true).accepted,
+                       "invalid schema or generation rejects the whole catalog")
+        }
+    }
+
     static func run() throws {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -82,15 +196,18 @@ enum LibrarySnapshotChecks {
         store.reload()
         try expect(store.episodes.first == old && store.resumeSeconds(for: id) == 51, "partial object leaves old catalog and resume active")
 
-        // Model an index downloaded by iCloud or encountered during a mirror sync
-        // with the media object still arriving. No reader may render B over A.
+        // Readers keep the current rows while verification fails for a single revision.
         try proposed.write(to: listing, options: .atomic)
         store.reload()
-        try expect(store.episodes == [old], "reload retains the entire last accepted snapshot")
+        try expect(store.episodes.map(\.id) == [id, "orphan"] && store.episodes.first?.unavailableReason == .revision,
+                   "reload shows the current incomplete revision without using the previous audio")
         let cold = LibraryStore(defaults: defaults, loadLibraryOnInit: false, documentsDirectory: scratch)
         cold.reload()
-        try expect(cold.episodes.isEmpty, "cold start refuses a snapshot whose revision is incomplete")
-        try expect(!LibraryStore.loadEpisodes(from: root, localCopy: false).accepted, "iCloud also refuses an incomplete revision")
+        try expect(cold.episodes.count == 2 && cold.episodes.first?.isPlayableNow == false,
+                   "cold start lists both rows and disables incomplete media")
+        let cloudPartial = LibraryStore.loadEpisodes(from: root, localCopy: false)
+        try expect(cloudPartial.accepted && cloudPartial.episodes.first?.unavailableReason == .revision,
+                   "iCloud also shows the current incomplete revision")
         try beforeBytes.write(to: listing, options: .atomic)
 
         for (name, data) in payloads { try data.write(to: revisionURL.appendingPathComponent(name)) }

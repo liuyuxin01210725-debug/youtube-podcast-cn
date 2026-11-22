@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 struct PlayerView: View {
-    let episode: Episode
+    private let routeEpisode: Episode
     private let opensPaused: Bool
     @EnvironmentObject private var player: PlayerModel
     @EnvironmentObject private var library: LibraryStore
@@ -12,8 +12,15 @@ struct PlayerView: View {
     @State private var isEditingListenNote = false
 
     init(episode: Episode, opensPaused: Bool = false) {
-        self.episode = episode
+        routeEpisode = episode
         self.opensPaused = opensPaused
+    }
+
+    private var episode: Episode {
+        library.episodes.first {
+            $0.id == routeEpisode.id && ($0.mediaKey == routeEpisode.mediaKey
+                || $0.unavailableReason != nil || routeEpisode.unavailableReason != nil)
+        } ?? routeEpisode
     }
 
     private var isPassiveOpen: Bool { opensPaused || episode.pendingTranscript != nil }
@@ -47,6 +54,7 @@ struct PlayerView: View {
                         }
                     )
                     .accessibilityLabel("播放进度")
+                    .disabled(episode.unavailableReason != nil)
                     HStack {
                         Text(listenClock(dragging ? scrub : player.current))
                         Spacer()
@@ -78,7 +86,7 @@ struct PlayerView: View {
                     .accessibilityLabel("前进 15 秒")
                 }
                 .buttonStyle(.plain)
-                .disabled(player.errorText != nil)
+                .disabled(player.errorText != nil || episode.unavailableReason != nil)
                 Picker("倍速", selection: Binding(
                     get: { player.speed },
                     set: { player.setSpeed($0) }
@@ -89,7 +97,7 @@ struct PlayerView: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityLabel("倍速")
-                if let errorText = player.errorText {
+                if let errorText = episode.unavailableReason?.rawValue ?? player.errorText {
                     VStack(spacing: 8) {
                         Text(errorText)
                             .font(.footnote)
@@ -102,14 +110,14 @@ struct PlayerView: View {
                     }
                 }
 
-                if let reference = episode.pendingTranscript {
+                if let reference = episode.pendingTranscript, episode.unavailableReason == nil {
                     PendingTranscriptSection(episodeID: episode.id, audioURL: episode.audioURL, reference: reference)
                 }
                 Divider()
                 ListenNoteSection(
                     episodeId: episode.id,
                     isFinished: library.isFinished(episode),
-                    recordsOnOpen: !isPassiveOpen,
+                    recordsOnOpen: !isPassiveOpen && episode.unavailableReason == nil,
                     isEditing: $isEditingListenNote
                 )
                 if episode.pendingTranscript == nil {
@@ -162,7 +170,7 @@ struct PlayerView: View {
         }
         .onAppear {
             player.fullPlayerOpen = true
-            if !isPassiveOpen {
+            if !isPassiveOpen && episode.unavailableReason == nil {
                 // A regular open clears a swipe-dismiss without writing ListenMark.
                 library.acknowledgeContinue(episode)
             }

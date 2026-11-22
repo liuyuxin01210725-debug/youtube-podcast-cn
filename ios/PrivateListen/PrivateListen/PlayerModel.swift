@@ -127,7 +127,8 @@ final class PlayerModel: ObservableObject {
 
     private func openMedia(episode: Episode?, book: BookPlaybackReference?, mediaTitle: String, mediaArtist: String, url: URL, artwork: MPMediaItemArtwork?, mediaDuration: Double, resumeAt: Double, force: Bool, autoplay: Bool) {
         let sameMedia = currentEpisode == episode && currentBookReference == book
-        if !force, sameMedia, errorText == nil, player.currentItem != nil,
+        let unavailable = episode?.unavailableReason
+        if !force, sameMedia, unavailable == nil, errorText == nil, player.currentItem != nil,
            autoplay || podcastProgress.allowsCheckpoint || current == resumeAt {
             // Cover may have arrived after the first open — refresh Now Playing artwork.
             artist = mediaArtist
@@ -137,7 +138,7 @@ final class PlayerModel: ObservableObject {
         }
         // A passive open of the same episode may follow a manual "已听完".
         // Do not overwrite that mark with the outgoing item's old playhead.
-        if autoplay || !sameMedia { checkpoint() }
+        if (autoplay || !sameMedia), unavailable == nil || currentEpisode?.id != episode?.id { checkpoint() }
         player.pause()
         isPlaying = false
         openGeneration += 1
@@ -162,6 +163,13 @@ final class PlayerModel: ObservableObject {
         current = start
         duration = mediaDuration
         lastSaved = -1
+        itemWatchers.removeAll()
+        if let unavailable {
+            errorText = unavailable.rawValue
+            player.replaceCurrentItem(with: nil)
+            updateNowPlaying()
+            return
+        }
         guard LocalAudio.isPlayable(url) else {
             try? FileManager.default.startDownloadingUbiquitousItem(at: url)
             errorText = "音频还在从 iCloud 下载，稍后再播放。"
@@ -171,7 +179,6 @@ final class PlayerModel: ObservableObject {
             return
         }
         let item = AVPlayerItem(url: url)
-        itemWatchers.removeAll()
         if start > 0 {
             pendingResume = start
         } else {
@@ -407,7 +414,8 @@ final class PlayerModel: ObservableObject {
         episode: Episode, row: ListenViewpoint, index: PointListenIndex,
         packet: ExtractionPacket, audio: PointListenAudio
     ) -> Bool {
-        guard audio.url == episode.audioURL, audio.url.lastPathComponent == "output.mp3", audio.isCurrent,
+        guard episode.isPlayableNow, episode.publishedAsset(PointListening.indexFileName) != nil,
+              audio.url == episode.audioURL, audio.url.lastPathComponent == "output.mp3", audio.isCurrent,
               PointListening.refusal(row: row, index: index, packet: packet, episodeID: episode.id,
                   audioHash: audio.sha256, duration: audio.duration) == nil,
               let start = row.tStart else { return false }
