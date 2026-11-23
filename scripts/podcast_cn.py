@@ -560,7 +560,7 @@ def create_translation_client(
         admission = RuntimeAdmission.for_job(budget.job)
         if admission is not None:
             model, base_url = MODEL, ENDPOINT
-        elif budget.episode_cap is not None:
+        elif budget.is_selected_episode:
             config = get_provider_config(provider)
             model = os.getenv(config.model_env) or MODEL
             base_url = os.getenv(config.base_url_env) or ENDPOINT
@@ -1168,7 +1168,7 @@ def prepare_episode(
         effective_translator,
         translation_identity=effective_identity,
         preflight=(lambda chunks: client.preflight_episode(chunks, metadata.source_title))
-        if client is not None and client._budget.episode_cap is not None else None,
+        if client is not None and client._budget.is_selected_episode else None,
     )
     _write_job_state(state_path, "translation_ready", url, metadata)
     transcript = _render_chinese_transcript(metadata, url, segments, translations)

@@ -44,11 +44,11 @@ _EPISODE_OBSERVATION = (Path(__file__).resolve().parents[1] / 'tests/fixtures'
                         / 'rate-card-observation-2026-11-23-1119.json')
 _EPISODE_OBSERVATION_SHA = '8f004e07584930b23e48ba46ba8a12d9d5fd6f1aeadf0ccd95291ff6a4bf7e49'
 _EPISODE_ROOT = Path.home() / 'Desktop/音频/中文播客工作台/isolated-t629-jobs'
-_EPISODE_CAPS = {
-    'd1e5daab08174fd2be2b3868d14c7cd2': 620_000,
-    'de91a4b274894fa29edebb2cb90c654d': 800_000,
-    '2a8a996b3c5a433f8a06619ad45c56eb': 1_030_000,
-    '1efe42d270884ae8b8df07f9c2e9de8a': 840_000,
+_SELECTED_EPISODES = {
+    'd1e5daab08174fd2be2b3868d14c7cd2',
+    'de91a4b274894fa29edebb2cb90c654d',
+    '2a8a996b3c5a433f8a06619ad45c56eb',
+    '1efe42d270884ae8b8df07f9c2e9de8a',
 }
 # Conservative reserved history, neither an invoice nor the book's prepaid cap.
 CONSERVED_PRIOR_MICROUNITS = 21_130_000
@@ -245,13 +245,19 @@ class TranslationBudget:
         self._clock = clock if clock is not None else lambda: time.time()
 
     @property
-    def episode_cap(self):
-        if self.job.parent == _EPISODE_ROOT and not self._given_job.is_symlink():
-            return _EPISODE_CAPS.get(self.job.name)
-        return None
+    def is_selected_episode(self):
+        return (self.job.parent == _EPISODE_ROOT and self.job.name in _SELECTED_EPISODES
+                and not self._given_job.is_symlink())
+
+    def _valid_cap(self, cap):
+        # Old episode wallets have a positive estimate in this column. t632
+        # keeps it readable as history. New episode wallets can use SQL NULL.
+        if cap is None:
+            return self.is_selected_episode
+        return type(cap) is int and 0 < cap < 2**63
 
     def _policy_window(self):
-        if self.episode_cap is None:
+        if not self.is_selected_episode:
             return POLICY_VERIFIED_AT, POLICY_EXPIRES_AT
         raw = _read_regular_bytes(_EPISODE_OBSERVATION)
         if hashlib.sha256(raw).hexdigest() != _EPISODE_OBSERVATION_SHA:
@@ -277,9 +283,9 @@ class TranslationBudget:
         return str(self.job)
 
     @classmethod
-    def provision(cls, job, *, authorization_id, fee_mode, cap_microunits,
+    def provision(cls, job, *, authorization_id, fee_mode, cap_microunits=None,
                   prior_microunits, verified_at, expires_at, clock=None):
-        """Create a standalone legacy allowance. Existing history requires adoption."""
+        """Create a path-bound wallet. Only selected episodes can omit the amount cap."""
         budget = cls(job, clock=clock)
         with _lock_jobs_root(budget.job.parent):
             if any(_mode(budget.job / name) for name in ('request-ledger.json', 'translation-requests')):
@@ -325,10 +331,10 @@ class TranslationBudget:
         if not (
             isinstance(authorization_id, str) and _PROVIDER_ID.fullmatch(authorization_id)
             and fee_mode == FEE_MODE
-            and all(type(value) is int for value in (cap, prior, verified_at, expires_at))
-            and 0 <= prior < 2**63 and 0 < cap < 2**63
-            and (snapshot is not None or prior <= cap)
-            and (self.episode_cap is None or (prior == 0 and cap <= self.episode_cap and snapshot is None))
+            and all(type(value) is int for value in (prior, verified_at, expires_at))
+            and 0 <= prior < 2**63 and self._valid_cap(cap)
+            and (snapshot is not None or cap is None or prior <= cap)
+            and (not self.is_selected_episode or (prior == 0 and snapshot is None))
             and start <= verified_at < expires_at <= end
             and (snapshot is not None or self._current(verified_at, expires_at))
             and not self._given_job.is_symlink()
@@ -345,7 +351,7 @@ class TranslationBudget:
                     policy TEXT NOT NULL,
                     authorization_id TEXT NOT NULL,
                     fee_mode TEXT NOT NULL,
-                    cap_microunits INTEGER NOT NULL,
+                    cap_microunits INTEGER,
                     prior_microunits INTEGER NOT NULL,
                     verified_at INTEGER NOT NULL,
                     expires_at INTEGER NOT NULL
@@ -388,7 +394,7 @@ class TranslationBudget:
 
     def _check_dispatch(self, admission, identity, expires_at, evidence):
         if admission is None:
-            start = EPISODE_VERIFIED_AT if self.episode_cap is not None else POLICY_VERIFIED_AT
+            start = EPISODE_VERIFIED_AT if self.is_selected_episode else POLICY_VERIFIED_AT
             if not self._current(start, expires_at):
                 raise TranslationRequestError('translation_allowance_invalid', evidence)
             return
@@ -608,7 +614,7 @@ class TranslationBudget:
             'SELECT job, policy, fee_mode, cap_microunits, prior_microunits FROM allowance WHERE singleton = 1'
         )
         if ((job, policy, fee_mode) != (self._ledger_job, POLICY, FEE_MODE)
-                or type(cap) is not int or cap <= 0 or type(prior) is not int or prior < 0):
+                or not self._valid_cap(cap) or type(prior) is not int or prior < 0):
             raise ValueError('Invalid continuity allowance')
         index = {}
         _, history = self._history(db, continuity_index=index)
@@ -628,7 +634,8 @@ class TranslationBudget:
         return {
             'status': status, 'record': record,
             'cap_microunits': cap, 'prior_microunits': prior, 'history_microunits': total,
-            'accounted_microunits': prior + total, 'excess_over_cap_microunits': max(0, prior + total - cap),
+            'accounted_microunits': prior + total,
+            'excess_over_cap_microunits': None if self.is_selected_episode else max(0, prior + total - cap),
         }
 
     def recover_pre_send(self, *, isolation_root, evidence):
@@ -713,20 +720,21 @@ class TranslationBudget:
         cap_lifted = event is not None and cap in event['lifted_legacy_caps_microunits']
         if not (
             isinstance(authorization_id, str) and _PROVIDER_ID.fullmatch(authorization_id)
-            and all(type(n) is int for n in (cap, prior, verified_at, expires_at))
-            and 0 <= prior < 2**63 and 0 < cap < 2**63
-            and (prior <= cap or cap_lifted)
+            and all(type(n) is int for n in (prior, verified_at, expires_at))
+            and 0 <= prior < 2**63 and self._valid_cap(cap)
+            and (cap is None or prior <= cap or cap_lifted)
             and (event is None or prior >= CONSERVED_PRIOR_MICROUNITS)
-            and (self.episode_cap is None or (event is None and cap <= self.episode_cap and prior == 0))
+            and (not self.is_selected_episode or (event is None and prior == 0))
             and (POLICY_VERIFIED_AT <= verified_at < expires_at <= POLICY_EXPIRES_AT
                  if event is not None else self._current(verified_at, expires_at))
         ):
             raise TranslationRequestError('translation_allowance_invalid', evidence)
-        return cap, prior, expires_at, cap_lifted
+        effective_cap = None if self.is_selected_episode else cap
+        return effective_cap, prior, expires_at, cap_lifted
 
     def check_episode_allowance(self):
         """Check the scoped wallet before selecting the policy model by default."""
-        if self.episode_cap is None:
+        if not self.is_selected_episode:
             raise TranslationRequestError('translation_admission_scope', {})
         try:
             if not _mode(self.path):
@@ -739,7 +747,7 @@ class TranslationBudget:
     @staticmethod
     def _check_remaining(history, amount, cap, prior, cap_lifted, evidence):
         total = sum(row.reserved for row in history if row.reserved is not None)
-        if total + prior + amount > (2**63 - 1 if cap_lifted else cap):
+        if cap is not None and total + prior + amount > (2**63 - 1 if cap_lifted else cap):
             raise TranslationRequestError('translation_budget_exhausted', evidence)
         return total
 
@@ -798,7 +806,7 @@ class TranslationBudget:
             yield
 
     def preflight_episode(self, quotes):
-        if self.episode_cap is None:
+        if not self.is_selected_episode:
             raise TranslationRequestError('translation_admission_scope', {})
         if not _mode(self.path):
             raise TranslationRequestError('translation_allowance_missing', {})
@@ -818,7 +826,7 @@ class TranslationBudget:
                 journal_slot=None, journal_request=None, wire_key=None, remaining_amount=0):
         if type(amount) is not int or amount <= 0 or type(remaining_amount) is not int or remaining_amount < 0:
             raise TranslationRequestError('translation_plan_unverified', evidence)
-        if admission is None and self.episode_cap is None and not self._current(POLICY_VERIFIED_AT, POLICY_EXPIRES_AT):
+        if admission is None and not self.is_selected_episode and not self._current(POLICY_VERIFIED_AT, POLICY_EXPIRES_AT):
             raise TranslationRequestError('translation_allowance_invalid', evidence)
         try:
             if not _mode(self.path):
@@ -866,8 +874,9 @@ class TranslationBudget:
                         'legacy_cap_microunits': cap, 'legacy_cap_lifted': cap_lifted,
                         'reserved_microunits': amount,
                     }
-                if self.episode_cap is not None:
-                    evidence['rate_observation_sha256'] = _EPISODE_OBSERVATION_SHA
+                if self.is_selected_episode:
+                    evidence.update(spend_policy='t632', rate_observation_sha256=_EPISODE_OBSERVATION_SHA,
+                                    remaining_plan_microunits=amount + remaining_amount)
                 db.execute('INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?)', (
                     key, evidence['local_request_id'], amount, 'submitted',
                     json.dumps({**evidence, 'billing_uncertain': True, 'completion_uncertain': True}),
@@ -1029,7 +1038,7 @@ def request_translation(*, provider, model, base_url, messages, stage, timeout,
         journal_slot = TranslationJournal.receipt_name(segment_ids)
     input_bound = CONTEXT_TOKENS
     remaining_amount = 0
-    if budget.episode_cap is not None:
+    if budget.is_selected_episode:
         quote = quote_episode_request(stage, body)
         budget.check_episode_allowance()
         if not episode_plan or episode_plan[0] != quote:

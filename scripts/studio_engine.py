@@ -868,7 +868,7 @@ class StudioEngine:
             spoken, chunks_dir, translate, translation_identity=client.translation_identity,
             preserve_invalid=True,
             preflight=(lambda chunks: client.preflight_episode(chunks, self._pending_episode_title()))
-            if budget.episode_cap is not None else None,
+            if budget.is_selected_episode else None,
             on_chunk=lambda completed: self.progress('translation', completed, len(spoken)),
         )
         document = {key: draft[key] for key in ('schema_version', 'transcript_source', 'speakers', 'references')}

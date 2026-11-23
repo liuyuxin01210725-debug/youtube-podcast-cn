@@ -11,3 +11,7 @@ Mac 普通发布的音频预检纠正及目录事务验收边界见 [Mac 发布�
 Edge 渲染的请求身份、计数口径及校准边界见 [Edge 渲染证据](t625-edge-render-evidence.md)。
 
 普通发布的逐段完整性闸与核收边界见 [普通发布逐段完整性](t627-segment-integrity.md)。
+
+本批（t631）已点选积压合格成片可先经官方增量入口导入、不等待逐集试听，听后反馈；未听仍记未听，不改「可听」与质量 PASS 定义。见 [t631 本批先导入后听反馈](t631-import-without-per-episode-listen.md)。
+
+t632 取消节目轨 DeepSeek ¥20 累计及预占帽。四集估计仅供记账，已点选制作按任务授权、整批技术预检和逐笔回执执行。见 [t632 节目轨 DeepSeek 金额决策](t632-deepseek-spend.md)。
