@@ -192,20 +192,21 @@ def decode_json_object(value):
     return result
 
 
-def load_source(path, binding, reference_hash, *, predecessor_sha256=None):
+def load_source(path, binding, reference_hash, *, rebind=None):
     try:
         if path.is_symlink():
             raise ValueError
         raw = _read_regular_bytes(path)
         envelope = decode_json_object(raw)
         draft = envelope['draft']
-        if envelope['binding'] != binding and (predecessor_sha256 is None
-                                               or hashlib.sha256(raw).hexdigest() != predecessor_sha256):
-            raise ValueError
         if envelope['digest'] != fingerprint(draft):
             raise ValueError
         if any(reference_hash(item['path']) != item['sha256'] for item in draft['references'].values()):
             raise ValueError
+        if envelope['binding'] != binding:
+            if rebind is None:
+                raise ValueError('Source binding mismatch')
+            rebind(envelope)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError):
         raise StudioRecoveryError(
             'translation_source_mismatch', '续做来源、分段或参考样本无法核验，已有稿件和缓存已保留',
@@ -213,8 +214,11 @@ def load_source(path, binding, reference_hash, *, predecessor_sha256=None):
     return draft
 
 
-def save_source(path, binding, draft):
-    _save(path, {'binding': binding, 'digest': fingerprint(draft), 'draft': draft})
+def save_source(path, binding, draft, *, translation_identity=None):
+    envelope = {'binding': binding, 'digest': fingerprint(draft), 'draft': draft}
+    if translation_identity is not None:
+        envelope['translation_identity'] = translation_identity
+    _save(path, envelope)
 
 
 def _safe_id(value, request):

@@ -28,8 +28,8 @@ MODEL = 'deepseek-flash'
 MODEL_REVISION = 'DeepSeek-V4.1-Flash-1017'
 POLICY = 'deepseek-flash-cny-2026-11-19-v1'
 FEE_MODE = 'cny_token_only'
-# Official 2026-11-19 pricing and context snapshot. No smaller tokenizer or
-# server framing bound is assumed. Charge every input token at peak cache miss.
+# Legacy wallets retain the 2026-11-19 full-context reservation. The four
+# November 23 episode wallets use the pinned template and the same peak rates.
 CONTEXT_TOKENS = 1_048_576
 INPUT_MICRO_CNY = 2
 OUTPUT_MICRO_CNY = 8
@@ -56,6 +56,8 @@ RESPONSE_LIMIT = 512 * 1024
 ERROR_BODY_LIMIT = 4096
 
 _MESSAGES = {
+    'translation_input_unverified': '无法核实待发请求的本地分词或非思考模式，未发出请求',
+    'translation_plan_unverified': '无法核实此任务剩余的翻译请求计划，未发出请求',
     'translation_policy_unverified': '翻译模型、端点或资费上限未经核实，未发出请求',
     'translation_allowance_missing': '此任务缺少明确的翻译额度，未发出请求',
     'translation_allowance_invalid': '此任务的翻译额度已过期或无法核实，未发出请求',
@@ -734,8 +736,88 @@ class TranslationBudget:
         except (OSError, sqlite3.Error, ValueError):
             raise TranslationRequestError('translation_ledger_unavailable', {}) from None
 
+    @staticmethod
+    def _check_remaining(history, amount, cap, prior, cap_lifted, evidence):
+        total = sum(row.reserved for row in history if row.reserved is not None)
+        if total + prior + amount > (2**63 - 1 if cap_lifted else cap):
+            raise TranslationRequestError('translation_budget_exhausted', evidence)
+        return total
+
+    @contextmanager
+    def unused_source(self):
+        """Exclude reservations until a verified, unused source has been rebound."""
+        with _lock_jobs_root(self.job.parent):
+            try:
+                if not _mode(self.path) and any(_mode(Path(str(self.path) + suffix))
+                                                for suffix in ('-journal', '-wal', '-shm')):
+                    raise ValueError('Orphaned wallet journal')
+                with (closing(self._connect(readonly=True)) if _mode(self.path) else nullcontext()) as db:
+                    adopted, history = self._history(db)
+                    if db is not None:
+                        prior, = db.execute('SELECT prior_microunits FROM allowance WHERE singleton=1').fetchone()
+                        if prior != 0:
+                            raise ValueError('Wallet has prior spend')
+                if adopted or history:
+                    raise ValueError('Existing translation history')
+                for name in ('translations', 'translation-chunks', 'translation-checkpoints',
+                             'translation-recoveries'):
+                    path = self.job / name
+                    if _mode(path) and (not stat.S_ISDIR(_mode(path)) or any(path.iterdir())):
+                        raise ValueError('Existing translation artifacts')
+                if any(_mode(self.job / name) for name in ('document.json', 'translation-metadata.json',
+                                                           'transcript.zh.md', 'translation-retry-blocked.json')):
+                    raise ValueError('Existing translation artifacts')
+                metadata = self.job / 'metadata.json'
+                if _mode(metadata) and _read_history_file(metadata)[0].get('title_status') == 'translated':
+                    raise ValueError('Existing title translation')
+                archive = self.job / 'debug-failures'
+                if _mode(archive) and not stat.S_ISDIR(_mode(archive)):
+                    raise ValueError('Invalid diagnosis archive')
+                diagnoses = list(archive.iterdir()) if _mode(archive) else []
+                active = self.job / 'debug-failure.json'
+                if _mode(active):
+                    diagnoses.append(active)
+                for path in diagnoses:
+                    diagnosis, _ = _read_history_file(path)
+                    if not isinstance(diagnosis.get('stage'), str):
+                        raise ValueError('Incomplete diagnosis')
+                    if diagnosis['stage'] != 'translation' and 'translation_request' not in diagnosis:
+                        continue
+                    request = diagnosis.get('translation_request')
+                    if (not isinstance(request, dict) or request.get('code') not in
+                            ('translation_policy_unverified', 'translation_budget_exhausted',
+                             'translation_allowance_invalid', 'translation_allowance_missing',
+                             'translation_input_unverified', 'translation_plan_unverified')
+                            or _has_remote_evidence(request)
+                            or request.get('billing_uncertain') is not False
+                            or request.get('completion_uncertain') is not False):
+                        raise ValueError('Unverified past translation')
+            except (sqlite3.Error, OSError, ValueError, TypeError, RecursionError):
+                raise StudioRecoveryError('translation_source_mismatch',
+                                          '翻译请求历史无法确认为空，已保留原检查点') from None
+            yield
+
+    def preflight_episode(self, quotes):
+        if self.episode_cap is None:
+            raise TranslationRequestError('translation_admission_scope', {})
+        if not _mode(self.path):
+            raise TranslationRequestError('translation_allowance_missing', {})
+        try:
+            with closing(self._connect(readonly=True)) as db, db:
+                db.execute('BEGIN')
+                cap, prior, _, lifted = self._allowance(db, None, {})
+                adopted, history = self._history(db)
+                if adopted:
+                    raise TranslationRequestError('translation_admission_scope', {})
+                self._check_history(history, None, {})
+                self._check_remaining(history, sum(q.amount for q in quotes), cap, prior, lifted, {})
+        except (OSError, sqlite3.Error, ValueError, RecursionError):
+            raise TranslationRequestError('translation_ledger_unavailable', {}) from None
+
     def reserve(self, key, amount, evidence, load_key, *, admission=None, identity=None,
-                journal_slot=None, journal_request=None, wire_key=None):
+                journal_slot=None, journal_request=None, wire_key=None, remaining_amount=0):
+        if type(amount) is not int or amount <= 0 or type(remaining_amount) is not int or remaining_amount < 0:
+            raise TranslationRequestError('translation_plan_unverified', evidence)
         if admission is None and self.episode_cap is None and not self._current(POLICY_VERIFIED_AT, POLICY_EXPIRES_AT):
             raise TranslationRequestError('translation_allowance_invalid', evidence)
         try:
@@ -769,10 +851,7 @@ class TranslationBudget:
                 self._check_history(history, key, evidence, slot=journal_slot)
                 if admission is not None:
                     self._check_other_jobs(wire_key or key, evidence, journal_request)
-                total = sum(row.reserved for row in history if row.reserved is not None)
-                limit = 2**63 - 1 if cap_lifted else cap
-                if total + prior + amount > limit:
-                    raise TranslationRequestError('translation_budget_exhausted', evidence)
+                total = self._check_remaining(history, amount + remaining_amount, cap, prior, cap_lifted, evidence)
                 self._check_dispatch(admission, identity, expires_at, evidence)
                 try:
                     credential = load_key()
@@ -875,9 +954,44 @@ def _usage(payload):
     }
 
 
+def translation_body(stage, messages):
+    return json.dumps({
+        'model': MODEL, 'messages': messages, 'response_format': {'type': 'json_object'},
+        'temperature': 0.2, 'max_tokens': OUTPUT_TOKENS[stage], 'thinking': {'type': 'disabled'},
+    }, ensure_ascii=False).encode('utf-8')
+
+
+@dataclass(frozen=True)
+class RequestQuote:
+    key: str
+    input_tokens: int
+    amount: int
+
+
+def quote_episode_request(stage, body):
+    from deepseek_input import count
+
+    try:
+        payload = decode_json_object(body)
+        # Only this reviewed payload shape is represented by the text template.
+        settings = {k: v for k, v in payload.items() if k != 'messages'}
+        if settings != {
+            'model': MODEL, 'response_format': {'type': 'json_object'}, 'temperature': 0.2,
+            'max_tokens': OUTPUT_TOKENS[stage], 'thinking': {'type': 'disabled'},
+        } or type(payload['max_tokens']) is not int:
+            raise ValueError('Request contract mismatch')
+        n = count(payload['messages'])
+        if not 0 < n <= CONTEXT_TOKENS - payload['max_tokens']:
+            raise ValueError('Context exceeded')
+        key = hashlib.sha256(stage.encode('ascii') + b'\0' + body).hexdigest()
+        return RequestQuote(key, n, n * INPUT_MICRO_CNY + payload['max_tokens'] * OUTPUT_MICRO_CNY)
+    except Exception:
+        raise TranslationRequestError('translation_input_unverified', {'stage': stage}) from None
+
+
 def request_translation(*, provider, model, base_url, messages, stage, timeout,
                         budget, load_key, opener, validate_content, validation_error,
-                        journal=None, segment_ids=None, admission=None):
+                        journal=None, segment_ids=None, admission=None, episode_plan=()):
     """Return validated content only after a durable safe response receipt."""
     require_translation_network(fake_opener=opener is not open_translation_request)
     import urllib.request
@@ -896,10 +1010,7 @@ def request_translation(*, provider, model, base_url, messages, stage, timeout,
     if journal is not None and journal.path.parent.resolve() != budget.job:
         raise TranslationRequestError('translation_admission_scope', evidence)
     max_tokens = OUTPUT_TOKENS[stage]
-    body = json.dumps({
-        'model': MODEL, 'messages': messages, 'response_format': {'type': 'json_object'},
-        'temperature': 0.2, 'max_tokens': max_tokens, 'thinking': {'type': 'disabled'},
-    }, ensure_ascii=False).encode('utf-8')
+    body = translation_body(stage, messages)
     url = f'{ENDPOINT}/chat/completions'
     wire_key = key = hashlib.sha256(stage.encode('ascii') + b'\0' + body).hexdigest()
     journal_slot = None
@@ -916,13 +1027,24 @@ def request_translation(*, provider, model, base_url, messages, stage, timeout,
             evidence['receipt'] = receipt.name
     elif segment_ids is not None:
         journal_slot = TranslationJournal.receipt_name(segment_ids)
-    amount = CONTEXT_TOKENS * INPUT_MICRO_CNY + max_tokens * OUTPUT_MICRO_CNY
-    evidence.update(policy=POLICY, input_token_bound=CONTEXT_TOKENS, output_token_bound=max_tokens)
+    input_bound = CONTEXT_TOKENS
+    remaining_amount = 0
+    if budget.episode_cap is not None:
+        quote = quote_episode_request(stage, body)
+        budget.check_episode_allowance()
+        if not episode_plan or episode_plan[0] != quote:
+            raise TranslationRequestError('translation_plan_unverified', evidence)
+        from deepseek_input import ARCHIVE_SHA256
+        evidence['tokenizer_sha256'] = ARCHIVE_SHA256
+        input_bound = quote.input_tokens
+        remaining_amount = sum(item.amount for item in episode_plan[1:])
+    amount = input_bound * INPUT_MICRO_CNY + max_tokens * OUTPUT_MICRO_CNY
+    evidence.update(policy=POLICY, input_token_bound=input_bound, output_token_bound=max_tokens)
     identity = (provider, model, base_url)
     credential, expires_at = budget.reserve(
         key, amount, evidence, load_key, admission=admission, identity=identity,
         journal_slot=journal_slot, journal_request=(url, body) if segment_ids is not None else None,
-        wire_key=wire_key,
+        wire_key=wire_key, remaining_amount=remaining_amount,
     )
     evidence.update(billing_uncertain=True, completion_uncertain=True)
 
@@ -1011,7 +1133,7 @@ def request_translation(*, provider, model, base_url, messages, stage, timeout,
     evidence['response_model'] = resolved
     if not (
         usage is not None and len(usage) == 3
-        and 0 < usage['prompt_tokens'] <= CONTEXT_TOKENS
+        and 0 < usage['prompt_tokens'] <= input_bound
         and 0 < usage['completion_tokens'] <= max_tokens
         and usage['total_tokens'] == usage['prompt_tokens'] + usage['completion_tokens']
         and usage['total_tokens'] <= CONTEXT_TOKENS

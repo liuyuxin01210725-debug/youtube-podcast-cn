@@ -58,7 +58,7 @@ from studio_recovery import (
 from studio_speakers import (SpeakerGateError, expected_speakers, requires_voice_mapping, use_male_slots,
                              validate_speaker_ids, validate_speaker_voices)
 from temporary_audio import download_audio_only, sha256_file
-from translation_budget import TranslationBudget, TranslationRequestError
+from translation_budget import TranslationBudget, TranslationRequestError, supports_policy
 from tts_backends import EDGE_ACCESS_DENIED_MESSAGE, SynthesisRequest, TTSBackendError, build_backend
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -726,6 +726,41 @@ class StudioEngine:
             return None
         raise StudioInputError('书听不生成整本一条 MP3。章节已写入 book.json，按章合成留到下一版。')
 
+    @staticmethod
+    def _translation_plan(draft):
+        spoken = [
+            SubtitleSegment(
+                id=record['id'], start_ms=record['start_ms'], end_ms=record['end_ms'], text=record['text'],
+                speaker_id=record.get('speaker_id'), ambiguous=bool(record.get('ambiguous')),
+            )
+            for record in draft['segments'] if not record.get('is_ad')
+        ]
+        if not spoken:
+            raise StudioInputError('整段都被识别成口播广告，没有可朗读的对白')
+        plan = [[segment.id for segment in chunk] for chunk in chunk_segments(spoken)]
+        return spoken, plan
+
+    def _pending_episode_title(self):
+        from studio_publish_icloud import contains_cjk, human_title, topic_without_show
+
+        try:
+            try:
+                metadata = decode_json_object(_read_regular_bytes(self.job / 'metadata.json'))
+            except FileNotFoundError:
+                metadata = {}
+            if contains_cjk(human_title(metadata.get('display_title')) or ''):
+                return None
+            source = human_title(metadata.get('source_title'))
+            if not source:
+                state = decode_json_object(_read_regular_bytes(self.job / 'state.json'))
+                source = human_title(state.get('title'))
+            if not source:
+                raise ValueError('Missing title')
+            topic = topic_without_show(source, metadata.get('channel') or metadata.get('uploader'))
+            return None if contains_cjk(topic) else topic
+        except (OSError, TypeError, ValueError, RecursionError):
+            raise TranslationRequestError('translation_plan_unverified', {}) from None
+
     def prepare(self, config, wav=None, *, source_identity=None):
         if config.get('content_type') == 'book':
             raise StudioInputError('书听禁止声纹分析')
@@ -773,7 +808,7 @@ class StudioEngine:
             provider, budget=budget,
             credential_loader=lambda: self.credential(provider), request_journal=journal,
         )
-        binding = fingerprint({
+        binding_fields = {
             'version': 1,
             'source': source_identity if source_identity is not None else config.get('source'),
             'expected_speakers': expected_speakers(config),
@@ -782,36 +817,40 @@ class StudioEngine:
             'male_only': use_male_slots(config),
             'requires_voice_mapping': requires_voice_mapping(config),
             'translation_identity': client.translation_identity,
-        })
+        }
+        binding = fingerprint(binding_fields)
         if resuming:
             self.progress('translation')
-            # Shelf Help stopped before its first request. Its verified source
-            # predates the Flash selection; only this exact envelope and the
-            # corresponding new full configuration fingerprint may pair up.
-            predecessor = None
-            if (budget.episode_cap is not None
-                    and binding == '461ed07513db718f3c64c7d9f56992c471b35fa07669bf6601ad18ff2d0ea491'
-                    and self.job.name == 'd1e5daab08174fd2be2b3868d14c7cd2'):
-                predecessor = '040054fbbaeaf5609256d48a361d5a4be7589e2f731c5867525efb8c84eadf5a'
-            draft = load_source(checkpoint, binding, lambda name: sha256_file(self.owned(name)),
-                                predecessor_sha256=predecessor)
 
-        spoken = [
-            SubtitleSegment(
-                id=record['id'], start_ms=record['start_ms'], end_ms=record['end_ms'], text=record['text'],
-                speaker_id=record.get('speaker_id'), ambiguous=bool(record.get('ambiguous')),
-            )
-            for record in draft['segments'] if not record.get('is_ad')
-        ]
-        if not spoken:
-            raise StudioInputError('整段都被识别成口播广告，没有可朗读的对白')
-        plan = [[segment.id for segment in chunk] for chunk in chunk_segments(spoken)]
+            def rebind(envelope):
+                # Older envelopes stored only the full fingerprint. Reconstruct the
+                # previous default from the provider config and verify its preimage.
+                config_provider = get_provider_config(provider)
+                old = envelope.get('translation_identity',
+                                   f'{provider}|{config_provider.default_model}|{config_provider.default_base_url}')
+                draft = envelope['draft']
+                if (not supports_policy(provider, client.model, client.base_url)
+                        or not isinstance(old, str) or old == client.translation_identity
+                        or fingerprint({**binding_fields, 'translation_identity': old}) != envelope['binding']
+                        or check_source_coverage(draft, source_identity)
+                        or draft.get('media_sha256') != source_identity['sha256']
+                        or self._translation_plan(draft)[1] != draft.get('translation_plan')):
+                    raise ValueError('Unproven checkpoint migration')
+                speakers = validate_speaker_ids(config, (row.get('speaker_id') for row in draft['segments']))
+                if set(draft['references']) != speakers or set(draft['speakers']) != speakers:
+                    raise ValueError('Reference or speaker identity mismatch')
+                with budget.unused_source():
+                    save_source(checkpoint, binding, draft, translation_identity=client.translation_identity)
+
+            draft = load_source(checkpoint, binding, lambda name: sha256_file(self.owned(name)), rebind=rebind)
+
+        spoken, plan = self._translation_plan(draft)
         if resuming:
             if plan != draft.get('translation_plan'):
                 raise StudioRecoveryError('translation_source_mismatch', '续做分块边界已变化，原稿与缓存已保留')
         else:
             draft['translation_plan'] = plan
-            save_source(checkpoint, binding, draft)
+            save_source(checkpoint, binding, draft, translation_identity=client.translation_identity)
 
         self.progress('translation', 0, len(spoken))
 
@@ -828,6 +867,8 @@ class StudioEngine:
         translated = translate_with_resume(
             spoken, chunks_dir, translate, translation_identity=client.translation_identity,
             preserve_invalid=True,
+            preflight=(lambda chunks: client.preflight_episode(chunks, self._pending_episode_title()))
+            if budget.episode_cap is not None else None,
             on_chunk=lambda completed: self.progress('translation', completed, len(spoken)),
         )
         document = {key: draft[key] for key in ('schema_version', 'transcript_source', 'speakers', 'references')}

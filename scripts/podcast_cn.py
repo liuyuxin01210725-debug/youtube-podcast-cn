@@ -53,7 +53,7 @@ from studio_recovery import (
 from translation_budget import (
     ENDPOINT,
     MODEL,
-    TranslationBudget,
+    TranslationBudget, TranslationRequestError, quote_episode_request, translation_body,
     open_translation_request,
     request_translation,
     supports_policy,
@@ -382,6 +382,17 @@ _TITLE_SYSTEM_PROMPT = """你给中文播客私人听起单集标题。
 只返回 JSON：{"title":"中文主题"}。"""
 
 
+def _chunk_messages(segments):
+    source = [{"id": s.id, "text": s.text} for s in segments]
+    return [{"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(source, ensure_ascii=False)}]
+
+
+def _title_messages(topic):
+    return [{"role": "system", "content": _TITLE_SYSTEM_PROMPT},
+            {"role": "user", "content": topic.strip()}]
+
+
 class OpenAICompatibleTranslationClient:
     """OpenAI-compatible translation client with strict ID validation."""
 
@@ -427,6 +438,7 @@ class OpenAICompatibleTranslationClient:
             self._load_key = lambda: resolved_key
         else:
             self._load_key = credential_loader or (lambda: os.getenv(config.api_key_env))
+        self._episode_plan = ()
         self._budget = budget
         self._request_journal = request_journal
         self._admission = admission
@@ -441,6 +453,22 @@ class OpenAICompatibleTranslationClient:
             return f"{identity}|{_BOUNDED_TRANSLATION_VERSION}"
         return identity
 
+    def preflight_episode(self, chunks, title):
+        """Bind remaining wire bodies in dispatch order, including the pending title."""
+        self._episode_plan = ()
+        if not supports_policy(self.provider, self.model, self.base_url):
+            raise TranslationRequestError('translation_policy_unverified', {})
+        requests = [('translation_chunk', _chunk_messages(chunk)) for chunk in chunks]
+        if title is not None:
+            if not isinstance(title, str) or not title.strip():
+                raise TranslationRequestError('translation_plan_unverified', {})
+            requests.append(('translation_title', _title_messages(title)))
+        quotes = tuple(quote_episode_request(stage, translation_body(stage, messages))
+                       for stage, messages in requests)
+        self._budget.preflight_episode(quotes)
+        self._episode_plan = quotes
+        return quotes
+
     def _chat_json(self, messages, stage, timeout, validate, *, segment_ids=None):
         def validate_content(content):
             if not isinstance(content, str):
@@ -449,29 +477,22 @@ class OpenAICompatibleTranslationClient:
             cleaned = re.sub(r"\s*```$", "", cleaned)
             return validate(decode_json_object(cleaned))
 
-        return request_translation(
+        result = request_translation(
             provider=self.provider, model=self.model, base_url=self.base_url,
             messages=messages, stage=stage, timeout=timeout, budget=self._budget,
             load_key=self._load_key, opener=self._opener, validate_content=validate_content,
             validation_error=TranslationValidationError,
             journal=self._request_journal if segment_ids is not None else None,
             segment_ids=segment_ids,
-            admission=self._admission,
+            admission=self._admission, episode_plan=self._episode_plan,
         )
+        self._episode_plan = self._episode_plan[1:]
+        return result
 
     def translate(self, segments: list[SubtitleSegment]) -> dict[str, str]:
         expected_ids = [segment.id for segment in segments]
-        source_payload = [
-            {"id": segment.id, "text": segment.text} for segment in segments
-        ]
         return self._chat_json(
-            [
-                {"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(source_payload, ensure_ascii=False),
-                },
-            ],
+            _chunk_messages(segments),
             stage="translation_chunk", timeout=120,
             validate=lambda payload: validate_translation_payload(payload, expected_ids),
             segment_ids=expected_ids,
@@ -494,10 +515,7 @@ class OpenAICompatibleTranslationClient:
             return title.strip()[:500]
 
         return self._chat_json(
-            [
-                {"role": "system", "content": _TITLE_SYSTEM_PROMPT},
-                {"role": "user", "content": topic},
-            ],
+            _title_messages(topic),
             stage="translation_title", timeout=45, validate=validate,
         )
 
@@ -699,6 +717,7 @@ def translate_with_resume(
     *,
     preserve_invalid: bool = False,
     on_chunk: Callable[[int], None] | None = None,
+    preflight=None,
 ) -> dict[str, str]:
     """Translate chunks with validated, atomic checkpoints for resuming."""
     def invalid_cache(message):
@@ -727,6 +746,8 @@ def translate_with_resume(
         path = chunk_dir / f"chunk-{index:04d}.json"
         source_hash = _source_hash(chunk)
         plans.append((chunk, path, source_hash, cached(path, index, chunk, source_hash)))
+    if preflight is not None:
+        preflight([chunk for chunk, _, _, cached_result in plans if cached_result is None])
     for chunk_index, (chunk, path, source_hash, translated) in enumerate(plans, 1):
         source_ids = [segment.id for segment in chunk]
         if translated is None:
@@ -1146,6 +1167,8 @@ def prepare_episode(
         job_dir / "translation-chunks",
         effective_translator,
         translation_identity=effective_identity,
+        preflight=(lambda chunks: client.preflight_episode(chunks, metadata.source_title))
+        if client is not None and client._budget.episode_cap is not None else None,
     )
     _write_job_state(state_path, "translation_ready", url, metadata)
     transcript = _render_chinese_transcript(metadata, url, segments, translations)
