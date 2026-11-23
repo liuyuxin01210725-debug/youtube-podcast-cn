@@ -6,10 +6,12 @@ import errno
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import shutil
 import sqlite3
+import struct
 import sys
 import tempfile
 import threading
@@ -17,6 +19,8 @@ import unittest
 import wave
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError, URLError
+
+import edge_tts
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import podcast_cn
@@ -441,8 +445,13 @@ class StudioRecoveryTests(unittest.TestCase):
         job = self.job
         calls = []
 
-        class OfflineEdge:
+        # Exercise the real SDK configuration and audio preflight while
+        # replacing the network stream with a deterministic audible signal.
+        tone = struct.pack('<60h', *(int(4000 * math.sin(math.tau * frame / 60)) for frame in range(60)))
+
+        class OfflineEdge(edge_tts.Communicate):
             def __init__(self, text, voice):
+                super().__init__(text, voice)
                 calls.append(text)
 
             async def save(self, filename):
@@ -454,7 +463,7 @@ class StudioRecoveryTests(unittest.TestCase):
                     raise TimeoutError('synthetic Edge timeout')
                 with wave.open(filename, 'wb') as audio:
                     audio.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
-                    audio.writeframes(b'\0\0' * 24000 * 12)
+                    audio.writeframes(tone * (24000 * 12 // 60))
 
         with (
             patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': str(library)}),

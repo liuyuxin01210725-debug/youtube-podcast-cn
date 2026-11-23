@@ -1,6 +1,8 @@
 from copy import deepcopy
+import fcntl
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -179,10 +181,16 @@ def test_cli_rejects_without_changing_files(ws, defect):
 
 def test_failed_directory_sync_rolls_back_new_document(ws, monkeypatch):
     before = ws.snapshot()
+    sync_dir = studio_recovery._sync_dir
+    attempts = []
 
-    def fail_after_link(_):
-        assert ws.output.is_file()
-        raise OSError('fixture: directory sync failed after link')
+    def fail_after_link(directory):
+        attempts.append(directory)
+        if len(attempts) == 1:
+            assert ws.output.is_file()
+            raise OSError('fixture: directory sync failed after link')
+        assert not ws.output.exists()
+        sync_dir(directory)
 
     with monkeypatch.context() as patched:
         patched.setattr(studio_recovery, '_sync_dir', fail_after_link)
@@ -607,3 +615,277 @@ def test_failed_write_preserves_document(request, monkeypatch, fixture, mode, fa
     assert ws.snapshot() == before
     if failure != 'stale-at-install':
         assert receive(*ws.append_inputs, **{mode: True})['status'] == 'received'
+
+
+@pytest.fixture
+def pending_ws(ws):
+    for row in ws.document['segments']:
+        row['chinese'] = ''
+    ws.document['segments'][0]['is_ad'] = True
+    ws.document['segments'][3]['ambiguous'] = False
+    _write(ws.base, ws.document)
+    ws.stage(ws.base, (2, 3))
+    receive(*ws.inputs)
+    ws.stage(ws.output, (4,))
+    receive(*ws.append_inputs)
+    ws.stage(ws.output, (2,))
+    ws.plan['segments'][0]['old_chinese'] = ws.rows[0]['zh']
+    ws.rows[0]['zh'] = '修订译文'
+    _write(ws.export, ws.rows)
+    ws.plan['export_sha256'] = _digest(ws.export)
+    _write(ws.manifest, ws.plan)
+    receive(*ws.append_inputs, revise=True)
+    return _prepare_pending_target(ws)
+
+
+def _prepare_pending_target(ws):
+    from studio_server import Studio
+
+    ws.pending = ws.job.parent / 'pending.json'
+    ws.output.rename(ws.pending)
+    ws.state = ws.job / 'state.json'
+    _write(ws.state, {'status': 'queued', 'action': 'prepare'})
+    ws.studio = Studio(ws.job.parent, recover=False)
+    ws.studio.action(ws.job.name, 'cancel')
+    assert json.loads(ws.state.read_bytes())['status'] == 'cancelled'
+    normalized = hashlib.sha256(b'normalized audio').hexdigest()
+    _write(ws.lock, {'kind': 'local', 'sha256': normalized, 'input_sha256': _digest(ws.source),
+                     'bytes': 64, 'duration_ms': 10})
+    ws.checkpoint = ws.job / 'translation-source.json'
+    ws.source_draft = deepcopy(ws.document)
+    for row in ws.source_draft['segments']:
+        del row['chinese']
+    ws.source_draft['media_sha256'] = normalized
+    studio_recovery.save_source(ws.checkpoint, 'fixture', ws.source_draft)
+    ws.ledger = ws.job / 'translation-budget.sqlite3'
+    ws.ledger.write_bytes(b'fixture: uncertain; do not open')
+    (ws.job / 'audio-cache').mkdir()
+    (ws.job / 'audio-cache/keep').write_bytes(b'cached audio')
+    ws.source_sha = _digest(ws.source)
+    return ws
+
+
+def _install(ws, **overrides):
+    options = {'job_id': ws.job.name, 'source_sha256': ws.source_sha,
+               'document_sha256': _digest(ws.pending), **overrides}
+    return studio_import_gemini.install_pending_draft(ws.job, ws.pending, ws.source, **options)
+
+
+def test_pending_install_cli_is_exact_and_idempotent(pending_ws, monkeypatch, capsys):
+    ws = pending_ws
+    before = ws.snapshot()
+    expected = ws.pending.read_bytes()
+    cli = [str(SCRIPT), '--job-dir', str(ws.job), '--source-audio', ws.source.name,
+           '--install-pending-draft', str(ws.pending), '--job-id', ws.job.name,
+           '--source-sha256', ws.source_sha, '--document-sha256', _digest(ws.pending)]
+    monkeypatch.setattr(sys, 'argv', cli)
+    open_file, open_fd = Path.open, os.open
+
+    def deny_sqlite(*args, **kwargs):
+        pytest.fail('installation opened the translation ledger')
+
+    def no_ledger_open(path, *args, **kwargs):
+        if path == ws.ledger:
+            deny_sqlite()
+        return open_file(path, *args, **kwargs)
+
+    def no_ledger_fd(path, *args, **kwargs):
+        if path == ws.ledger:
+            deny_sqlite()
+        return open_fd(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(sqlite3, 'connect', deny_sqlite)
+        patched.setattr(Path, 'open', no_ledger_open)
+        patched.setattr(os, 'open', no_ledger_fd)
+        assert studio_import_gemini.main() == 0
+        receipt = json.loads(capsys.readouterr().out)
+        assert receipt == {'status': 'installed', 'job_id': ws.job.name,
+                           'source_sha256': ws.source_sha, 'document_sha256': _digest(ws.pending)}
+        assert ws.output.read_bytes() == expected
+        first = ws.output.stat()
+        assert studio_import_gemini.main() == 0
+        assert json.loads(capsys.readouterr().out) == {**receipt, 'status': 'unchanged'}
+        assert ws.output.stat().st_ino == first.st_ino
+        assert ws.output.stat().st_mtime_ns == first.st_mtime_ns
+    after = ws.snapshot()
+    assert after == {**before, 'job/document.json': _digest(ws.pending),
+                     '.server.lock': hashlib.sha256(b'').hexdigest()}
+
+
+def test_pending_install_can_use_source_draft(pending_ws):
+    ws = pending_ws
+    ws.checkpoint.unlink()
+    _write(ws.job / 'source-draft.json', ws.source_draft)
+    _write(ws.state, {'status': 'failed'})
+    state_raw = ws.state.read_bytes()
+    assert _install(ws)['status'] == 'installed'
+    assert ws.output.read_bytes() == ws.pending.read_bytes()
+    assert ws.state.read_bytes() == state_raw
+
+
+def test_pending_install_with_identical_document_needs_no_new_lock_files(pending_ws):
+    ws = pending_ws
+    (ws.job / '.podcast-run.lock').unlink()
+    ws.output.write_bytes(ws.pending.read_bytes())
+    before = ws.snapshot()
+    assert _install(ws)['status'] == 'unchanged'
+    assert ws.snapshot() == before
+    assert not (ws.job / '.podcast-run.lock').exists()
+
+
+def test_pending_install_retains_missing_response_recovery(recovery_ws):
+    ws = recovery_ws
+    receipt = receive(*ws.append_inputs, recovery_of_missing_response=True)
+    _prepare_pending_target(ws)
+    assert _install(ws)['status'] == 'installed'
+    result = json.loads(ws.output.read_bytes())['translation_imports'][-1]
+    assert result['recovery_of_missing_response'] == receipt['recovery_of_missing_response']
+    assert ws.output.read_bytes() == ws.pending.read_bytes()
+
+
+@pytest.mark.parametrize('defect, message', [
+    ('different document', '不同译稿'), ('wrong job', '任务 ID'), ('wrong draft sha', '待审稿 SHA-256'),
+    ('wrong input sha', '音源'), ('changed audio', '音源'), ('wrong source identity', '音源'),
+    ('wrong normalized sha', '来源'), ('wrong checkpoint digest', '来源'),
+    ('wrong segment', '段落'), ('wrong speaker', '说话人'), ('changed ambiguous', '待核'),
+    ('changed source text', '原文'), ('missing provenance', '接收'), ('wrong revision sha', '来源'),
+    ('queued', '活跃'), ('running', '活跃'), ('cancelling', '活跃'),
+    ('malformed state', '状态'),
+])
+def test_pending_install_rejects_invalid_inputs_without_writes(pending_ws, defect, message):
+    ws = pending_ws
+    options = {}
+    if defect == 'different document':
+        ws.output.write_bytes(ws.pending.read_bytes() + b'\n')
+    elif defect == 'wrong job':
+        options['job_id'] = 'other-job'
+    elif defect == 'wrong draft sha':
+        options['document_sha256'] = '0' * 64
+    elif defect == 'wrong input sha':
+        options['source_sha256'] = '0' * 64
+    elif defect == 'changed audio':
+        ws.source.write_bytes(b'replaced audio')
+    elif defect in ('wrong source identity', 'wrong normalized sha'):
+        identity = json.loads(ws.lock.read_bytes())
+        identity['input_sha256' if defect == 'wrong source identity' else 'sha256'] = '0' * 64
+        _write(ws.lock, identity)
+    elif defect == 'wrong checkpoint digest':
+        checkpoint = json.loads(ws.checkpoint.read_bytes())
+        checkpoint['digest'] = '0' * 64
+        _write(ws.checkpoint, checkpoint)
+    elif defect in ('queued', 'running', 'cancelling', 'malformed state'):
+        _write(ws.state, {'status': defect} if defect != 'malformed state' else {})
+    else:
+        document = json.loads(ws.pending.read_bytes())
+        if defect == 'missing provenance':
+            del document['translation_import']
+        elif defect == 'wrong revision sha':
+            document['translation_revisions'][0]['source_sha256'] = '0' * 64
+        else:
+            key, value = {
+                'wrong segment': ('id', 'seg-009999'), 'wrong speaker': ('speaker_id', 's1'),
+                'changed ambiguous': ('ambiguous', False), 'changed source text': ('text', 'new text'),
+            }[defect]
+            document['segments'][1][key] = value
+        _write(ws.pending, document)
+    before = ws.snapshot()
+    with pytest.raises(ValueError, match=message):
+        _install(ws, **options)
+    assert ws.snapshot() == before
+
+
+@pytest.mark.parametrize('relative_lock', ['.server.lock', 'job/.podcast-run.lock'])
+def test_pending_install_rejects_writer(pending_ws, relative_lock):
+    ws = pending_ws
+    (ws.job.parent / '.server.lock').touch()
+    before = ws.snapshot()
+    with (ws.job.parent / relative_lock).open('a+b') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(studio_recovery.StudioRecoveryError, match='仍在'):
+            _install(ws)
+    assert ws.snapshot() == before
+
+
+@pytest.mark.parametrize('failure', ['write', 'sync', 'interrupt', 'concurrent document', 'new state'])
+def test_pending_install_rolls_back_failed_write(pending_ws, monkeypatch, failure):
+    ws = pending_ws
+    (ws.job.parent / '.server.lock').touch()
+    before = ws.snapshot()
+    fsync = studio_recovery.os.fsync
+    sync_dir = studio_recovery._sync_dir
+    attempts = []
+    winner = ws.pending.read_bytes() + b'\n'
+
+    def after_staging(fd):
+        if failure == 'write':
+            raise OSError('fixture write failure')
+        fsync(fd)
+        if failure == 'new state':
+            _write(ws.state, {'status': 'queued'})
+        else:
+            ws.output.write_bytes(winner)
+
+    def after_link(directory):
+        attempts.append(directory)
+        if len(attempts) == 1:
+            assert directory == ws.job
+            assert ws.output.read_bytes() == ws.pending.read_bytes()
+            raise (KeyboardInterrupt if failure == 'interrupt' else OSError)('fixture sync failure')
+        assert not ws.output.exists()
+        sync_dir(directory)
+
+    if failure in ('sync', 'interrupt'):
+        monkeypatch.setattr(studio_recovery, '_sync_dir', after_link)
+    else:
+        monkeypatch.setattr(studio_recovery.os, 'fsync', after_staging)
+    expected_error = {
+        'write': OSError, 'sync': OSError, 'interrupt': KeyboardInterrupt,
+        'concurrent document': ValueError, 'new state': ValueError,
+    }[failure]
+    with pytest.raises(expected_error):
+        _install(ws)
+    if failure in ('sync', 'interrupt'):
+        assert attempts == [ws.job, ws.job]
+    if failure == 'concurrent document':
+        before['job/document.json'] = hashlib.sha256(winner).hexdigest()
+    if failure == 'new state':
+        before['job/state.json'] = _digest(ws.state)
+    assert ws.snapshot() == before
+
+
+def test_pending_install_preserves_confirmation_and_render_gates(pending_ws):
+    from studio_document import segment_evidence_hash
+    from studio_engine import StudioEngine, StudioInputError
+
+    ws = pending_ws
+    receipt = _install(ws)
+    document = json.loads(ws.output.read_bytes())
+    segment = document['segments'][1]
+    assert segment['ambiguous'] is True
+    assert document['segments'][0]['chinese'] == ''
+    assert document['segments'][4]['chinese'] == ''
+    with pytest.raises(StudioInputError, match='说话人待核对'):
+        StudioEngine(ws.job).render({}, document)
+    with pytest.raises(ValueError, match='confirm-segments'):
+        ws.studio.confirm_speakers(ws.job.name)
+    evidence = {'official_source_sha256': hashlib.sha256(b'official source').hexdigest(),
+                'official_speaker': 'Speaker 2', 'official_locator': 'turn 2',
+                'official_excerpt': segment['text']}
+    digest = receipt['document_sha256']
+    item = {'id': segment['id'], 'speaker_id': segment['speaker_id'], **evidence,
+            'evidence_hash': segment_evidence_hash(digest, segment, evidence)}
+    with pytest.raises(ValueError, match='document_sha256'):
+        ws.studio.confirm_segments(ws.job.name, {'document_sha256': _digest(ws.base), 'items': [item]})
+    stale = {**item, 'official_locator': 'turn 3'}
+    request = {'document_sha256': digest, 'items': [stale]}
+    assert ws.studio.confirm_segments(ws.job.name, request)['rejected'] == [
+        {'id': segment['id'], 'reason': 'evidence_hash_mismatch'}]
+    assert _digest(ws.output) == digest
+    result = ws.studio.confirm_segments(ws.job.name, {**request, 'items': [item]})
+    assert result['applied'] == [segment['id']]
+    reviewed = json.loads(ws.output.read_bytes())
+    assert reviewed['segments'][1]['ambiguous'] is False
+    assert reviewed['segments'][2]['ambiguous'] is True
+    for key in ('translation_import', 'translation_imports', 'translation_revisions'):
+        assert reviewed[key] == document[key]

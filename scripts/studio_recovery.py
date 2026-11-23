@@ -1,7 +1,7 @@
 """Private draft checkpoints and bounded request receipts for Studio podcasts."""
 
 import builtins
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 import errno
 import fcntl
 import hashlib
@@ -128,18 +128,37 @@ def fingerprint(value):
 
 
 @contextmanager
-def podcast_job_lock(job):
+def _exclusive_lock(path, code, message, *, create):
     # Separate open descriptions contend across threads and processes. Never
     # remove the lock file, since another worker may already have opened it.
-    fd = os.open(job / '.podcast-run.lock', os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
     try:
+        fd = os.open(path, flags | (os.O_CREAT if create else 0), 0o600)
+    except FileNotFoundError:
+        if create:
+            raise
+        yield
+        return
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(errno.EINVAL, 'Expected a regular lock file')
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            raise StudioRecoveryError('job_busy', '这个播客任务仍在处理') from None
+            raise StudioRecoveryError(code, message) from None
         yield
     finally:
         os.close(fd)
+
+
+def podcast_job_lock(job, *, create=True):
+    return _exclusive_lock(job / '.podcast-run.lock', 'job_busy', '这个播客任务仍在处理', create=create)
+
+
+def studio_root_lock(root, *, create=True):
+    # The server and inbox use this same lease for queue and document writers.
+    return _exclusive_lock(root / '.server.lock', 'studio_busy', '任务目录仍在由工作台或收件箱使用',
+                           create=create)
 
 
 def _sync_dir(path):
@@ -154,8 +173,9 @@ def _save(path, value, *, exclusive=False):
     _save_bytes(path, json.dumps(value, ensure_ascii=False).encode('utf-8'), exclusive=exclusive)
 
 
-def _save_bytes(path, raw, *, exclusive=False, before_install=None):
+def _save_bytes(path, raw, *, exclusive=False, before_install=None, rollback_exclusive=False):
     temporary = None
+    staged = None
     try:
         with tempfile.NamedTemporaryFile(mode='wb', dir=path.parent, delete=False) as output:
             temporary = Path(output.name)
@@ -165,10 +185,24 @@ def _save_bytes(path, raw, *, exclusive=False, before_install=None):
         if before_install is not None:
             before_install()
         if exclusive:
+            if rollback_exclusive:
+                staged = temporary.lstat()
             os.link(temporary, path)
+            if rollback_exclusive:
+                temporary.unlink()
+                temporary = None
         else:
             os.replace(temporary, path)
         _sync_dir(path.parent)
+    except BaseException:
+        if staged is not None:
+            # Roll back only our link, including an interrupt at link(2).
+            with suppress(FileNotFoundError):
+                if os.path.samestat(staged, path.lstat()):
+                    path.unlink()
+                    with suppress(OSError):
+                        _sync_dir(path.parent)
+        raise
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

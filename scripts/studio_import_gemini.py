@@ -1,17 +1,18 @@
-"""Accept an existing Gemini web export into a separate, unqueued Studio job."""
+"""Receive Gemini web translations or install a pending draft into an idle Studio job."""
 
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 from tempfile import TemporaryDirectory
 
 from studio_recovery import (
     StudioRecoveryError, _read_regular_bytes, _save_bytes, decode_json,
-    decode_json_object, podcast_job_lock,
+    decode_json_object, fingerprint, podcast_job_lock, studio_root_lock,
 )
 from temporary_audio import sha256_file
 
@@ -25,6 +26,12 @@ _MISSING_RESPONSE = {
     'request_key': 'a257fa8fd7b4a33f1d51ebcbc7be51a142415fa479b28eb57cfce98f88101b48',
     'provider_response_id': '61a6ce7d-9b84-48a0-bf72-6d9881f1f406',
 }
+_RECEIPT_MODEL = {
+    'schema_version': 1, 'provider': 'gemini_app_manual',
+    'display_model': 'Neon 高', 'official_model_id': None,
+}
+_RECEIPT_HASHES = ('document_sha256', 'source_sha256', 'export_sha256', 'manifest_sha256')
+_BUDGET_FILE = 'translation-budget.sqlite3'
 
 
 def _sha256(raw):
@@ -111,6 +118,165 @@ def _replace_document(output, raw, verify_inputs):
             raise
 
 
+def _read_optional(path):
+    try:
+        return _read_regular_bytes(path)
+    except FileNotFoundError:
+        return None
+
+
+def _target_matches(output, raw):
+    prior = _read_optional(output)
+    if prior is not None and prior != raw:
+        raise ValueError('目标已有不同译稿或接收记录，原文件已保留')
+    return prior is not None
+
+
+def _install_document(output, raw, verify_inputs):
+    try:
+        _save_bytes(output, raw, exclusive=True, before_install=verify_inputs, rollback_exclusive=True)
+    except FileExistsError:
+        raise ValueError('目标已由其他写入者创建，原文件已保留') from None
+
+
+def _is_sha256(value):
+    return isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def _pending_audio_sha256(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as audio:
+        if not stat.S_ISREG(os.fstat(audio.fileno()).st_mode):
+            raise ValueError('请使用原任务目录内的常规音源文件')
+        return hashlib.file_digest(audio, 'sha256').hexdigest()
+
+
+def _pending_provenance(document, source_sha256):
+    receipt = dict.fromkeys((*_RECEIPT_HASHES, 'segment_ids'))
+    receipt.update(_RECEIPT_MODEL, source_sha256=source_sha256)
+    imports, imported = _append_history(document, receipt)
+    revisions = document.get('translation_revisions', [])
+    if not isinstance(revisions, list):
+        raise ValueError('已有修订历史格式无效')
+    speech = {row['id']: row['chinese'] for row in document['segments'] if not row.get('is_ad')}
+    if imported != {ident for ident, zh in speech.items() if zh.strip()}:
+        raise ValueError('译文与既有接收记录的段落覆盖不一致')
+    for item in imports:
+        if (source_sha256 == _PAID_SOURCE_SHA256 and _PAID_SEGMENT_IDS.intersection(item['segment_ids'])
+                and (_RECOVERY_FIELD not in item or item is imports[0])):
+            raise ValueError('付费首块缺少已声明的丢失正文恢复记录')
+    for item in revisions:
+        if (not isinstance(item, dict) or item.keys() != receipt.keys() | {'previous_chinese'}
+                or type(item['schema_version']) is not int
+                or any(item[key] != receipt[key] for key in (*_RECEIPT_MODEL, 'source_sha256'))):
+            raise ValueError('修订历史来源或格式无效')
+        ids, previous = item['segment_ids'], item['previous_chinese']
+        if (not isinstance(ids, list) or not ids
+                or any(not isinstance(ident, str) or ident not in imported for ident in ids)
+                or len(set(ids)) != len(ids)
+                or not isinstance(previous, dict) or set(previous) != set(ids)
+                or any(not isinstance(zh, str) or not zh.strip() for zh in previous.values())):
+            raise ValueError('修订历史段落或旧译无效')
+    if any(not _is_sha256(item[key]) for item in (*imports, *revisions) for key in _RECEIPT_HASHES):
+        raise ValueError('接收或修订历史缺少有效 SHA-256')
+
+
+def _validate_pending_document(document, source, source_sha256):
+    if (type(document.get('schema_version')) is not int or document['schema_version'] != 1
+            or not isinstance(document.get('speakers'), dict)
+            or not isinstance(document.get('references'), dict)
+            or any(document.get(key) != source.get(key)
+                   for key in ('schema_version', 'transcript_source', 'speakers', 'references'))):
+        raise ValueError('待审稿的来源结构、说话人或参考样本不一致')
+    if (document.get('voices_confirmed', False) is not False or document.get('confirmed_voice_slots')
+            or document.get('segment_confirmations', []) != []):
+        raise ValueError('待审稿不得携带已确认的说话人或音色')
+    rows, originals = document.get('segments'), source.get('segments')
+    if _segment_keys(rows, None) != _segment_keys(originals, None):
+        raise ValueError('待审稿的段落 ID、顺序或说话人与来源不一致')
+    for row, original in zip(rows, originals):
+        if row.get('ambiguous') is not original.get('ambiguous'):
+            raise ValueError('待审稿改变了说话人待核标记')
+        if (fingerprint({k: v for k, v in row.items() if k != 'chinese'})
+                != fingerprint({k: v for k, v in original.items() if k != 'chinese'})):
+            raise ValueError('待审稿改变了原文、时轴或广告标记')
+        if not isinstance(row.get('chinese'), str):
+            raise ValueError('待审稿含非法译文')
+    _pending_provenance(document, source_sha256)
+
+
+def install_pending_draft(job, pending, source_audio, *, job_id, source_sha256, document_sha256):
+    """Install exact received bytes into an offline podcast job without editing its state."""
+    if job.is_symlink():
+        raise ValueError('请使用原始任务目录')
+    job = job.resolve(strict=True)
+    if not re.fullmatch(r'[a-zA-Z0-9_-]{1,80}', job_id) or job.name != job_id or not job.is_dir():
+        raise ValueError('目标任务 ID 与任务目录不一致')
+    state_path = job / 'state.json'
+    state_raw = _read_optional(state_path)
+    if state_raw is not None:
+        status = decode_json_object(state_raw).get('status')
+        if not isinstance(status, str) or not status or status.strip() != status:
+            raise ValueError('任务状态无法核验')
+        if status in ('queued', 'running', 'cancelling'):
+            raise ValueError('任务仍处于活跃状态，请通过工作台语义取消或等待结束')
+
+    if pending.suffix.lower() != '.json':
+        raise ValueError('请提供待审稿 JSON 文件')
+    raw = _read_regular_bytes(pending)
+    if _sha256(raw) != document_sha256:
+        raise ValueError('待审稿 SHA-256 不一致')
+    output = job / 'document.json'
+    existing = _target_matches(output, raw)
+
+    source_audio = job / source_audio
+    if source_audio.parent.resolve() != job or source_audio.name.lower().startswith(_BUDGET_FILE):
+        raise ValueError('请使用原任务目录内的常规音源文件')
+    source_version = _source_version(source_audio)
+    identity_path = job / 'source-identity.json'
+    identity_raw = _read_regular_bytes(identity_path)
+    identity = decode_json_object(identity_raw)
+    # Local jobs lock both the uploaded input and the normalized WAV.
+    if (not _is_sha256(source_sha256)
+            or identity.get('input_sha256', identity.get('sha256')) != source_sha256
+            or _pending_audio_sha256(source_audio) != source_sha256):
+        raise ValueError('音源或来源锁 SHA-256 不一致')
+
+    checkpoint = job / 'translation-source.json'
+    checkpoint_raw = _read_optional(checkpoint)
+    bindings = {state_path: state_raw, identity_path: identity_raw, checkpoint: checkpoint_raw}
+    if checkpoint_raw is not None:
+        envelope = decode_json_object(checkpoint_raw)
+        source = envelope.get('draft')
+        if not isinstance(source, dict) or envelope.get('digest') != fingerprint(source):
+            raise ValueError('翻译来源检查点摘要不一致')
+    else:
+        source_path = job / 'source-draft.json'
+        source_raw = _read_regular_bytes(source_path)
+        bindings[source_path] = source_raw
+        source = decode_json_object(source_raw)
+    if not _is_sha256(identity.get('sha256')) or source.get('media_sha256') != identity['sha256']:
+        raise ValueError('来源稿与标准化音源 SHA-256 不一致')
+    _validate_pending_document(decode_json_object(raw), source, source_sha256)
+
+    def verify_inputs():
+        if (_source_version(source_audio) != source_version
+                or any(_read_optional(path) != previous for path, previous in bindings.items())
+                or _read_regular_bytes(pending) != raw):
+            raise ValueError('安装前任务状态、音源或草稿已改变')
+
+    with studio_root_lock(job.parent, create=not existing), podcast_job_lock(job, create=not existing):
+        verify_inputs()
+        status = 'unchanged'
+        if not _target_matches(output, raw):
+            if existing:
+                raise ValueError('安装前目标译稿已改变')
+            _install_document(output, raw, verify_inputs)
+            status = 'installed'
+    return {'status': status, 'job_id': job_id,
+            'source_sha256': source_sha256, 'document_sha256': document_sha256}
+
+
 def receive(job, base_document, source_audio, manifest_path, export_path, *,
             revise=False, recovery_of_missing_response=False):
     """Receive an export, using exact old_chinese in revision manifest rows."""
@@ -171,10 +337,7 @@ def receive(job, base_document, source_audio, manifest_path, export_path, *,
     if any(segment.get('is_ad') for segment in selected_segments):
         raise ValueError('接收清单包含广告段')
     receipt = {
-        'schema_version': 1,
-        'provider': 'gemini_app_manual',
-        'display_model': 'Neon 高',
-        'official_model_id': None,
+        **_RECEIPT_MODEL,
         'document_sha256': manifest['document_sha256'],
         'source_sha256': manifest['source_sha256'],
         'export_sha256': manifest['export_sha256'],
@@ -248,24 +411,10 @@ def receive(job, base_document, source_audio, manifest_path, export_path, *,
         if append:
             _replace_document(output, raw, verify_inputs)
         else:
-            try:
-                prior = _read_regular_bytes(output)
-            except FileNotFoundError:
-                prior = None
-            if prior is not None:
-                if prior != raw:
-                    raise ValueError('目标已有不同译稿或接收记录，原文件已保留')
+            if _target_matches(output, raw):
                 verify_inputs()
                 return {'status': 'unchanged', 'imported_document_sha256': _sha256(raw), **receipt}
-            try:
-                _save_bytes(output, raw, exclusive=True, before_install=verify_inputs)
-            except FileExistsError:
-                raise ValueError('目标已由其他写入者创建，原文件已保留') from None
-            except OSError:
-                # Directory sync can fail after the atomic link.
-                if output.exists() and _read_regular_bytes(output) == raw:
-                    output.unlink()
-                raise
+            _install_document(output, raw, verify_inputs)
     return {'status': 'received', 'imported_document_sha256': _sha256(raw), **receipt}
 
 
@@ -278,13 +427,29 @@ def main():
     mode.add_argument('--revise', action='store_true', help='按清单逐段核对 old_chinese 后修订现稿')
     mode.add_argument('--recovery-of-missing-response', action='store_true',
                       help='用网页译文恢复 Shelf Help 付费首块仍为空的指定段落')
+    mode.add_argument('--install-pending-draft', type=Path, help='原样安装带接收记录的 document.json')
     parser.add_argument('--source-audio', type=Path, required=True, help='隔离 job 根内的音源文件名')
-    parser.add_argument('--manifest', type=Path, required=True)
-    parser.add_argument('--export', type=Path, required=True)
+    parser.add_argument('--manifest', type=Path)
+    parser.add_argument('--export', type=Path)
+    parser.add_argument('--job-id', help='待审稿安装的目标任务 ID')
+    parser.add_argument('--source-sha256', help='待审稿安装所绑定的输入音源 SHA-256')
+    parser.add_argument('--document-sha256', help='待审稿安装所绑定的文件 SHA-256')
     args = parser.parse_args()
+    install_args = (args.job_id, args.source_sha256, args.document_sha256)
+    if args.install_pending_draft is not None:
+        if not all(install_args) or args.manifest is not None or args.export is not None:
+            parser.error('安装须提供 --job-id、--source-sha256、--document-sha256')
+    elif not args.manifest or not args.export or any(value is not None for value in install_args):
+        parser.error('接收须提供 --manifest 和 --export，安装选项只用于安装待审稿')
     try:
-        receipt = receive(args.job_dir, args.base_document, args.source_audio, args.manifest, args.export,
-                          revise=args.revise, recovery_of_missing_response=args.recovery_of_missing_response)
+        if args.install_pending_draft is not None:
+            receipt = install_pending_draft(
+                args.job_dir, args.install_pending_draft, args.source_audio, job_id=args.job_id,
+                source_sha256=args.source_sha256, document_sha256=args.document_sha256,
+            )
+        else:
+            receipt = receive(args.job_dir, args.base_document, args.source_audio, args.manifest, args.export,
+                              revise=args.revise, recovery_of_missing_response=args.recovery_of_missing_response)
     except (OSError, ValueError, RecursionError, StudioRecoveryError) as error:
         print(f'接收拒绝：{error}', file=sys.stderr)
         return 1
