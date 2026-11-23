@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+import contextlib
+import io
+import json
+import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -6,7 +11,69 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from studio_publish_icloud import PublishError, publish_job
+from studio_publish_icloud import PublishError, main, publish_job
+
+
+@unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'needs FFmpeg')
+class PublishEntryTests(unittest.TestCase):
+    def test_existing_audio_can_publish_to_an_explicit_library(self):
+        fixture = (Path(__file__).resolve().parents[1] / 'fixtures' / 'point-listen' /
+                   'episodes' / 'point-listen-isolated' / 'output.mp3')
+        with tempfile.TemporaryDirectory() as raw:
+            scratch = Path(raw).resolve()
+            job = scratch / 'fixture-job'
+            job.mkdir()
+            source = job / 'output.mp3'
+            shutil.copyfile(fixture, source)
+            library = scratch / 'explicit-library'
+            library.mkdir()
+            listing = library / 'library.json'
+            old = {'id': 'in-transit', 'resume_seconds': 12}
+            listing.write_text(json.dumps({'episodes': [old], 'settings': {'pinned': True}}))
+            fallback = scratch / 'unused-library'
+            stderr = io.StringIO()
+
+            with patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': str(fallback)}), \
+                 patch('shengjian_audio_preflight.write_preview', side_effect=AssertionError('preview encoding')), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                status = main(['--job-dir', str(job), '--library', str(library), '--no-device'])
+            self.assertEqual(status, 0, stderr.getvalue())
+            self.assertFalse(fallback.exists())
+            catalog = json.loads(listing.read_bytes())
+            rows = {row['id']: row for row in catalog['episodes']}
+            self.assertEqual(set(rows), {'fixture-job', 'in-transit'})
+            self.assertEqual(rows['in-transit'], old)
+            self.assertEqual(catalog['settings'], {'pinned': True})
+            self.assertEqual((library / 'episodes' / job.name / source.name).read_bytes(), fixture.read_bytes())
+            self.assertEqual(source.read_bytes(), fixture.read_bytes())
+            report = json.loads((job / 'preflight' / 'preflight-report.json').read_bytes())
+            self.assertEqual(report['verdict'], 'CLEAR')
+            self.assertIsNone(report['preview'])
+            self.assertFalse(report['audio_quality_pass'])
+            self.assertTrue(report['ear_required'])
+
+            before = listing.read_bytes()
+            before_inode = listing.stat().st_ino
+            failed_job = scratch / 'fixture-failed'
+            failed_job.mkdir()
+            shutil.copyfile(source, failed_job / source.name)
+            installed = library / 'episodes' / failed_job.name
+            replace = os.replace
+
+            def fail_catalog_swap(src, dst):
+                if dst == listing:
+                    self.assertEqual((installed / source.name).read_bytes(), source.read_bytes())
+                    raise OSError('injected catalog swap failure')
+                return replace(src, dst)
+
+            with patch('os.replace', side_effect=fail_catalog_swap), \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                status = main(['--job-dir', str(failed_job), '--library', str(library), '--no-device'])
+            self.assertEqual(status, 1)
+            self.assertIn('injected catalog swap failure', stderr.getvalue())
+            self.assertEqual(listing.read_bytes(), before)
+            self.assertEqual(listing.stat().st_ino, before_inode)
+            self.assertFalse(installed.exists())
 
 
 class PublishHookTests(unittest.TestCase):
@@ -50,20 +117,18 @@ class PublishHookTests(unittest.TestCase):
             job.mkdir()
             (job / 'output.mp3').write_bytes(b'x')
             library = Path(raw) / 'library'
-            library.mkdir()
-            restored = {'n': 0}
-
-            def restore(snap, library):
-                restored['n'] += 1
-
+            legacy = library / 'episodes' / job.name
+            legacy.mkdir(parents=True)
+            (legacy / 'output.mp3').write_bytes(b'x')
+            (legacy / 'episode.json').write_bytes(b'{"title":"before"}')
+            catalog = library / 'library.json'
+            catalog.write_bytes(b'{"episodes":[]}')
             with patch('studio_publish_icloud._require_audio_preflight', return_value={'verdict': 'CLEAR'}):
-                with patch('studio_publish_icloud._snapshot_library_or_refuse', return_value='/tmp/fake-snap'):
-                    with patch('studio_publish_icloud._restore_library_snapshot', side_effect=restore):
-                        with patch('studio_publish_icloud._discard_library_snapshot', return_value=None):
-                            with patch('studio_publish_icloud._publish_job_locked', side_effect=PublishError('write failed')):
-                                with self.assertRaises(PublishError):
-                                    publish_job(job, library)
-            self.assertEqual(restored['n'], 1)
+                with patch('studio_publish_icloud._write_snapshot', side_effect=OSError('write failed')):
+                    with self.assertRaisesRegex(PublishError, 'write failed'):
+                        publish_job(job, library)
+            self.assertEqual((legacy / 'episode.json').read_bytes(), b'{"title":"before"}')
+            self.assertEqual(catalog.read_bytes(), b'{"episodes":[]}')
 
 
 if __name__ == '__main__':

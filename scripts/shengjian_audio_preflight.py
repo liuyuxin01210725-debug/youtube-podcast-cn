@@ -295,6 +295,7 @@ def run_preflight(
     baseline=None,
     thresholds=None,
     write_preview_mp3=True,
+    check_duration_vs_chars=True,
 ):
     source = Path(source)
     output_dir = Path(output_dir)
@@ -365,7 +366,14 @@ def run_preflight(
             'threshold_low_lufs': cfg['loudness_low_i_lufs'],
         })
 
-    findings.append(duration_vs_chars(duration, character_count, baseline))
+    if check_duration_vs_chars:
+        findings.append(duration_vs_chars(duration, character_count, baseline))
+    else:
+        findings.append({
+            'code': 'duration_vs_chars',
+            'severity': 'NOT_ASSESSED',
+            'reason': '本次仅做媒体完整性与自动音频检查，未评估时长对字数，仍需人耳',
+        })
 
     preview = None
     if write_preview_mp3:

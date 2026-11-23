@@ -852,9 +852,10 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
 
 
 def _require_audio_preflight(src, job):
-    """Default path to publish-ready: run ffmpeg preflight and refuse BLOCK/REVIEW."""
+    """Check finished media without deriving a preview or assuming a speech-rate baseline."""
     from shengjian_audio_preflight import refuse_if_blocked_or_review, run_preflight, PreflightError
-    report = run_preflight(src, output_dir=Path(job) / 'preflight')
+    report = run_preflight(src, output_dir=Path(job) / 'preflight',
+                           write_preview_mp3=False, check_duration_vs_chars=False)
     try:
         refuse_if_blocked_or_review(report)
     except PreflightError as error:
@@ -905,18 +906,15 @@ def publish_job(job_dir, library_root=None) -> dict:
     except OSError as error:
         raise PublishError(f'无法创建 iCloud 资料库：{error}') from error
     _require_audio_preflight(src, job)
-    snap = _snapshot_library_or_refuse(library)
     try:
-        try:
-            with original_pending.library_lock(library):
-                episode_dir, record = _publish_job_locked(job, src, library)
-        except (OSError, original_pending.IntakeError) as error:
-            raise PublishError(f'写入节目清单失败：{error}') from error
-    except Exception:
-        _restore_library_snapshot(snap, library)
-        raise
-    finally:
-        _discard_library_snapshot(snap)
+        with original_pending.library_lock(library):
+            snap = _snapshot_library_or_refuse(library)
+            try:
+                episode_dir, record = _publish_job_locked(job, src, library, snap=snap)
+            finally:
+                _discard_library_snapshot(snap)
+    except (OSError, original_pending.IntakeError) as error:
+        raise PublishError(f'写入节目清单失败：{error}') from error
     try:
         record_status(job, ok=True, episode_dir=str(episode_dir), episode_id=job_id)
     except OSError:
@@ -924,7 +922,7 @@ def publish_job(job_dir, library_root=None) -> dict:
     return {**record, 'episode_dir': str(episode_dir), 'library': str(library)}
 
 
-def _publish_job_locked(job, src, library):
+def _publish_job_locked(job, src, library, *, snap):
     job_id = job.name
     listing = library / 'library.json'
     prior, records = _read_library_index(listing)
@@ -978,14 +976,28 @@ def _publish_job_locked(job, src, library):
                                      old_index=old_index)
         atomic_write_json(stage / 'episode.json', record)
         legacy.parent.mkdir(parents=True, exist_ok=True)
-        if existing:
-            # Same audio; metadata and cover refresh keep the existing media.
-            for entry in stage.iterdir():
-                if entry.name != AUDIO_NAME:
-                    entry.replace(legacy / entry.name)
-        else:
+        if not existing:
             stage.rename(legacy)
-        _rebuild_library_locked(library)
+        try:
+            if existing:
+                # Same audio; metadata and cover refresh keep the existing media.
+                for entry in stage.iterdir():
+                    if entry.name != AUDIO_NAME:
+                        entry.replace(legacy / entry.name)
+            if old_index is None:
+                _rebuild_library_locked(library)
+            else:
+                row = _episode_record(legacy, records.get(job_id, {}))
+                if row is None:
+                    raise PublishError('发布的节目清单格式无效')
+                _write_snapshot(listing, prior, {**records, job_id: row})
+        except Exception:
+            if existing:
+                _restore_library_snapshot(snap, library)
+            else:
+                # The old catalog has not been replaced. Remove only this append's files.
+                shutil.rmtree(legacy)
+            raise
     return legacy, record
 
 
