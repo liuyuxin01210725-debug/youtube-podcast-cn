@@ -11,6 +11,7 @@ import pytest
 
 import studio_engine
 import studio_publish_icloud as publisher
+from shengjian_audio_preflight import probe, run_preflight
 from studio_engine import StudioEngine, write_pcm_silence
 from tts_backends import EdgeTTSBackend, SynthesisRequest
 
@@ -21,6 +22,7 @@ def test_render_observes_sdk_input_and_reuses_only_bound_evidence(monkeypatch, t
     engine.temp.mkdir()
     job = engine.job
     config = {'tts': 'edge', 'expected_speakers': 1}
+    (job / 'config.json').write_text(json.dumps(config))
     document = {'speakers': {'a': {'voice_slot': 'male_1'}}, 'references': {}, 'segments': [
         {'id': 's1', 'speaker_id': 'a', 'chinese': ' >> 你好[音乐] Edge 12，OK! ',
          'start_ms': 0, 'end_ms': 300, 'text': 'Synthetic sample'},
@@ -70,11 +72,60 @@ def test_render_observes_sdk_input_and_reuses_only_bound_evidence(monkeypatch, t
     assert evidence['request']['ssml_language'] == 'en-US'
     assert evidence['request']['speed'] == '+0%'
     assert evidence['request']['sdk_version'] == edge_tts.__version__
+    assert len(evidence['request_id']) == 32
     assert cue['edge_input'] == {'mode': 'silence', 'codepoints': 0}
     assert cue['end_frame'] - cue['start_frame'] == studio_engine.SILENCE_FRAMES
 
     duration = publisher.probe_duration_sec(target)
     assert publisher._validate_render(job, config, duration) == receipt['document_sha256']
+    ffprobe = shutil.which('ffprobe')
+    def integrity():
+        return publisher.segment_integrity(target, job, ffprobe=ffprobe,
+                                           stream=probe(target, ffprobe)['stream'],
+                                           source_hash=receipt['audio_sha256'])
+
+    passed = integrity()
+    assert passed['severity'] == 'CLEAR', passed
+    assert passed['decoded_frames'] == passed['segment_frames'] == cue['end_frame']
+    report = run_preflight(target, output_dir=job / 'preflight', studio_job=job)
+    assert any(item['code'] == 'segment_integrity' and item['severity'] == 'CLEAR'
+               for item in report['findings'])
+    assert not any(item['code'] == 'duration_vs_chars' for item in report['findings'])
+    assert report['publish_ready'] is False and report['audio_quality_pass'] is False
+    assert Path(report['preview']['path']).is_file()
+
+    for mutation in ('missing', 'text_digest', 'empty_speech', 'bad_silence', 'frame_sum'):
+        broken = json.loads(json.dumps(receipt))
+        first, second = broken['timeline']
+        if mutation == 'missing':
+            broken['timeline'].pop(0)
+        elif mutation == 'text_digest':
+            first['edge_input']['text_sha256'] = '0' * 64
+        elif mutation == 'empty_speech':
+            first['end_frame'] = first['start_frame']
+        elif mutation == 'bad_silence':
+            second['end_frame'] -= 1
+        else:
+            first['end_frame'] += 1
+            second['start_frame'] += 1
+            second['end_frame'] += 1
+        receipt_path.write_text(json.dumps(broken))
+        failure = integrity()
+        assert failure['severity'] == 'BLOCK', (mutation, failure)
+        if mutation == 'bad_silence':
+            assert '2,880' in failure['reason']
+        if mutation == 'frame_sum':
+            assert failure['decoded_frames'] + 1 == failure['segment_frames']
+    repeated_document = json.loads(document_bytes)
+    repeated_document['segments'][-1]['chinese'] = repeated_document['segments'][0]['chinese']
+    (job / 'document.json').write_text(json.dumps(repeated_document))
+    repeated_receipt = json.loads(json.dumps(receipt))
+    repeated_receipt['document_sha256'] = studio_engine.fingerprint(repeated_document)
+    repeated_receipt['timeline'][-1]['edge_input'] = spoken['edge_input']
+    receipt_path.write_text(json.dumps(repeated_receipt))
+    assert integrity()['severity'] == 'BLOCK' and '身份重复' in integrity()['reason']
+    (job / 'document.json').write_bytes(document_bytes)
+    receipt_path.write_text(json.dumps(receipt))
     for key, bad in [('speed', None), ('speed', '-7%'),
                      ('voice', 'Microsoft Server Speech Text to Speech Voice (zh-TW, HsiaoChenNeural)'),
                      ('language', 'en-US')]:
@@ -106,6 +157,7 @@ def test_render_observes_sdk_input_and_reuses_only_bound_evidence(monkeypatch, t
         engine.render(config, document)
         assert json.loads(receipt_path.read_bytes())['timeline'][0]['edge_input'] is None
         assert len(calls) == 1
+        assert integrity()['severity'] == 'BLOCK'
         with pytest.raises(publisher.PublishError, match='无法核验'):
             publisher._validate_render(job, config, publisher.probe_duration_sec(target))
 
@@ -126,7 +178,7 @@ def test_speed_is_observed_from_sdk_instance(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(not shutil.which('ffmpeg') or not shutil.which('ffprobe'), reason='FFmpeg required')
-def test_ordinary_publish_does_not_load_test_only_baseline(tmp_path):
+def test_test_only_baseline_cannot_replace_missing_segment_evidence(tmp_path):
     job = tmp_path / 'edge-fixture'
     job.mkdir()
     tone = (Path(__file__).resolve().parents[1] / 'fixtures' / 'point-listen' /
@@ -146,6 +198,6 @@ def test_ordinary_publish_does_not_load_test_only_baseline(tmp_path):
     assert {p.name: p.read_bytes() for p in library.iterdir()} == {'library.json': previous}
     report = json.loads((job / 'preflight' / 'preflight-report.json').read_bytes())
     assert report['verdict'] == 'REVIEW'
-    finding = next(item for item in report['findings'] if item['code'] == 'duration_vs_chars')
+    finding = next(item for item in report['findings'] if item['code'] == 'segment_integrity')
     assert finding['severity'] == 'REVIEW'
-    assert finding['character_count'] is None and 'baseline' not in finding
+    assert not any(item['code'] == 'duration_vs_chars' for item in report['findings'])

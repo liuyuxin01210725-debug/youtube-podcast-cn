@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,7 +26,8 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import studio_original_pending as original_pending
 from studio_document import check_source_coverage
-from studio_edge_input import EDGE_INPUT_VERSION, clean_tts_text, valid_edge_input
+from studio_edge_input import (EDGE_INPUT_VERSION, SILENCE_FRAMES, SILENCE_RATE, clean_tts_text,
+                               speakable_tts, valid_edge_input)
 from studio_recovery import _sync_dir, decode_json_object
 from studio_speakers import validate_speaker_voices
 from temporary_audio import sha256_file
@@ -742,11 +744,20 @@ def _copy_audio(src: Path, dest_dir: Path) -> None:
         raise PublishError(f'复制音频失败：{error}') from error
 
 
-def _validate_render(folder: Path, config: dict, duration_sec: float | None) -> str:
+class MissingSegmentEvidence(PublishError):
+    pass
+
+
+def _validate_render(folder: Path, config: dict, duration_sec: float | None, *, require_segments=False):
     try:
-        document, identity, receipt = [
-            decode_json_object(original_pending.read_bytes(folder / name)) for name in RENDER_FILES
-        ]
+        document_bytes, identity_bytes, receipt_bytes = [
+            original_pending.read_bytes(folder / name) for name in RENDER_FILES]
+        document, identity, receipt = map(decode_json_object, (document_bytes, identity_bytes, receipt_bytes))
+        edge_evidence = 'edge_input_version' in receipt or (
+            isinstance(receipt.get('timeline'), list)
+            and any(isinstance(row, dict) and 'edge_input' in row for row in receipt['timeline']))
+        if require_segments and not edge_evidence:
+            raise MissingSegmentEvidence('旧成片缺少逐段 SDK 请求收据，待核')
         overflow = check_source_coverage(document, identity)
         if overflow:
             raise PublishError('译稿有段落超出锁定音源时长，禁止发布')
@@ -756,9 +767,9 @@ def _validate_render(folder: Path, config: dict, duration_sec: float | None) -> 
         document_sha = original_pending.digest(json.dumps(
             document, sort_keys=True, ensure_ascii=False, allow_nan=False).encode())
         if (type(receipt['schema_version']) is not int or receipt['schema_version'] != 1
-                or type(receipt['sample_rate']) is not int or receipt['sample_rate'] != 24000
+                or type(receipt['sample_rate']) is not int or receipt['sample_rate'] != SILENCE_RATE
                 or receipt['document_sha256'] != document_sha
-                or receipt['source_identity_sha256'] != sha256_file(folder / 'source-identity.json')
+                or receipt['source_identity_sha256'] != original_pending.digest(identity_bytes)
                 or receipt['audio_sha256'] != sha256_file(folder / AUDIO_NAME)):
             raise ValueError
         timeline = receipt['timeline']
@@ -767,7 +778,8 @@ def _validate_render(folder: Path, config: dict, duration_sec: float | None) -> 
         if not ids or len(set(ids)) != len(ids) or [row['id'] for row in timeline] != ids:
             raise ValueError
         frames = 0
-        edge_evidence = 'edge_input_version' in receipt or any('edge_input' in row for row in timeline)
+        seen_requests = set()
+        inputs_with_request_ids = {}
         if edge_evidence and (type(receipt.get('edge_input_version')) is not int
                               or receipt['edge_input_version'] != EDGE_INPUT_VERSION
                               or config.get('tts', 'edge') != 'edge'):
@@ -776,19 +788,76 @@ def _validate_render(folder: Path, config: dict, duration_sec: float | None) -> 
             if (type(row['start_frame']) is not int or type(row['end_frame']) is not int
                     or row['start_frame'] != frames or row['end_frame'] <= frames):
                 raise ValueError
+            count = row['end_frame'] - frames
             frames = row['end_frame']
             if edge_evidence:
-                text = segment['chinese'].strip()
+                raw_text = segment['chinese']
+                if not isinstance(raw_text, str) or not raw_text.strip():
+                    raise PublishError('非广告段缺少可核验的译文')
+                text = raw_text.strip()
                 slot = document['speakers'][segment['speaker_id']].get('voice_slot', 'male_1')
-                if not text or not valid_edge_input(row.get('edge_input'), clean_tts_text(text), slot):
+                spoken = clean_tts_text(text)
+                evidence = row.get('edge_input')
+                if not valid_edge_input(evidence, spoken, slot):
                     raise ValueError
+                if require_segments:
+                    if not speakable_tts(spoken):
+                        if count != SILENCE_FRAMES or any(
+                                not (ch.isspace() or unicodedata.category(ch).startswith('P')) for ch in spoken):
+                            raise PublishError('标点段缺少 2,880 帧静音证据')
+                    else:
+                        input_key = (slot, evidence['text_sha256'])
+                        request_id = evidence.get('request_id')
+                        if (request_id in seen_requests or input_key in inputs_with_request_ids
+                                and not (request_id and inputs_with_request_ids[input_key])):
+                            raise PublishError('逐段 SDK 请求身份重复，无法证明每段各自成功')
+                        inputs_with_request_ids[input_key] = bool(request_id)
+                        if request_id:
+                            seen_requests.add(request_id)
+        if require_segments:
+            return frames, len(ids), receipt['audio_sha256'], original_pending.digest(receipt_bytes)
         # MP3 encoding adds frame padding to the PCM timeline.
         if duration_sec is None or not math.isfinite(duration_sec) or duration_sec <= 0 \
-                or abs(duration_sec - frames / 24000) > 0.12:
+                or abs(duration_sec - frames / SILENCE_RATE) > 0.12:
             raise ValueError
         return document_sha
-    except (ValueError, OSError, TypeError, KeyError, RecursionError):
+    except (ValueError, OSError, TypeError, KeyError, AttributeError, RecursionError):
         raise PublishError('新版音频、译稿或合成时轴无法核验') from None
+
+
+def segment_integrity(src, job, *, ffprobe, stream, source_hash):
+    """Publication policy. A rounded container duration cannot prove frame conservation."""
+    from shengjian_audio_preflight import run_cmd
+
+    item = {'code': 'segment_integrity'}
+    receipt_path = job / 'render-identity.json'
+    if not receipt_path.exists() and not receipt_path.is_symlink():
+        return {**item, 'severity': 'REVIEW', 'reason': '缺少逐段 SDK 请求收据，待核'}
+    try:
+        config_path = job / 'config.json'
+        config = (decode_json_object(original_pending.read_bytes(config_path))
+                  if config_path.exists() or config_path.is_symlink() else {})
+        frames, sections, audio_sha, receipt_sha = _validate_render(job, config, None, require_segments=True)
+        if src != job / AUDIO_NAME or audio_sha != source_hash:
+            raise PublishError('逐段收据未绑定本次所检成片')
+        if stream.get('sample_rate') != str(SILENCE_RATE) or stream.get('channels') != 1:
+            raise PublishError('成片采样率或声道数与合成时轴不符')
+        result = run_cmd([ffprobe, '-v', 'error', '-select_streams', 'a:0', '-show_frames',
+                          '-show_entries', 'frame=nb_samples', '-of', 'csv=p=0', str(src)], timeout=180)
+        samples = [int(value) for value in result.stdout.splitlines()]
+        if result.returncode or result.stderr.strip() or not samples or any(value <= 0 for value in samples):
+            raise PublishError('成片解码帧数无法核验')
+        decoded = sum(samples)
+        counts = {'segments': sections, 'segment_frames': frames, 'decoded_frames': decoded}
+        if frames != decoded:
+            return {**item, **counts, 'severity': 'BLOCK', 'reason': '逐段帧和与实际解码帧数不符'}
+        return {**item, **counts, 'severity': 'CLEAR', 'receipt_sha256': receipt_sha,
+                'reason': '逐段请求、输入摘要与解码帧数守恒，仍需人耳'}
+    except MissingSegmentEvidence as error:
+        return {**item, 'severity': 'REVIEW', 'reason': str(error)}
+    except (PublishError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+        reason = str(error) if isinstance(error, PublishError) else '逐段收据或成片解码帧数无法核验'
+        return {**item, 'severity': 'BLOCK', 'reason': reason}
 
 
 def _validate_revision_audio(path):
@@ -866,7 +935,7 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
 def _require_audio_preflight(src, job):
     """Apply the default audio checks and refuse BLOCK or REVIEW before merging."""
     from shengjian_audio_preflight import refuse_if_blocked_or_review, run_preflight, PreflightError
-    report = run_preflight(src, output_dir=Path(job) / 'preflight')
+    report = run_preflight(src, output_dir=Path(job) / 'preflight', studio_job=Path(job))
     try:
         refuse_if_blocked_or_review(report)
     except PreflightError as error:
@@ -916,12 +985,14 @@ def publish_job(job_dir, library_root=None) -> dict:
         library.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise PublishError(f'无法创建 iCloud 资料库：{error}') from error
-    _require_audio_preflight(src, job)
+    preflight = _require_audio_preflight(src, job)
+    receipt_sha = next((row.get('receipt_sha256') for row in (preflight or {}).get('findings', ())
+                        if row.get('code') == 'segment_integrity'), None)
     try:
         with original_pending.library_lock(library):
             snap = _snapshot_library_or_refuse(library)
             try:
-                episode_dir, record = _publish_job_locked(job, src, library, snap=snap)
+                episode_dir, record = _publish_job_locked(job, src, library, snap=snap, receipt_sha=receipt_sha)
             finally:
                 _discard_library_snapshot(snap)
     except (OSError, original_pending.IntakeError) as error:
@@ -933,7 +1004,7 @@ def publish_job(job_dir, library_root=None) -> dict:
     return {**record, 'episode_dir': str(episode_dir), 'library': str(library)}
 
 
-def _publish_job_locked(job, src, library, *, snap):
+def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
     job_id = job.name
     listing = library / 'library.json'
     prior, records = _read_library_index(listing)
@@ -942,6 +1013,8 @@ def _publish_job_locked(job, src, library, *, snap):
     current = _current_episode_dir(library, job_id, records.get(job_id, {}))
     existing = job_id in records or current.exists()
     has_render = any((job / name).exists() or (job / name).is_symlink() for name in RENDER_FILES)
+    if receipt_sha and not has_render:
+        raise PublishError('预检后逐段收据已变化，拒绝提交')
     if existing and not has_render:
         if current != legacy or not (current / AUDIO_NAME).is_file() \
                 or original_pending.file_digest(src) != original_pending.file_digest(current / AUDIO_NAME):
@@ -968,6 +1041,8 @@ def _publish_job_locked(job, src, library, *, snap):
         if has_render:
             for name in RENDER_FILES:
                 original_pending.write_bytes(stage / name, original_pending.read_bytes(job / name))
+            if receipt_sha and sha256_file(stage / 'render-identity.json') != receipt_sha:
+                raise PublishError('预检后逐段收据已变化，拒绝提交')
             config = read_json(job / 'config.json')
             if (job / 'config.json').exists() and not isinstance(config, dict):
                 raise PublishError('任务配置无效')

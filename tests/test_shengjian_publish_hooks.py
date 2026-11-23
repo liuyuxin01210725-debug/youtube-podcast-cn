@@ -55,12 +55,12 @@ class PublishQualityEntryTests(unittest.TestCase):
         self.assertFalse(json.loads((self.job / 'private-listen.json').read_bytes())['ok'])
         return json.loads((self.job / 'preflight' / 'preflight-report.json').read_bytes())
 
-    def test_missing_calibration_refuses_publish_and_still_writes_inspection_mp3(self):
+    def test_missing_segment_receipt_refuses_publish_and_still_writes_inspection_mp3(self):
         report = self.assert_quality_refusal('音频预检待人耳')
         self.assertEqual(report['verdict'], 'REVIEW')
-        duration = next(item for item in report['findings'] if item['code'] == 'duration_vs_chars')
-        self.assertEqual(duration['severity'], 'REVIEW')
-        self.assertIn('没有校准', duration['reason'])
+        evidence = next(item for item in report['findings'] if item['code'] == 'segment_integrity')
+        self.assertEqual(evidence['severity'], 'REVIEW')
+        self.assertIn('缺少逐段', evidence['reason'])
         preview = self.job / 'preflight' / 'inspect-45s.mp3'
         self.assertEqual(Path(report['preview']['path']), preview)
         self.assertGreater(preview.stat().st_size, 0)
@@ -69,9 +69,9 @@ class PublishQualityEntryTests(unittest.TestCase):
         self.assertTrue(report['ear_required'])
 
     def test_inspection_failure_alone_refuses_publish(self):
-        # Neutralize only the duration finding so the inspection fault must block the entry itself.
-        with patch('shengjian_audio_preflight.duration_vs_chars',
-                   return_value={'code': 'duration_vs_chars', 'severity': 'INFO'}), \
+        # Isolate the existing inspection rule from the separately tested segment gate.
+        with patch('studio_publish_icloud.segment_integrity',
+                   return_value={'code': 'segment_integrity', 'severity': 'CLEAR'}), \
              patch('shengjian_audio_preflight.write_preview',
                    side_effect=PreflightError('injected inspection failure')) as inspect:
             report = self.assert_quality_refusal('音频预检待人耳')

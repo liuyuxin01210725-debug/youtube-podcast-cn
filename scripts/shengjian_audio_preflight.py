@@ -295,6 +295,7 @@ def run_preflight(
     baseline=None,
     thresholds=None,
     write_preview_mp3=True,
+    studio_job=None,
 ):
     source = Path(source)
     output_dir = Path(output_dir)
@@ -365,7 +366,12 @@ def run_preflight(
             'threshold_low_lufs': cfg['loudness_low_i_lufs'],
         })
 
-    findings.append(duration_vs_chars(duration, character_count, baseline))
+    if studio_job is None:
+        findings.append(duration_vs_chars(duration, character_count, baseline))
+    else:
+        from studio_publish_icloud import segment_integrity
+        findings.append(segment_integrity(source, Path(studio_job), ffprobe=ffprobe,
+                                          stream=probed['stream'], source_hash=source_hash))
 
     preview = None
     if write_preview_mp3:

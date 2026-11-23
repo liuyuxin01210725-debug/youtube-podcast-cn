@@ -8,6 +8,8 @@ import re
 EDGE_REQUEST_SOURCE = 'edge-tts:Communicate.tts_config/mkssml'
 EDGE_INPUT_VERSION = 1
 EDGE_SILENCE = {'mode': 'silence', 'codepoints': 0}
+SILENCE_FRAMES = 2880
+SILENCE_RATE = 24000
 _TURN_MARKER = re.compile(r"(?<!\S)>>+\s*")
 _STAGE = re.compile(
     r"[\[【〔(（]"
@@ -74,7 +76,11 @@ def valid_edge_input(evidence, spoken, voice_slot):
     if not speakable_tts(spoken):
         return evidence == EDGE_SILENCE and type(evidence['codepoints']) is int
     request = evidence.get('request')
-    if (set(evidence) != _INPUT_FIELDS or evidence.get('mode') != 'request'
+    fields = set(evidence)
+    if 'request_id' in fields and (not isinstance(evidence['request_id'], str)
+                                   or not re.fullmatch(r'[0-9a-f]{32}', evidence['request_id'])):
+        return False
+    if (fields - {'request_id'} != _INPUT_FIELDS or evidence.get('mode') != 'request'
             or evidence.get('voice_slot') != voice_slot or type(evidence.get('codepoints')) is not int
             or not isinstance(request, dict) or set(request) != _REQUEST_FIELDS):
         return False

@@ -8,6 +8,7 @@ import re
 import tempfile
 import urllib.parse
 import urllib.request
+from uuid import uuid4
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -185,7 +186,7 @@ def _observed_edge_input(communicate, request, voice_argument):
     }
     return {
         'mode': 'request', 'voice_slot': request.voice_slot, **observe_edge_text(request.text),
-        'request': applied, 'request_sha256': edge_request_sha256(applied),
+        'request': applied, 'request_sha256': edge_request_sha256(applied), 'request_id': uuid4().hex,
     }
 
 

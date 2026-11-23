@@ -48,7 +48,8 @@ from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
 from studio_ads import ad_only_speakers, fold_ad_speakers, group_key, mark_sponsor_windows, split_group_key
 from studio_document import check_source_coverage
-from studio_edge_input import EDGE_INPUT_VERSION, EDGE_SILENCE, clean_tts_text, speakable_tts, valid_edge_input
+from studio_edge_input import (EDGE_INPUT_VERSION, EDGE_SILENCE, SILENCE_FRAMES, SILENCE_RATE,
+                               clean_tts_text, speakable_tts, valid_edge_input)
 from studio_recovery import (
     StudioRecoveryError, TranslationJournal, _read_regular_bytes, _save_bytes, _sync_dir,
     decode_json_object, load_source,
@@ -231,12 +232,6 @@ def atomic_json(path, value):
 
 def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-
-
-# 0.12 s at 24 kHz. Edge rejects bare punctuation with NoAudioReceived and
-# aborts the whole job; a short silence keeps the timeline without a request.
-SILENCE_FRAMES = 2880
-SILENCE_RATE = 24000
 
 
 def _cached_edge_input(clip, sidecar, spoken, voice_slot):
@@ -983,6 +978,7 @@ class StudioEngine:
         cache.mkdir(exist_ok=True)
         clips = []
         edge_inputs = []
+        edge_occurrences = {}
         for index, segment in enumerate(selected):
             self.progress('synthesis', index, len(selected), segment_id=segment['id'])
             self.check_cancel()
@@ -998,6 +994,13 @@ class StudioEngine:
             if spoken != text:
                 # Only changed lines pick up a new cache key, so unchanged Edge clips stay reusable.
                 identity['spoken'] = spoken
+            if edge and speakable_tts(spoken):
+                key = (voice_slot, spoken)
+                occurrence = edge_occurrences.get(key, 0)
+                edge_occurrences[key] = occurrence + 1
+                if occurrence:
+                    # Keep a separate request receipt for each repetition in this render.
+                    identity['edge_occurrence'] = occurrence
             if backend is None:
                 if ref is None:
                     raise StudioInputError('说话人没有干净的参考声音，请换用系统音色或选择参考片段')
@@ -1054,13 +1057,18 @@ class StudioEngine:
             frames = 0
             timeline = []
             for index, (segment, clip) in enumerate(zip(selected, clips, strict=True)):
+                evidence = edge_inputs[index] if edge else None
                 with wave.open(str(clip)) as audio:
                     if audio.getframerate() != SILENCE_RATE:
                         raise StudioInputError('片段音频采样率与合成时轴不一致')
                     end = frames + audio.getnframes()
+                    if evidence == EDGE_SILENCE and (
+                            end - frames != SILENCE_FRAMES or audio.getnchannels() != 1
+                            or audio.getsampwidth() != 2 or any(audio.readframes(SILENCE_FRAMES))):
+                        evidence = None
                 row = {'id': segment['id'], 'start_frame': frames, 'end_frame': end}
                 if edge:
-                    row['edge_input'] = edge_inputs[index]
+                    row['edge_input'] = evidence
                 timeline.append(row)
                 frames = end
             receipt = self.temp / 'render-identity.json'

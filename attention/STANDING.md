@@ -9,3 +9,5 @@
 Mac 普通发布的音频预检纠正及目录事务验收边界见 [Mac 发布音频预检纠正](t624-mac-publish-preflight.md)。
 
 Edge 渲染的请求身份、计数口径及校准边界见 [Edge 渲染证据](t625-edge-render-evidence.md)。
+
+普通发布的逐段完整性闸与核收边界见 [普通发布逐段完整性](t627-segment-integrity.md)。
