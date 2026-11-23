@@ -16,10 +16,15 @@ from studio_recovery import (
 from temporary_audio import sha256_file
 
 
-# Shelf Help's paid first chunk is unresolved (safe_to_retry=false). Its
-# Chinese fields are empty, so the source lock identifies the protected IDs.
+# Shelf Help's paid first chunk is unresolved (safe_to_retry=false).
+# Link a separate web recovery to the lost response for traceability.
 _PAID_SOURCE_SHA256 = '2e8df2585808525d13fe5aff030afe8a732562ec0f5b11be66cc5ba6558b4e4a'
 _PAID_SEGMENT_IDS = {f'seg-{number:06d}' for number in range(2, 92)}
+_RECOVERY_FIELD = 'recovery_of_missing_response'
+_MISSING_RESPONSE = {
+    'request_key': 'a257fa8fd7b4a33f1d51ebcbc7be51a142415fa479b28eb57cfce98f88101b48',
+    'provider_response_id': '61a6ce7d-9b84-48a0-bf72-6d9881f1f406',
+}
 
 
 def _sha256(raw):
@@ -64,7 +69,7 @@ def _append_history(document, receipt):
     history = [document.get('translation_import'), *previous]
     imported = set()
     for item in history:
-        if (not isinstance(item, dict) or item.keys() != receipt.keys()
+        if (not isinstance(item, dict) or item.keys() - {_RECOVERY_FIELD} != receipt.keys()
                 or type(item['schema_version']) is not int
                 or any(item[key] != receipt[key] for key in (
                     'schema_version', 'provider', 'display_model', 'official_model_id', 'source_sha256',
@@ -75,6 +80,12 @@ def _append_history(document, receipt):
                 or any(not isinstance(ident, str) or not ident for ident in ids)
                 or len(set(ids)) != len(ids) or imported.intersection(ids)):
             raise ValueError('已有接收历史段落无效')
+        if _RECOVERY_FIELD in item and (
+            item[_RECOVERY_FIELD] != _MISSING_RESPONSE
+            or item['source_sha256'] != _PAID_SOURCE_SHA256
+            or not _PAID_SEGMENT_IDS.issuperset(ids)
+        ):
+            raise ValueError('已有丢失正文恢复记录无效')
         imported.update(ids)
     return history, imported
 
@@ -85,19 +96,32 @@ def _replace_document(output, raw, verify_inputs):
     with TemporaryDirectory(prefix='.gemini-rollback-', dir=output.parent) as directory:
         backup = Path(directory) / output.name
         os.link(output, backup, follow_symlinks=False)
+        ready_to_install = False
+
+        def before_install():
+            nonlocal ready_to_install
+            verify_inputs()
+            ready_to_install = True
+
         try:
-            _save_bytes(output, raw, before_install=verify_inputs)
-        except OSError:
-            if output.exists() and _read_regular_bytes(output) == raw:
+            _save_bytes(output, raw, before_install=before_install)
+        except BaseException:
+            if ready_to_install and output.exists() and _read_regular_bytes(output) == raw:
                 os.replace(backup, output)
             raise
 
 
-def receive(job, base_document, source_audio, manifest_path, export_path):
+def receive(job, base_document, source_audio, manifest_path, export_path, *,
+            revise=False, recovery_of_missing_response=False):
+    """Receive an export, using exact old_chinese in revision manifest rows."""
     job = job.resolve(strict=True)
     _require_unqueued(job)
     output = job / 'document.json'
     append = base_document is None
+    if (revise and recovery_of_missing_response) or (
+        not append and (revise or recovery_of_missing_response)
+    ):
+        raise ValueError('修订或恢复须单独针对现有接收稿')
     if append:
         base_document = output
     elif base_document.resolve() == output:
@@ -118,7 +142,10 @@ def receive(job, base_document, source_audio, manifest_path, export_path):
                           'export_sha256', 'segments'}
             or type(manifest['schema_version']) is not int or manifest['schema_version'] != 1):
         raise ValueError('接收清单格式无效')
-    expected = _segment_keys(manifest['segments'], {'id', 'speaker_id'})
+    segment_fields = {'id', 'speaker_id'}
+    if revise:
+        segment_fields.add('old_chinese')
+    expected = _segment_keys(manifest['segments'], segment_fields)
     export_raw = _read_regular_bytes(export_path)
     if _sha256(export_raw) != manifest['export_sha256']:
         raise ValueError('网页导出 SHA-256 与接收清单不一致')
@@ -154,7 +181,11 @@ def receive(job, base_document, source_audio, manifest_path, export_path):
         'manifest_sha256': _sha256(manifest_raw),
         'segment_ids': [ident for ident, _ in expected],
     }
-    if receipt['source_sha256'] == _PAID_SOURCE_SHA256 and _PAID_SEGMENT_IDS.intersection(translated):
+    paid_source = receipt['source_sha256'] == _PAID_SOURCE_SHA256
+    if recovery_of_missing_response:
+        if not paid_source or not _PAID_SEGMENT_IDS.issuperset(translated):
+            raise ValueError('丢失正文恢复只允许 Shelf Help 付费首块段落')
+    elif not revise and paid_source and _PAID_SEGMENT_IDS.intersection(translated):
         raise ValueError('接收清单包含已隔离的付费首块段落')
 
     def verify_inputs():
@@ -168,17 +199,38 @@ def receive(job, base_document, source_audio, manifest_path, export_path):
         if _read_regular_bytes(base_document) != base_raw:
             raise ValueError('接收前基础稿已改变')
 
+    target_matches = all(segment.get('chinese') == translated[segment['id']]
+                         for segment in selected_segments)
     if append:
         history, imported = _append_history(document, receipt)
-        if receipt in history[1:] and all(
-            segment.get('chinese') == translated[segment['id']] for segment in selected_segments
-        ):
+        if revise:
+            revisions = document.get('translation_revisions', [])
+            if not isinstance(revisions, list):
+                raise ValueError('已有修订历史格式无效')
+            receipt['previous_chinese'] = {row['id']: row['old_chinese'] for row in manifest['segments']}
+            replay_history = revisions
+        else:
+            if recovery_of_missing_response:
+                receipt[_RECOVERY_FIELD] = dict(_MISSING_RESPONSE)
+            replay_history = history[1:]
+        # A recorded replay is read-only even though it uses the original CAS.
+        if receipt in replay_history and target_matches:
             with podcast_job_lock(job):
                 verify_inputs()
             return {'status': 'unchanged', 'imported_document_sha256': _sha256(base_raw), **receipt}
     if _sha256(base_raw) != receipt['document_sha256']:
         raise ValueError('基础 document.json SHA-256 与接收清单不一致')
-    if append:
+    if revise:
+        for segment in selected_segments:
+            old = receipt['previous_chinese'][segment['id']]
+            if not isinstance(old, str) or not old.strip() or segment.get('chinese') != old:
+                raise ValueError('修订清单与段落旧译不一致或未填中文')
+        if target_matches:
+            with podcast_job_lock(job):
+                verify_inputs()
+            return {'status': 'unchanged', 'imported_document_sha256': _sha256(base_raw), **receipt}
+        document.setdefault('translation_revisions', []).append(receipt)
+    elif append:
         if imported.intersection(translated) or any(
             not isinstance(segment.get('chinese'), str) or segment['chinese'].strip()
             for segment in selected_segments
@@ -223,12 +275,16 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--base-document', type=Path, help='首次接收使用的原始基础稿')
     mode.add_argument('--append', action='store_true', help='追加到该 job 当前的 document.json')
+    mode.add_argument('--revise', action='store_true', help='按清单逐段核对 old_chinese 后修订现稿')
+    mode.add_argument('--recovery-of-missing-response', action='store_true',
+                      help='用网页译文恢复 Shelf Help 付费首块仍为空的指定段落')
     parser.add_argument('--source-audio', type=Path, required=True, help='隔离 job 根内的音源文件名')
     parser.add_argument('--manifest', type=Path, required=True)
     parser.add_argument('--export', type=Path, required=True)
     args = parser.parse_args()
     try:
-        receipt = receive(args.job_dir, args.base_document, args.source_audio, args.manifest, args.export)
+        receipt = receive(args.job_dir, args.base_document, args.source_audio, args.manifest, args.export,
+                          revise=args.revise, recovery_of_missing_response=args.recovery_of_missing_response)
     except (OSError, ValueError, RecursionError, StudioRecoveryError) as error:
         print(f'接收拒绝：{error}', file=sys.stderr)
         return 1

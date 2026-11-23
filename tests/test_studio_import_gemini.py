@@ -2,6 +2,7 @@ from copy import deepcopy
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import subprocess
 import sys
 
@@ -68,8 +69,12 @@ class Workspace:
         }
         _write(self.manifest, self.plan)
 
-    def run(self, *, append=False):
-        mode = ['--append'] if append else ['--base-document', str(self.base)]
+    def run(self, *, append=False, revise=False):
+        mode = ['--base-document', str(self.base)]
+        if revise:
+            mode = ['--revise']
+        elif append:
+            mode = ['--append']
         return subprocess.run(self.cli + mode, text=True, capture_output=True, check=False)
 
     def snapshot(self):
@@ -354,3 +359,251 @@ def test_append_directory_sync_failure_restores_previous_document(append_ws, mon
     result = ws.run(append=True)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)['status'] == 'received'
+
+
+@pytest.fixture
+def revise_ws(append_ws):
+    ws = append_ws
+    result = ws.run(append=True)
+    assert result.returncode == 0, result.stderr
+    ws.stage(ws.output, (1, 4))
+    current = json.loads(ws.output.read_bytes())
+    for plan, row, index in zip(ws.plan['segments'], ws.rows, (0, 3)):
+        plan['old_chinese'] = current['segments'][index]['chinese']
+        row['zh'] = f"定向修订 {row['id']}"
+    _write(ws.export, ws.rows)
+    ws.plan['export_sha256'] = _digest(ws.export)
+    _write(ws.manifest, ws.plan)
+    return ws
+
+
+def test_cli_revises_exact_segments_and_retains_history(revise_ws):
+    ws = revise_ws
+    before = ws.snapshot()
+    expected = json.loads(ws.output.read_bytes())
+    result = ws.run(revise=True)
+    assert result.returncode == 0, result.stderr
+    receipt = json.loads(result.stdout)
+    assert receipt.pop('status') == 'received'
+    assert receipt.pop('imported_document_sha256') == _digest(ws.output)
+    assert receipt == {
+        'schema_version': 1, 'provider': 'gemini_app_manual', 'display_model': 'Neon 高',
+        'official_model_id': None, 'document_sha256': before['job/document.json'],
+        'source_sha256': before['job/source.mp3'], 'export_sha256': before['export.txt'],
+        'manifest_sha256': before['manifest.json'], 'segment_ids': [r['id'] for r in ws.rows],
+        'previous_chinese': {r['id']: r['old_chinese'] for r in ws.plan['segments']},
+    }
+    for index, row in zip((0, 3), ws.rows):
+        expected['segments'][index]['chinese'] = row['zh']
+    expected['translation_revisions'] = [receipt]
+    assert json.loads(ws.output.read_bytes()) == expected
+    after = ws.snapshot()
+    assert after == {**before, 'job/document.json': _digest(ws.output)}
+    replay = ws.run(revise=True)
+    assert replay.returncode == 0, replay.stderr
+    assert json.loads(replay.stdout)['status'] == 'unchanged'
+    assert ws.snapshot() == after
+
+    ws.stage(ws.output, (6,))
+    appended = ws.run(append=True)
+    assert appended.returncode == 0, appended.stderr
+    assert json.loads(ws.output.read_bytes())['translation_revisions'] == [receipt]
+
+
+@pytest.mark.parametrize('defect, message', [
+    ('stale', 'document.json SHA-256'), ('old', '旧译'), ('empty', '未填中文'),
+    ('id', '与基础稿'), ('speaker', '与基础稿'), ('missing', '段数'), ('extra', '段数'),
+])
+def test_revision_rejects_invalid_batch_without_writes(revise_ws, defect, message):
+    ws = revise_ws
+    if defect == 'stale':
+        ws.output.write_bytes(ws.output.read_bytes() + b'\n')
+    elif defect == 'old':
+        ws.plan['segments'][1]['old_chinese'] += ' '
+    elif defect == 'empty':
+        ws.plan['segments'][1] = {'id': 'seg-000006', 'speaker_id': 's2', 'old_chinese': ''}
+        ws.rows[1].update(id='seg-000006', speaker_id='s2')
+    elif defect in ('id', 'speaker'):
+        key, wrong = ('id', 'seg-000999') if defect == 'id' else ('speaker_id', 's2')
+        ws.plan['segments'][1][key] = ws.rows[1][key] = wrong
+    elif defect == 'missing':
+        ws.rows.pop()
+    else:
+        ws.rows.append({'id': 'seg-000005', 'speaker_id': 's2', 'zh': '未选择的译文'})
+    _write(ws.export, ws.rows)
+    ws.plan['export_sha256'] = _digest(ws.export)
+    _write(ws.manifest, ws.plan)
+    before = ws.snapshot()
+    result = ws.run(revise=True)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert ws.snapshot() == before
+
+
+def test_revision_already_at_target_does_not_add_history(revise_ws):
+    ws = revise_ws
+    for row, plan in zip(ws.rows, ws.plan['segments']):
+        row['zh'] = plan['old_chinese']
+    _write(ws.export, ws.rows)
+    ws.plan['export_sha256'] = _digest(ws.export)
+    _write(ws.manifest, ws.plan)
+    before = ws.snapshot()
+    result = ws.run(revise=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['status'] == 'unchanged'
+    assert ws.snapshot() == before
+
+
+def test_replaying_an_old_revision_cannot_restore_superseded_text(revise_ws):
+    ws = revise_ws
+    first_manifest, first_export = ws.manifest.read_bytes(), ws.export.read_bytes()
+    assert ws.run(revise=True).returncode == 0
+    ws.plan['document_sha256'] = _digest(ws.output)
+    for row, plan in zip(ws.rows, ws.plan['segments']):
+        plan['old_chinese'] = row['zh']
+        row['zh'] += '，再次修订'
+    _write(ws.export, ws.rows)
+    ws.plan['export_sha256'] = _digest(ws.export)
+    _write(ws.manifest, ws.plan)
+    assert ws.run(revise=True).returncode == 0
+    ws.manifest.write_bytes(first_manifest)
+    ws.export.write_bytes(first_export)
+    before = ws.snapshot()
+    result = ws.run(revise=True)
+    assert result.returncode == 1
+    assert 'document.json SHA-256' in result.stderr
+    assert ws.snapshot() == before
+
+
+@pytest.fixture
+def recovery_ws(ws, monkeypatch):
+    template = ws.document['segments'][1]
+    ws.document['segments'] = [
+        {**template, 'id': f'seg-{i:06d}', 'start_ms': i, 'end_ms': i + 1}
+        for i in range(1, 95)
+    ]
+    _write(ws.base, ws.document)
+    monkeypatch.setattr(studio_import_gemini, '_PAID_SOURCE_SHA256', _digest(ws.source))
+    ws.stage(ws.base, (92,))
+    receive(*ws.inputs)
+    ws.stage(ws.output, (93,))
+    receive(*ws.append_inputs)
+    ws.stage(ws.output, range(2, 92))
+    return ws
+
+
+def test_declared_recovery_preserves_payment_and_fills_only_chunk(recovery_ws, monkeypatch, capsys):
+    ws = recovery_ws
+    # Guard even reads through the actual budget implementation. The synthetic
+    # sentinel also catches accidental file modifications in this isolated job.
+    (ws.job / 'translation-budget.sqlite3').write_bytes(b'fixture: paid; uncertain; safe_to_retry=false')
+
+    def deny_ledger(*args, **kwargs):
+        pytest.fail('recovery opened a translation ledger')
+
+    monkeypatch.setattr(sqlite3, 'connect', deny_ledger)
+    before = ws.snapshot()
+    expected = json.loads(ws.output.read_bytes())
+    monkeypatch.setattr(sys, 'argv', ws.cli[2:] + ['--recovery-of-missing-response'])
+    assert studio_import_gemini.main() == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt.pop('status') == 'received'
+    assert receipt.pop('imported_document_sha256') == _digest(ws.output)
+    assert receipt == {
+        'schema_version': 1, 'provider': 'gemini_app_manual', 'display_model': 'Neon 高',
+        'official_model_id': None, 'document_sha256': before['job/document.json'],
+        'source_sha256': before['job/source.mp3'], 'export_sha256': before['export.txt'],
+        'manifest_sha256': before['manifest.json'], 'segment_ids': [r['id'] for r in ws.rows],
+        'recovery_of_missing_response': {
+            'request_key': 'a257fa8fd7b4a33f1d51ebcbc7be51a142415fa479b28eb57cfce98f88101b48',
+            'provider_response_id': '61a6ce7d-9b84-48a0-bf72-6d9881f1f406',
+        },
+    }
+    for segment, row in zip(expected['segments'][1:91], ws.rows):
+        assert segment['id'] == row['id'] and segment['chinese'] == ''
+        segment['chinese'] = row['zh']
+    expected['translation_imports'].append(receipt)
+    assert json.loads(ws.output.read_bytes()) == expected
+    assert not (ws.job / 'state.json').exists()
+    after = ws.snapshot()
+    assert after == {**before, 'job/document.json': _digest(ws.output)}
+    assert receive(*ws.append_inputs, recovery_of_missing_response=True)['status'] == 'unchanged'
+    assert ws.snapshot() == after
+    ws.stage(ws.output, (2, 94))
+    with pytest.raises(ValueError, match='已隔离的付费首块'):
+        receive(*ws.append_inputs)
+    ws.stage(ws.output, (94,))
+    assert receive(*ws.append_inputs)['status'] == 'received'
+    assert json.loads(ws.output.read_bytes())['translation_imports'][-2] == receipt
+
+
+@pytest.mark.parametrize('defect, message', [
+    ('append', '已隔离的付费首块'), ('first', '已隔离的付费首块'),
+    ('deepseek-export', '分段字段'), ('deepseek-manifest', '清单格式'),
+    ('stale', 'document.json SHA-256'), ('speaker', '与基础稿'),
+    ('id', '与基础稿'), ('outside', '只允许 Shelf Help'), ('filled', '已有中文'),
+])
+def test_recovery_rejects_invalid_batch_without_writes(recovery_ws, defect, message):
+    ws = recovery_ws
+    if defect == 'first':
+        ws.stage(ws.base, range(2, 92))
+    elif defect == 'deepseek-export':
+        ws.rows[0]['provider'] = 'deepseek'
+    elif defect == 'deepseek-manifest':
+        ws.plan['provider'] = 'deepseek'
+    elif defect == 'stale':
+        ws.output.write_bytes(ws.output.read_bytes() + b'\n')
+    elif defect in ('speaker', 'id'):
+        key, wrong = ('id', 'seg-000999') if defect == 'id' else ('speaker_id', 's1')
+        ws.plan['segments'][0][key] = ws.rows[0][key] = wrong
+    elif defect == 'outside':
+        ws.stage(ws.output, (2, 94))
+    elif defect == 'filled':
+        document = json.loads(ws.output.read_bytes())
+        document['segments'][90]['chinese'] = '已有中文'
+        _write(ws.output, document)
+        ws.stage(ws.output, range(2, 92))
+    _write(ws.export, ws.rows)
+    ws.plan['export_sha256'] = _digest(ws.export)
+    _write(ws.manifest, ws.plan)
+    before = ws.snapshot()
+    with pytest.raises(ValueError, match=message):
+        receive(*(ws.inputs if defect == 'first' else ws.append_inputs),
+                recovery_of_missing_response=defect not in ('first', 'append'))
+    assert ws.snapshot() == before
+
+
+@pytest.mark.parametrize('fixture, mode', [
+    ('revise_ws', 'revise'), ('recovery_ws', 'recovery_of_missing_response'),
+])
+@pytest.mark.parametrize('failure', ['stale-at-install', 'sync', 'interrupt'])
+def test_failed_write_preserves_document(request, monkeypatch, fixture, mode, failure):
+    ws = request.getfixturevalue(fixture)
+    before = ws.snapshot()
+    externally_changed = ws.output.read_bytes() + b'\n'
+    fsync = studio_recovery.os.fsync
+
+    def change_after_staging(fd):
+        fsync(fd)
+        ws.output.write_bytes(externally_changed)
+
+    def fail_after_replace(directory):
+        assert directory == ws.job
+        assert _digest(ws.output) != before['job/document.json']
+        error = OSError if failure == 'sync' else KeyboardInterrupt
+        raise error('fixture: interrupted after atomic replacement')
+
+    with monkeypatch.context() as patched:
+        if failure == 'stale-at-install':
+            patched.setattr(studio_recovery.os, 'fsync', change_after_staging)
+            with pytest.raises(ValueError, match='基础稿已改变'):
+                receive(*ws.append_inputs, **{mode: True})
+        else:
+            patched.setattr(studio_recovery, '_sync_dir', fail_after_replace)
+            with pytest.raises(OSError if failure == 'sync' else KeyboardInterrupt, match='interrupted'):
+                receive(*ws.append_inputs, **{mode: True})
+    if failure == 'stale-at-install':
+        before['job/document.json'] = hashlib.sha256(externally_changed).hexdigest()
+    assert ws.snapshot() == before
+    if failure != 'stale-at-install':
+        assert receive(*ws.append_inputs, **{mode: True})['status'] == 'received'
