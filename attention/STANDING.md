@@ -14,6 +14,6 @@ Edge 渲染的请求身份、计数口径及校准边界见 [Edge 渲染证据](
 
 本批（t631）已点选积压合格成片可先经官方增量入口导入、不等待逐集试听，听后反馈；未听仍记未听，不改「可听」与质量 PASS 定义。见 [t631 本批先导入后听反馈](t631-import-without-per-episode-listen.md)。
 
-外部 Gemini 网页译稿的文件接收与后续复核边界见 [t633 Gemini 网页译稿接收](t633-gemini-app-manual-import.md)。
+外部 Gemini 网页译稿的文件接收、按批次记录界面显示模型及后续复核边界见 [t633 Gemini 网页译稿接收](t633-gemini-app-manual-import.md)。
 
 Gemini 优先方向、DeepSeek 回退、禁止自动切换与失败自动重发，以及同一 job 按段接续的规则见 [t636 翻译供应方偏好](t636-translation-provider-preference.md)。

@@ -59,7 +59,7 @@ class Workspace:
         _write(self.lock, {'sha256': _digest(self.source)})
         self.stage(self.base, (1, 3))
 
-    def stage(self, base, numbers):
+    def stage(self, base, numbers, *, display_model=None):
         selection = [{key: self.document['segments'][i - 1][key] for key in ('id', 'speaker_id')}
                      for i in numbers]
         self.rows = [{**row, 'zh': f"  译文 {row['id']}  "} for row in selection]
@@ -69,6 +69,8 @@ class Workspace:
             'source_sha256': _digest(self.source), 'export_sha256': _digest(self.export),
             'segments': selection,
         }
+        if display_model is not None:
+            self.plan['display_model'] = display_model
         _write(self.manifest, self.plan)
 
     def run(self, *, append=False, revise=False):
@@ -202,10 +204,15 @@ def test_failed_directory_sync_rolls_back_new_document(ws, monkeypatch):
     assert json.loads(result.stdout)['status'] == 'received'
 
 
-def test_cli_appends_multiple_batches_and_replays_without_writes(append_ws):
+@pytest.mark.parametrize('display_model', [None, 'Hydrogen 高'])
+def test_cli_appends_multiple_batches_and_replays_without_writes(append_ws, display_model):
     ws = append_ws
+    ws.stage(ws.output, (2, 4), display_model=display_model)
     before = ws.snapshot()
-    expected = json.loads(ws.output.read_bytes())
+    original = ws.output.read_bytes()
+    expected = json.loads(original)
+    assert expected['translation_import']['display_model'] == 'Neon 高'
+    first_record = original.split(b'\n  "translation_import": ', 1)[1].removesuffix(b'\n}\n')
     batch2 = ws.manifest.read_bytes(), ws.export.read_bytes()
     result = ws.run(append=True)
     assert result.returncode == 0, result.stderr
@@ -214,7 +221,7 @@ def test_cli_appends_multiple_batches_and_replays_without_writes(append_ws):
     digest = receipt.pop('imported_document_sha256')
     assert digest == _digest(ws.output)
     assert receipt == {
-        'schema_version': 1, 'provider': 'gemini_app_manual', 'display_model': 'Neon 高',
+        'schema_version': 1, 'provider': 'gemini_app_manual', 'display_model': display_model or 'Neon 高',
         'official_model_id': None, 'document_sha256': before['job/document.json'],
         'source_sha256': before['job/source.mp3'], 'export_sha256': before['export.txt'],
         'manifest_sha256': before['manifest.json'], 'segment_ids': [r['id'] for r in ws.rows],
@@ -223,6 +230,7 @@ def test_cli_appends_multiple_batches_and_replays_without_writes(append_ws):
     expected['segments'][3]['chinese'] = ws.rows[1]['zh']
     expected['translation_imports'] = [receipt]
     assert json.loads(ws.output.read_bytes()) == expected
+    assert b'\n  "translation_import": ' + first_record + b',\n' in ws.output.read_bytes()
     after = ws.snapshot()
     assert after == {**before, 'job/document.json': digest}
     rerun = ws.run(append=True)
@@ -241,6 +249,7 @@ def test_cli_appends_multiple_batches_and_replays_without_writes(append_ws):
     assert digest3 == _digest(ws.output)
     assert receipt3['document_sha256'] == digest
     assert receipt3['export_sha256'] == _digest(ws.export)
+    assert receipt3['display_model'] == 'Neon 高'
     expected['segments'][5]['chinese'] = ws.rows[0]['zh']
     expected['translation_imports'].append(receipt3)
     assert json.loads(ws.output.read_bytes()) == expected
@@ -254,6 +263,42 @@ def test_cli_appends_multiple_batches_and_replays_without_writes(append_ws):
         **receipt, 'status': 'unchanged', 'imported_document_sha256': digest3,
     }
     assert ws.snapshot() == after
+
+
+def test_append_rejects_relabelled_history_against_cas(append_ws):
+    ws = append_ws
+    ws.stage(ws.output, (2, 4), display_model='Hydrogen 高')
+    original = ws.output.read_bytes()
+    ws.output.write_bytes(original.replace('Neon 高'.encode(), 'Hydrogen 高'.encode(), 1))
+    before = ws.snapshot()
+    result = ws.run(append=True)
+    assert result.returncode == 1
+    assert 'document.json SHA-256' in result.stderr
+    assert ws.snapshot() == before
+
+
+def test_append_replay_cannot_relabel_received_batch(append_ws):
+    ws = append_ws
+    assert ws.run(append=True).returncode == 0
+    ws.plan['display_model'] = 'Hydrogen 高'
+    _write(ws.manifest, ws.plan)
+    before = ws.snapshot()
+    result = ws.run(append=True)
+    assert result.returncode == 1
+    assert 'document.json SHA-256' in result.stderr
+    assert ws.snapshot() == before
+
+
+@pytest.mark.parametrize('display_model', ['', ' \t\n', None, 7])
+def test_append_rejects_invalid_display_model_without_writes(append_ws, display_model):
+    ws = append_ws
+    ws.plan['display_model'] = display_model
+    _write(ws.manifest, ws.plan)
+    before = ws.snapshot()
+    result = ws.run(append=True)
+    assert result.returncode == 1
+    assert 'display_model' in result.stderr
+    assert ws.snapshot() == before
 
 
 @pytest.mark.parametrize('defect, message', [
@@ -311,6 +356,7 @@ def test_cli_rejects_invalid_append_without_changing_files(append_ws, defect, me
         ws.export.write_text('[', encoding='utf-8')
     if defect != 'wrong-export':
         ws.plan['export_sha256'] = _digest(ws.export)
+    ws.plan['display_model'] = 'Hydrogen 高'
     _write(ws.manifest, ws.plan)
     before = ws.snapshot()
     result = ws.run(append=True)
@@ -351,6 +397,7 @@ def test_append_rechecks_inputs_after_staging(append_ws, monkeypatch, changed):
 
 def test_append_directory_sync_failure_restores_previous_document(append_ws, monkeypatch):
     ws = append_ws
+    ws.stage(ws.output, (2, 4), display_model='Hydrogen 高')
     before = ws.snapshot()
 
     def fail_after_replace(directory):
@@ -626,9 +673,9 @@ def pending_ws(ws):
     _write(ws.base, ws.document)
     ws.stage(ws.base, (2, 3))
     receive(*ws.inputs)
-    ws.stage(ws.output, (4,))
+    ws.stage(ws.output, (4,), display_model='Hydrogen 高')
     receive(*ws.append_inputs)
-    ws.stage(ws.output, (2,))
+    ws.stage(ws.output, (2,), display_model='Hydrogen 高')
     ws.plan['segments'][0]['old_chinese'] = ws.rows[0]['zh']
     ws.rows[0]['zh'] = '修订译文'
     _write(ws.export, ws.rows)
@@ -675,6 +722,10 @@ def test_pending_install_cli_is_exact_and_idempotent(pending_ws, monkeypatch, ca
     ws = pending_ws
     before = ws.snapshot()
     expected = ws.pending.read_bytes()
+    document = json.loads(expected)
+    assert document['translation_import']['display_model'] == 'Neon 高'
+    assert document['translation_imports'][0]['display_model'] == 'Hydrogen 高'
+    assert document['translation_revisions'][0]['display_model'] == 'Hydrogen 高'
     cli = [str(SCRIPT), '--job-dir', str(ws.job), '--source-audio', ws.source.name,
            '--install-pending-draft', str(ws.pending), '--job-id', ws.job.name,
            '--source-sha256', ws.source_sha, '--document-sha256', _digest(ws.pending)]
@@ -744,12 +795,34 @@ def test_pending_install_retains_missing_response_recovery(recovery_ws):
     assert ws.output.read_bytes() == ws.pending.read_bytes()
 
 
+def test_pending_install_rejects_relabelled_neon_history(pending_ws):
+    ws = pending_ws
+    approved_sha = _digest(ws.pending)
+    approved = ws.pending.read_bytes()
+    relabelled = approved.replace('Neon 高'.encode(), 'Hydrogen 高'.encode(), 1)
+    ws.pending.write_bytes(relabelled)
+    before = ws.snapshot()
+    with pytest.raises(ValueError, match='待审稿 SHA-256'):
+        _install(ws, document_sha256=approved_sha)
+    assert ws.snapshot() == before
+
+    ws.pending.write_bytes(approved)
+    assert _install(ws, document_sha256=approved_sha)['status'] == 'installed'
+    ws.pending.write_bytes(relabelled)
+    before = ws.snapshot()
+    with pytest.raises(ValueError, match='不同译稿'):
+        _install(ws)
+    assert ws.snapshot() == before
+    assert ws.output.read_bytes() == approved
+
+
 @pytest.mark.parametrize('defect, message', [
     ('different document', '不同译稿'), ('wrong job', '任务 ID'), ('wrong draft sha', '待审稿 SHA-256'),
     ('wrong input sha', '音源'), ('changed audio', '音源'), ('wrong source identity', '音源'),
     ('wrong normalized sha', '来源'), ('wrong checkpoint digest', '来源'),
     ('wrong segment', '段落'), ('wrong speaker', '说话人'), ('changed ambiguous', '待核'),
     ('changed source text', '原文'), ('missing provenance', '接收'), ('wrong revision sha', '来源'),
+    ('blank import model', '接收'), ('missing revision model', '修订'),
     ('queued', '活跃'), ('running', '活跃'), ('cancelling', '活跃'),
     ('malformed state', '状态'),
 ])
@@ -782,6 +855,10 @@ def test_pending_install_rejects_invalid_inputs_without_writes(pending_ws, defec
             del document['translation_import']
         elif defect == 'wrong revision sha':
             document['translation_revisions'][0]['source_sha256'] = '0' * 64
+        elif defect == 'blank import model':
+            document['translation_imports'][0]['display_model'] = ' \t'
+        elif defect == 'missing revision model':
+            del document['translation_revisions'][0]['display_model']
         else:
             key, value = {
                 'wrong segment': ('id', 'seg-009999'), 'wrong speaker': ('speaker_id', 's1'),

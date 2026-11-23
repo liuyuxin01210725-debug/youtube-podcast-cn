@@ -69,6 +69,18 @@ def _source_version(path):
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _valid_display_model(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _valid_receipt_identity(item, receipt):
+    return (type(item['schema_version']) is int
+            and all(item[key] == receipt[key] for key in (
+                'schema_version', 'provider', 'official_model_id', 'source_sha256',
+            ))
+            and _valid_display_model(item['display_model']))
+
+
 def _append_history(document, receipt):
     previous = document.get('translation_imports', [])
     if not isinstance(previous, list):
@@ -77,10 +89,7 @@ def _append_history(document, receipt):
     imported = set()
     for item in history:
         if (not isinstance(item, dict) or item.keys() - {_RECOVERY_FIELD} != receipt.keys()
-                or type(item['schema_version']) is not int
-                or any(item[key] != receipt[key] for key in (
-                    'schema_version', 'provider', 'display_model', 'official_model_id', 'source_sha256',
-                ))):
+                or not _valid_receipt_identity(item, receipt)):
             raise ValueError('追加须使用与既有 Gemini 接收记录同源的接收稿')
         ids = item['segment_ids']
         if (not isinstance(ids, list) or not ids
@@ -167,8 +176,7 @@ def _pending_provenance(document, source_sha256):
             raise ValueError('付费首块缺少已声明的丢失正文恢复记录')
     for item in revisions:
         if (not isinstance(item, dict) or item.keys() != receipt.keys() | {'previous_chinese'}
-                or type(item['schema_version']) is not int
-                or any(item[key] != receipt[key] for key in (*_RECEIPT_MODEL, 'source_sha256'))):
+                or not _valid_receipt_identity(item, receipt)):
             raise ValueError('修订历史来源或格式无效')
         ids, previous = item['segment_ids'], item['previous_chinese']
         if (not isinstance(ids, list) or not ids
@@ -304,10 +312,13 @@ def receive(job, base_document, source_audio, manifest_path, export_path, *,
 
     manifest_raw = _read_regular_bytes(manifest_path)
     manifest = decode_json_object(manifest_raw)
-    if (set(manifest) != {'schema_version', 'document_sha256', 'source_sha256',
-                          'export_sha256', 'segments'}
+    required_fields = {'schema_version', 'document_sha256', 'source_sha256', 'export_sha256', 'segments'}
+    if (manifest.keys() - {'display_model'} != required_fields
             or type(manifest['schema_version']) is not int or manifest['schema_version'] != 1):
         raise ValueError('接收清单格式无效')
+    display_model = manifest.get('display_model', _RECEIPT_MODEL['display_model'])
+    if not _valid_display_model(display_model):
+        raise ValueError('接收清单的 display_model 须为非空界面显示模型标签')
     segment_fields = {'id', 'speaker_id'}
     if revise:
         segment_fields.add('old_chinese')
@@ -338,6 +349,7 @@ def receive(job, base_document, source_audio, manifest_path, export_path, *,
         raise ValueError('接收清单包含广告段')
     receipt = {
         **_RECEIPT_MODEL,
+        'display_model': display_model,
         'document_sha256': manifest['document_sha256'],
         'source_sha256': manifest['source_sha256'],
         'export_sha256': manifest['export_sha256'],
