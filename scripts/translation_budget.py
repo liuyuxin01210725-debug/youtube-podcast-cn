@@ -36,6 +36,20 @@ OUTPUT_MICRO_CNY = 8
 OUTPUT_TOKENS = {'translation_chunk': 4096, 'translation_title': 512}
 POLICY_VERIFIED_AT = 1795049340  # 2026-11-19 00:49 UTC
 POLICY_EXPIRES_AT = POLICY_VERIFIED_AT + 86400
+# Explicit t631 acceptance of this exact public observation. These absolute
+# dates never move when another page is fetched or an allowance is created.
+EPISODE_VERIFIED_AT = 1795403956
+EPISODE_EXPIRES_AT = 1795490356
+_EPISODE_OBSERVATION = (Path(__file__).resolve().parents[1] / 'tests/fixtures'
+                        / 'rate-card-observation-2026-11-23-1119.json')
+_EPISODE_OBSERVATION_SHA = '8f004e07584930b23e48ba46ba8a12d9d5fd6f1aeadf0ccd95291ff6a4bf7e49'
+_EPISODE_ROOT = Path.home() / 'Desktop/音频/中文播客工作台/isolated-t629-jobs'
+_EPISODE_CAPS = {
+    'd1e5daab08174fd2be2b3868d14c7cd2': 620_000,
+    'de91a4b274894fa29edebb2cb90c654d': 800_000,
+    '2a8a996b3c5a433f8a06619ad45c56eb': 1_030_000,
+    '1efe42d270884ae8b8df07f9c2e9de8a': 840_000,
+}
 # Conservative reserved history, neither an invoice nor the book's prepaid cap.
 CONSERVED_PRIOR_MICROUNITS = 21_130_000
 RESPONSE_LIMIT = 512 * 1024
@@ -228,8 +242,33 @@ class TranslationBudget:
         self.path = self.job / self.FILENAME
         self._clock = clock if clock is not None else lambda: time.time()
 
+    @property
+    def episode_cap(self):
+        if self.job.parent == _EPISODE_ROOT and not self._given_job.is_symlink():
+            return _EPISODE_CAPS.get(self.job.name)
+        return None
+
+    def _policy_window(self):
+        if self.episode_cap is None:
+            return POLICY_VERIFIED_AT, POLICY_EXPIRES_AT
+        raw = _read_regular_bytes(_EPISODE_OBSERVATION)
+        if hashlib.sha256(raw).hexdigest() != _EPISODE_OBSERVATION_SHA:
+            raise ValueError('Unrecognized episode rate observation')
+        pack = decode_json_object(raw)
+        card = pack['extracted_deepseek_flash']
+        if (pack['retrieved_at_unix'] != EPISODE_VERIFIED_AT
+                or pack['comparison_to_admitted_snapshot_2026-11-19']['admitted_policy'] != POLICY
+                or (card['api_name'], card['model_revision'], card['endpoint']) != (MODEL, MODEL_REVISION, ENDPOINT)
+                or (card['input_cache_miss']['peak'], card['output']['peak']) != (INPUT_MICRO_CNY, OUTPUT_MICRO_CNY)):
+            raise ValueError('Episode rate contract mismatch')
+        return EPISODE_VERIFIED_AT, EPISODE_EXPIRES_AT
+
     def _current(self, verified_at, expires_at):
-        return POLICY_VERIFIED_AT <= verified_at <= self._clock() < expires_at <= POLICY_EXPIRES_AT
+        try:
+            start, end = self._policy_window()
+        except (OSError, ValueError):
+            return False
+        return start <= verified_at <= self._clock() < expires_at <= end
 
     @property
     def _ledger_job(self):
@@ -280,13 +319,15 @@ class TranslationBudget:
         return root
 
     def _provision(self, authorization_id, fee_mode, cap, prior, verified_at, expires_at, snapshot=None):
+        start, end = self._policy_window()
         if not (
             isinstance(authorization_id, str) and _PROVIDER_ID.fullmatch(authorization_id)
             and fee_mode == FEE_MODE
             and all(type(value) is int for value in (cap, prior, verified_at, expires_at))
             and 0 <= prior < 2**63 and 0 < cap < 2**63
             and (snapshot is not None or prior <= cap)
-            and POLICY_VERIFIED_AT <= verified_at < expires_at <= POLICY_EXPIRES_AT
+            and (self.episode_cap is None or (prior == 0 and cap <= self.episode_cap and snapshot is None))
+            and start <= verified_at < expires_at <= end
             and (snapshot is not None or self._current(verified_at, expires_at))
             and not self._given_job.is_symlink()
         ):
@@ -345,7 +386,8 @@ class TranslationBudget:
 
     def _check_dispatch(self, admission, identity, expires_at, evidence):
         if admission is None:
-            if not self._current(POLICY_VERIFIED_AT, expires_at):
+            start = EPISODE_VERIFIED_AT if self.episode_cap is not None else POLICY_VERIFIED_AT
+            if not self._current(start, expires_at):
                 raise TranslationRequestError('translation_allowance_invalid', evidence)
             return
         from translation_admission import RuntimeAdmission
@@ -658,9 +700,43 @@ class TranslationBudget:
             self._check_history(requests, key, {**evidence, 'blocking_job_id': sibling.name},
                                 journal_id=journal_id)
 
+    def _allowance(self, db, event, evidence):
+        allowance = db.execute(
+            'SELECT job, policy, fee_mode, cap_microunits, prior_microunits, '
+            'verified_at, expires_at, authorization_id FROM allowance WHERE singleton = 1'
+        ).fetchone()
+        if not allowance or allowance[:3] != (self._ledger_job, POLICY, FEE_MODE):
+            raise TranslationRequestError('translation_allowance_invalid', evidence)
+        cap, prior, verified_at, expires_at, authorization_id = allowance[3:]
+        cap_lifted = event is not None and cap in event['lifted_legacy_caps_microunits']
+        if not (
+            isinstance(authorization_id, str) and _PROVIDER_ID.fullmatch(authorization_id)
+            and all(type(n) is int for n in (cap, prior, verified_at, expires_at))
+            and 0 <= prior < 2**63 and 0 < cap < 2**63
+            and (prior <= cap or cap_lifted)
+            and (event is None or prior >= CONSERVED_PRIOR_MICROUNITS)
+            and (self.episode_cap is None or (event is None and cap <= self.episode_cap and prior == 0))
+            and (POLICY_VERIFIED_AT <= verified_at < expires_at <= POLICY_EXPIRES_AT
+                 if event is not None else self._current(verified_at, expires_at))
+        ):
+            raise TranslationRequestError('translation_allowance_invalid', evidence)
+        return cap, prior, expires_at, cap_lifted
+
+    def check_episode_allowance(self):
+        """Check the scoped wallet before selecting the policy model by default."""
+        if self.episode_cap is None:
+            raise TranslationRequestError('translation_admission_scope', {})
+        try:
+            if not _mode(self.path):
+                raise TranslationRequestError('translation_allowance_missing', {})
+            with closing(self._connect(readonly=True)) as db:
+                self._allowance(db, None, {})
+        except (OSError, sqlite3.Error, ValueError):
+            raise TranslationRequestError('translation_ledger_unavailable', {}) from None
+
     def reserve(self, key, amount, evidence, load_key, *, admission=None, identity=None,
                 journal_slot=None, journal_request=None, wire_key=None):
-        if admission is None and not self._current(POLICY_VERIFIED_AT, POLICY_EXPIRES_AT):
+        if admission is None and self.episode_cap is None and not self._current(POLICY_VERIFIED_AT, POLICY_EXPIRES_AT):
             raise TranslationRequestError('translation_allowance_invalid', evidence)
         try:
             if not _mode(self.path):
@@ -672,24 +748,7 @@ class TranslationBudget:
                 event = None
                 if admission is not None:
                     event = self._check_dispatch(admission, identity, POLICY_EXPIRES_AT, evidence)
-                allowance = db.execute(
-                    'SELECT job, policy, fee_mode, cap_microunits, prior_microunits, '
-                    'verified_at, expires_at, authorization_id FROM allowance WHERE singleton = 1'
-                ).fetchone()
-                if not allowance or allowance[:3] != (self._ledger_job, POLICY, FEE_MODE):
-                    raise TranslationRequestError('translation_allowance_invalid', evidence)
-                cap, prior, verified_at, expires_at, authorization_id = allowance[3:]
-                cap_lifted = event is not None and cap in event['lifted_legacy_caps_microunits']
-                if not (
-                    isinstance(authorization_id, str) and _PROVIDER_ID.fullmatch(authorization_id)
-                    and all(type(n) is int for n in (cap, prior, verified_at, expires_at))
-                    and 0 <= prior < 2**63 and 0 < cap < 2**63
-                    and (prior <= cap or cap_lifted)
-                    and (event is None or prior >= CONSERVED_PRIOR_MICROUNITS)
-                    and POLICY_VERIFIED_AT <= verified_at < expires_at <= POLICY_EXPIRES_AT
-                    and (admission is not None or self._current(verified_at, expires_at))
-                ):
-                    raise TranslationRequestError('translation_allowance_invalid', evidence)
+                cap, prior, expires_at, cap_lifted = self._allowance(db, event, evidence)
                 recoveries = {}
                 adopted, history = self._history(db, recovery_index=recoveries)
                 if adopted and admission is None:
@@ -728,6 +787,8 @@ class TranslationBudget:
                         'legacy_cap_microunits': cap, 'legacy_cap_lifted': cap_lifted,
                         'reserved_microunits': amount,
                     }
+                if self.episode_cap is not None:
+                    evidence['rate_observation_sha256'] = _EPISODE_OBSERVATION_SHA
                 db.execute('INSERT INTO requests VALUES (?, ?, ?, ?, ?, ?)', (
                     key, evidence['local_request_id'], amount, 'submitted',
                     json.dumps({**evidence, 'billing_uncertain': True, 'completion_uncertain': True}),

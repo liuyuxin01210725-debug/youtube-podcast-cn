@@ -24,6 +24,7 @@ if __name__ == '__main__':
         'tests.test_translation_startup',
         'tests.test_translation_budget',
         'tests.test_translation_admission',
+        'tests.test_episode_rate_refresh',
         'tests.test_translation_runtime_admission',
         'tests.test_translation_history_adoption',
         'tests.test_translation_pre_send_recovery',

@@ -768,8 +768,9 @@ class StudioEngine:
             if not source_identity or not source_identity.get('duration_ms'):
                 raise StudioRecoveryError('translation_source_mismatch', '旧任务缺少可核验的音源时长锁，原稿与缓存已保留')
         provider = config.get('provider', 'deepseek')
+        budget = TranslationBudget(self.job)
         client = create_translation_client(
-            provider, budget=TranslationBudget(self.job),
+            provider, budget=budget,
             credential_loader=lambda: self.credential(provider), request_journal=journal,
         )
         binding = fingerprint({
@@ -784,7 +785,16 @@ class StudioEngine:
         })
         if resuming:
             self.progress('translation')
-            draft = load_source(checkpoint, binding, lambda name: sha256_file(self.owned(name)))
+            # Shelf Help stopped before its first request. Its verified source
+            # predates the Flash selection; only this exact envelope and the
+            # corresponding new full configuration fingerprint may pair up.
+            predecessor = None
+            if (budget.episode_cap is not None
+                    and binding == '461ed07513db718f3c64c7d9f56992c471b35fa07669bf6601ad18ff2d0ea491'
+                    and self.job.name == 'd1e5daab08174fd2be2b3868d14c7cd2'):
+                predecessor = '040054fbbaeaf5609256d48a361d5a4be7589e2f731c5867525efb8c84eadf5a'
+            draft = load_source(checkpoint, binding, lambda name: sha256_file(self.owned(name)),
+                                predecessor_sha256=predecessor)
 
         spoken = [
             SubtitleSegment(

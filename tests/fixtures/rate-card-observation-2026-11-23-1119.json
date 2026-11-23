@@ -1,0 +1,48 @@
+{
+  "kind": "official_public_pricing_page_observation",
+  "no_paid_request": true,
+  "url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+  "http_status": 200,
+  "bytes": 29623,
+  "html_sha256": "e872c2c8277f4682c5d4db3e5cc5f88f3462b403c30dea7753cdb025b004e43c",
+  "retrieved_at": "2026-11-23 11:19:16 +0800 Asia/Shanghai",
+  "retrieved_at_unix": 1795403956,
+  "zone": "Asia/Shanghai",
+  "extracted_deepseek_flash": {
+    "api_name": "deepseek-flash",
+    "model_revision": "DeepSeek-V4.1-Flash-1017",
+    "endpoint": "https://api.deepseek.com",
+    "input_cache_hit": {
+      "off_peak": 0.02,
+      "peak": 0.04
+    },
+    "input_cache_miss": {
+      "off_peak": 1.0,
+      "peak": 2.0
+    },
+    "output": {
+      "off_peak": 4.0,
+      "peak": 8.0
+    },
+    "peak_hours_asia_shanghai": "Mon–Fri excluding PRC holidays 09:00–12:00 and 14:00–18:00"
+  },
+  "comparison_to_admitted_snapshot_2026-11-19": {
+    "admitted_policy": "deepseek-flash-cny-2026-11-19-v1",
+    "admitted_model": "deepseek-flash",
+    "admitted_model_revision": "DeepSeek-V4.1-Flash-1017",
+    "admitted_endpoint": "https://api.deepseek.com",
+    "admitted_peak_uncached_input_and_output_cny_per_million": [
+      2,
+      8
+    ],
+    "official_page_still_matches_that_pair": true
+  },
+  "runtime_status_at_observation": {
+    "POLICY": "deepseek-flash-cny-2026-11-19-v1",
+    "POLICY_VERIFIED_AT": 1795049340,
+    "POLICY_EXPIRES_AT": 1795135740,
+    "POLICY_EXPIRES_AT_local": "2026-11-20 08:49:00 +0800 Asia/Shanghai",
+    "expired": true
+  },
+  "note": "This observation does not by itself open production spend. It only records that the official public card still matches the already-admitted peak uncached 2/8 pair, model, revision, and endpoint. No DeepSeek API request was made."
+}

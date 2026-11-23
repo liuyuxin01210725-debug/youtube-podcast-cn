@@ -542,6 +542,12 @@ def create_translation_client(
         admission = RuntimeAdmission.for_job(budget.job)
         if admission is not None:
             model, base_url = MODEL, ENDPOINT
+        elif budget.episode_cap is not None:
+            config = get_provider_config(provider)
+            model = os.getenv(config.model_env) or MODEL
+            base_url = os.getenv(config.base_url_env) or ENDPOINT
+            if supports_policy(provider, model, base_url.rstrip('/')):
+                budget.check_episode_allowance()
     return OpenAICompatibleTranslationClient(
         provider,
         api_key=api_key,

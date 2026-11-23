@@ -192,13 +192,17 @@ def decode_json_object(value):
     return result
 
 
-def load_source(path, binding, reference_hash):
+def load_source(path, binding, reference_hash, *, predecessor_sha256=None):
     try:
         if path.is_symlink():
             raise ValueError
-        envelope = decode_json_object(path.read_bytes())
+        raw = _read_regular_bytes(path)
+        envelope = decode_json_object(raw)
         draft = envelope['draft']
-        if envelope['binding'] != binding or envelope['digest'] != fingerprint(draft):
+        if envelope['binding'] != binding and (predecessor_sha256 is None
+                                               or hashlib.sha256(raw).hexdigest() != predecessor_sha256):
+            raise ValueError
+        if envelope['digest'] != fingerprint(draft):
             raise ValueError
         if any(reference_hash(item['path']) != item['sha256'] for item in draft['references'].values()):
             raise ValueError

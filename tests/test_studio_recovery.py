@@ -1,11 +1,13 @@
 """Synthetic Studio recovery tests. No fixture contains real episode content."""
 
 import asyncio
+from array import array
 from contextlib import ExitStack, closing
 import errno
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -19,6 +21,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import edge_tts
 import podcast_cn
 import studio_publish_icloud as publisher
 import studio_recovery
@@ -441,8 +444,12 @@ class StudioRecoveryTests(unittest.TestCase):
         job = self.job
         calls = []
 
-        class OfflineEdge:
+        # The real preflight checks SDK input identity and decoded audio.
+        tone = array('h', (int(4000 * math.sin(2 * math.pi * i / 48)) for i in range(48)))
+
+        class OfflineEdge(edge_tts.Communicate):
             def __init__(self, text, voice):
+                super().__init__(text, voice)
                 calls.append(text)
 
             async def save(self, filename):
@@ -454,7 +461,7 @@ class StudioRecoveryTests(unittest.TestCase):
                     raise TimeoutError('synthetic Edge timeout')
                 with wave.open(filename, 'wb') as audio:
                     audio.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
-                    audio.writeframes(b'\0\0' * 24000 * 12)
+                    audio.writeframes(tone.tobytes() * (24000 * 12 // len(tone)))
 
         with (
             patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': str(library)}),
