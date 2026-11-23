@@ -852,10 +852,9 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
 
 
 def _require_audio_preflight(src, job):
-    """Check finished media without deriving a preview or assuming a speech-rate baseline."""
+    """Apply the default audio checks and refuse BLOCK or REVIEW before merging."""
     from shengjian_audio_preflight import refuse_if_blocked_or_review, run_preflight, PreflightError
-    report = run_preflight(src, output_dir=Path(job) / 'preflight',
-                           write_preview_mp3=False, check_duration_vs_chars=False)
+    report = run_preflight(src, output_dir=Path(job) / 'preflight')
     try:
         refuse_if_blocked_or_review(report)
     except PreflightError as error:

@@ -5,3 +5,5 @@
 官方签包只走本安全工程的 `make shengjian-sign-iphoneos OUTPUT=<隔离目录>`。要求干净树（含非 ignored 未跟踪文件）、已推送的安全分支 tip、真实源 SHA、构建墙钟戳和产物 hash 校验。路径、参数或门禁不满足即停止。禁止改用直接 xcodebuild 或旧脚本、传 `-allowProvisioningUpdates`、下载 profile 或向源码写版本戳。`branch@SHA` 绑定源版本，`BUILD_TIMESTAMP` 记录本次构建墙钟（Asia/Shanghai，禁止使用 Git AuthorDate）。签包成功只留隔离产物与记录。
 
 真实官方安装成功且校验通过后，才调用 `shengjian_current_promote.py` 原子提升 CURRENT，依据实际安装和校验记录，禁止手填成功标记。未装、安装失败或校验失败时保留原 CURRENT。隔离或 mock 干跑仅验证门禁。2026-11-22 用户明确本轮只检查和准备，手机和 live CURRENT 保持原样，覆盖安装由本人另行授权。
+
+Mac 普通发布的音频预检纠正及目录事务验收边界见 [Mac 发布音频预检纠正](t624-mac-publish-preflight.md)。
