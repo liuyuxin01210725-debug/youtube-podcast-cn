@@ -7,3 +7,5 @@
 真实官方安装成功且校验通过后，才调用 `shengjian_current_promote.py` 原子提升 CURRENT，依据实际安装和校验记录，禁止手填成功标记。未装、安装失败或校验失败时保留原 CURRENT。隔离或 mock 干跑仅验证门禁。2026-11-22 用户明确本轮只检查和准备，手机和 live CURRENT 保持原样，覆盖安装由本人另行授权。
 
 Mac 普通发布的音频预检纠正及目录事务验收边界见 [Mac 发布音频预检纠正](t624-mac-publish-preflight.md)。
+
+Edge 渲染的请求身份、计数口径及校准边界见 [Edge 渲染证据](t625-edge-render-evidence.md)。

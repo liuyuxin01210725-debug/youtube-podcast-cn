@@ -48,6 +48,7 @@ from studio_preview import select_preview_segments
 from studio_progress import build_progress_payload
 from studio_ads import ad_only_speakers, fold_ad_speakers, group_key, mark_sponsor_windows, split_group_key
 from studio_document import check_source_coverage
+from studio_edge_input import EDGE_INPUT_VERSION, EDGE_SILENCE, clean_tts_text, speakable_tts, valid_edge_input
 from studio_recovery import (
     StudioRecoveryError, TranslationJournal, _read_regular_bytes, _save_bytes, _sync_dir,
     decode_json_object, load_source,
@@ -57,8 +58,7 @@ from studio_speakers import (SpeakerGateError, expected_speakers, requires_voice
                              validate_speaker_ids, validate_speaker_voices)
 from temporary_audio import download_audio_only, sha256_file
 from translation_budget import TranslationBudget, TranslationRequestError
-from tts_backends import (EDGE_ACCESS_DENIED_MESSAGE, SynthesisRequest, TTSBackendError,
-                          build_backend, speakable_tts)
+from tts_backends import EDGE_ACCESS_DENIED_MESSAGE, SynthesisRequest, TTSBackendError, build_backend
 
 ROOT = Path(__file__).resolve().parents[1]
 CLONE_MODEL = 'mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit'
@@ -237,25 +237,18 @@ def fingerprint(value):
 # aborts the whole job; a short silence keeps the timeline without a request.
 SILENCE_FRAMES = 2880
 SILENCE_RATE = 24000
-_TTS_TURN_MARKER = re.compile(r"(?<!\S)>>+\s*")
-_TTS_STAGE = re.compile(
-    r"[\[【〔(（]"
-    r"(?:音乐|背景音乐|笑声?|掌声|叹气|清嗓子?|咳嗽|鼓掌|沉默|停顿|吸气|呼气|听不清|"
-    r"music|laughter|laughs?|applause|gasps?|sighs?|coughs?|snorts?|clears throat|inaudible|crosstalk|beat)"
-    r"[\]】〕)）]",
-    re.IGNORECASE,
-)
 
 
-def clean_tts_text(text):
-    """Drop YouTube ``>>`` turn markers and short stage directions before Edge."""
-    cleaned = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
-    cleaned = _TTS_TURN_MARKER.sub("", cleaned)
-    cleaned = _TTS_STAGE.sub("", cleaned)
-    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
-    cleaned = re.sub(r"\n{2,}", "\n", cleaned)
-    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-    return cleaned.strip()
+def _cached_edge_input(clip, sidecar, spoken, voice_slot):
+    try:
+        saved = decode_json_object(_read_regular_bytes(sidecar))
+        evidence = saved['edge_input']
+        if (saved.get('cache_key') == clip.stem and valid_edge_input(evidence, spoken, voice_slot)
+                and saved.get('clip_sha256') == sha256_file(clip)):
+            return evidence
+    except (OSError, ValueError, KeyError, RecursionError):
+        pass
+    return None
 
 
 def write_pcm_silence(path, frames=SILENCE_FRAMES, rate=SILENCE_RATE):
@@ -978,6 +971,7 @@ class StudioEngine:
             raise StudioInputError('试听段数必须大于零')
         self.total = len(selected)
         backend_name = config.get('tts', 'edge')
+        edge = backend_name == 'edge'
         pending = [segment['id'] for segment in selected if segment.get('ambiguous')]
         if pending and not accept_unreviewed:
             raise StudioInputError(f'有 {len(pending)} 段说话人待核对。请拆段、逐段修正或凭证确认，再试听或生成。')
@@ -988,15 +982,17 @@ class StudioEngine:
         cache = self.job / 'audio-cache'
         cache.mkdir(exist_ok=True)
         clips = []
+        edge_inputs = []
         for index, segment in enumerate(selected):
             self.progress('synthesis', index, len(selected), segment_id=segment['id'])
             self.check_cancel()
             text = segment['chinese'].strip()
             if not text:
                 raise StudioInputError('片段译文为空')
-            spoken = clean_tts_text(text) if backend_name == 'edge' else text
+            spoken = clean_tts_text(text) if edge else text
             speaker = segment['speaker_id']
             voice = document['speakers'][speaker]
+            voice_slot = voice.get('voice_slot', 'male_1')
             ref = document['references'].get(speaker)
             identity = {'text': text, 'voice': voice, 'backend': backend_name, 'style': config.get('style', 'conversation'), 'model': model if backend is None else backend.fingerprint(), 'version': 1, 'revision': '50f45ef0047cde7e84c2ef04326acb8ada2436a7' if model == CLONE_MODEL else model}
             if spoken != text:
@@ -1008,24 +1004,41 @@ class StudioEngine:
                 reference = self.owned(ref['path'])
                 identity['reference'] = {'sha256': sha256_file(reference), 'text': ref['text']}
             target = cache / (fingerprint(identity) + '.wav')
+            sidecar = target.with_suffix('.edge.json')
+            edge_input = None
             if not self.valid_audio(target):
-                if backend is not None and backend_name == 'edge' and not speakable_tts(spoken):
+                if edge:
+                    sidecar.unlink(missing_ok=True)
+                if edge and not speakable_tts(spoken):
                     write_pcm_silence(target)
                     if not self.valid_audio(target):
                         raise StudioInputError('片段音频无效，请重试')
+                    edge_input = EDGE_SILENCE
                 else:
                     raw = self.temp / ('synthesis.wav' if backend is None else 'synthesis' + backend.file_suffix)
                     if backend is None:
                         self.worker({'operation': 'tts', 'model': model, 'text': text, 'reference': str(reference), 'reference_text': ref['text'], 'output': str(raw)})
                     else:
-                        request = SynthesisRequest(spoken, voice.get('voice_slot', 'male_1'), config.get('style', 'conversation'))
-                        asyncio.run(self.synthesize(backend, request, raw))
+                        request = SynthesisRequest(spoken, voice_slot, config.get('style', 'conversation'))
+                        usage = asyncio.run(self.synthesize(backend, request, raw))
+                        if edge:
+                            edge_input = getattr(usage, 'edge_input', None)
                     staged = self.temp / 'normalized.wav'
                     self.ffmpeg('-i', raw, '-ac', 1, '-ar', 24000, '-c:a', 'pcm_s16le', staged)
                     if not self.valid_audio(staged):
                         raise StudioInputError('片段音频无效，请重试')
                     staged.replace(target)
+                if edge and valid_edge_input(edge_input, spoken, voice_slot):
+                    atomic_json(sidecar, {
+                        'cache_key': target.stem, 'clip_sha256': sha256_file(target), 'edge_input': edge_input,
+                    })
+                else:
+                    edge_input = None
+            elif edge:
+                edge_input = _cached_edge_input(target, sidecar, spoken, voice_slot)
             clips.append(target)
+            if edge:
+                edge_inputs.append(edge_input)
         self.progress('export', len(selected), len(selected))
         listing = self.temp / 'concat.txt'
         # Cache paths consist only of hex names; concat manifest cannot inject directives.
@@ -1040,18 +1053,22 @@ class StudioEngine:
         if preview is None and source_lock.is_file():
             frames = 0
             timeline = []
-            for segment, clip in zip(selected, clips, strict=True):
+            for index, (segment, clip) in enumerate(zip(selected, clips, strict=True)):
                 with wave.open(str(clip)) as audio:
                     if audio.getframerate() != SILENCE_RATE:
                         raise StudioInputError('片段音频采样率与合成时轴不一致')
                     end = frames + audio.getnframes()
-                timeline.append({'id': segment['id'], 'start_frame': frames, 'end_frame': end})
+                row = {'id': segment['id'], 'start_frame': frames, 'end_frame': end}
+                if edge:
+                    row['edge_input'] = edge_inputs[index]
+                timeline.append(row)
                 frames = end
             receipt = self.temp / 'render-identity.json'
             atomic_json(receipt, {
                 'schema_version': 1, 'audio_sha256': sha256_file(staged),
                 'document_sha256': fingerprint(document), 'source_identity_sha256': sha256_file(source_lock),
                 'sample_rate': SILENCE_RATE, 'timeline': timeline,
+                **({'edge_input_version': EDGE_INPUT_VERSION} if edge else {}),
             })
         staged.replace(target)
         if preview is None and source_lock.is_file():

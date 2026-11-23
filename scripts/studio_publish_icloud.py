@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import studio_original_pending as original_pending
 from studio_document import check_source_coverage
+from studio_edge_input import EDGE_INPUT_VERSION, clean_tts_text, valid_edge_input
 from studio_recovery import _sync_dir, decode_json_object
 from studio_speakers import validate_speaker_voices
 from temporary_audio import sha256_file
@@ -761,15 +762,26 @@ def _validate_render(folder: Path, config: dict, duration_sec: float | None) -> 
                 or receipt['audio_sha256'] != sha256_file(folder / AUDIO_NAME)):
             raise ValueError
         timeline = receipt['timeline']
-        ids = [row['id'] for row in document['segments'] if not row.get('is_ad')]
+        segments = [row for row in document['segments'] if not row.get('is_ad')]
+        ids = [row['id'] for row in segments]
         if not ids or len(set(ids)) != len(ids) or [row['id'] for row in timeline] != ids:
             raise ValueError
         frames = 0
-        for row in timeline:
+        edge_evidence = 'edge_input_version' in receipt or any('edge_input' in row for row in timeline)
+        if edge_evidence and (type(receipt.get('edge_input_version')) is not int
+                              or receipt['edge_input_version'] != EDGE_INPUT_VERSION
+                              or config.get('tts', 'edge') != 'edge'):
+            raise ValueError
+        for row, segment in zip(timeline, segments, strict=True):
             if (type(row['start_frame']) is not int or type(row['end_frame']) is not int
                     or row['start_frame'] != frames or row['end_frame'] <= frames):
                 raise ValueError
             frames = row['end_frame']
+            if edge_evidence:
+                text = segment['chinese'].strip()
+                slot = document['speakers'][segment['speaker_id']].get('voice_slot', 'male_1')
+                if not text or not valid_edge_input(row.get('edge_input'), clean_tts_text(text), slot):
+                    raise ValueError
         # MP3 encoding adds frame padding to the PCM timeline.
         if duration_sec is None or not math.isfinite(duration_sec) or duration_sec <= 0 \
                 or abs(duration_sec - frames / 24000) > 0.12:

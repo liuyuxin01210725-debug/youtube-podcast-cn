@@ -11,10 +11,15 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
+from xml.etree import ElementTree
 
 import aiohttp
 import edge_tts
+from edge_tts.communicate import mkssml
 from edge_tts.exceptions import NoAudioReceived, WebSocketError
+
+from studio_edge_input import (EDGE_REQUEST_SOURCE, edge_request_sha256, edge_voice_language,
+                               observe_edge_text, speakable_tts)
 
 
 VOICE_SLOTS = (
@@ -99,6 +104,7 @@ class SynthesisUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     audio_tokens: int = 0
+    edge_input: dict | None = None
 
 
 class TTSBackend(Protocol):
@@ -145,13 +151,6 @@ _EDGE_RETRY_STATUSES = {429, 500, 502, 503, 504}
 EDGE_ACCESS_DENIED_MESSAGE = (
     "系统音色服务拒绝连接（HTTP 403）。请确认 edge-tts 已升级到 7.3.1 或更高版本。"
 )
-_SPEAKABLE_TTS = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]")
-
-
-def speakable_tts(text: str) -> bool:
-    return _SPEAKABLE_TTS.search(text or "") is not None
-
-
 def _edge_retryable(error: Exception, text: str) -> bool:
     if isinstance(error, aiohttp.ClientResponseError):
         return error.status in _EDGE_RETRY_STATUSES
@@ -163,6 +162,31 @@ def _edge_retryable(error: Exception, text: str) -> bool:
         aiohttp.ClientConnectionError, aiohttp.ClientPayloadError,
         WebSocketError, ConnectionError, TimeoutError, asyncio.TimeoutError,
     ))
+
+
+def _observed_edge_input(communicate, request, voice_argument):
+    # Render the pinned SDK's actual SSML configuration locally, with no user text.
+    config = getattr(communicate, 'tts_config', None)
+    if config is None:
+        return None
+    try:
+        ssml = ElementTree.fromstring(mkssml(config, ''))
+    except ElementTree.ParseError:
+        return None
+    voice_tag = ssml.find('.//{*}voice')
+    prosody = ssml.find('.//{*}prosody')
+    if voice_tag is None or prosody is None:
+        return None
+    voice = voice_tag.get('name')
+    applied = {
+        'voice': voice, 'voice_argument': voice_argument, 'language': edge_voice_language(voice),
+        'speed': prosody.get('rate'), 'ssml_language': ssml.get('{http://www.w3.org/XML/1998/namespace}lang'),
+        'sdk_version': getattr(edge_tts, '__version__', None), 'source': EDGE_REQUEST_SOURCE,
+    }
+    return {
+        'mode': 'request', 'voice_slot': request.voice_slot, **observe_edge_text(request.text),
+        'request': applied, 'request_sha256': edge_request_sha256(applied),
+    }
 
 
 class EdgeTTSBackend:
@@ -217,7 +241,7 @@ class EdgeTTSBackend:
                         raise
                 else:
                     staged.replace(output)
-                    return SynthesisUsage()
+                    return SynthesisUsage(edge_input=_observed_edge_input(communicate, request, voice))
             await asyncio.sleep(_EDGE_RETRY_DELAYS[attempt])
 
 
