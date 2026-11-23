@@ -49,11 +49,13 @@ class ServerTests(unittest.TestCase):
         item['evidence_hash'] = segment_evidence_hash(document_sha256, segment, item)
         return item
 
-    def test_confirm_segments_applies_only_valid_listed_item_and_records_replayable_audit(self):
+    def test_confirm_segments_official_golden_hash_and_replayable_audit(self):
         ident, path = self.review_job()
         before = read(path / 'document.json')
         digest = hashlib.sha256((path / 'document.json').read_bytes()).hexdigest()
         valid = self.review_item(digest, before['segments'][0])
+        self.assertNotIn('evidence_type', valid)
+        self.assertEqual(valid['evidence_hash'], '332998236c8a66e711a477b83566d387472a35ca01e7e67763719c23feff5c66')
         invalid = self.review_item(digest, before['segments'][1])
         invalid['evidence_hash'] = '0' * 64
         status, raw = self.request(f'/api/jobs/{ident}/confirm-segments', {
@@ -71,6 +73,7 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(after['voices_confirmed'])
         audit, = after['segment_confirmations']
         self.assertEqual(audit['document_sha256'], digest)
+        self.assertEqual(audit['evidence_type'], 'official_transcript')
         self.assertEqual(audit['evidence_hash'], valid['evidence_hash'])
         self.assertEqual(audit['hash_version'], 1)
         for field in OFFICIAL_EVIDENCE_FIELDS:
@@ -386,15 +389,15 @@ class ServerTests(unittest.TestCase):
         moved = [dict(item) for item in edited]
         moved[1]['speaker_id'] = 's0'
         self.assertEqual(self.request(f'/api/jobs/{ident}/document', {'segments': moved, 'voices': {'s0': 'female_1', 's1': 'female_2'}})[0], 200)
-        after_move = read(p / 'document.json')['segments']
-        self.assertFalse(after_move[1]['ambiguous'])
-        self.assertTrue(after_move[0]['ambiguous'])
+        after_move = read(p / 'document.json')
+        self.assertEqual(after_move['segments'][1]['speaker_id'], 's0')
+        self.assertFalse(after_move['voices_confirmed'])
         before = (p / 'document.json').read_bytes()
         code, body = self.request(f'/api/jobs/{ident}/confirm-speakers', {})
         self.assertEqual(code, 400)
         self.assertIn('confirm-segments', json.loads(body)['error'])
         self.assertEqual((p / 'document.json').read_bytes(), before)
-        self.assertEqual([s['ambiguous'] for s in after_move], [True, False, True, True, True, True])
+        self.assertTrue(all(s['ambiguous'] for s in after_move['segments']))
         self.assertEqual(self.request(f'/api/jobs/{ident}/voice-slots', {'scheme': 'other'})[0], 400)
         self.assertEqual(self.request(f'/api/jobs/{ident}/voice-slots', {'scheme': 'male_first'})[0], 200)
         voices = read(p / 'document.json')
@@ -405,13 +408,15 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(read(p / 'document.json')['voices_confirmed'])
         self.assertEqual(self.request(f'/api/jobs/{ident}/document', {'segments': [{'id': s['id'], 'chinese': s['chinese'], 'speaker_id': s['speaker_id']} for s in read(p / 'document.json')['segments']], 'voices': {'s0': 'female_1', 's1': 'male_2'}})[0], 200)
         self.assertFalse(read(p / 'document.json')['voices_confirmed'])
-        self.assertEqual(self.request(f'/api/jobs/{ident}/action', {'action': 'render', 'preview': True, 'accept_unreviewed': True})[0], 200)
-        state = read(p / 'state.json')
-        self.assertTrue(state['accept_unreviewed'])
-        args = self.studio.engine_args(p, state)
-        self.assertIn('--accept-unreviewed', args)
-        self.assertTrue(self.studio.info(p)['accept_unreviewed'])
-        self.studio.action(ident, 'cancel')
+        state_before = (p / 'state.json').read_bytes()
+        for action in ('render', 'run'):
+            code, raw = self.request(f'/api/jobs/{ident}/action', {
+                'action': action, 'preview': True, 'accept_unreviewed': True,
+            })
+            self.assertEqual(code, 400)
+            self.assertIn('confirm-segments', json.loads(raw)['error'])
+            self.assertEqual((p / 'state.json').read_bytes(), state_before)
+        self.assertNotIn('--accept-unreviewed', self.studio.engine_args(p, {'accept_unreviewed': True}))
         self.assertEqual(self.request(f'/api/jobs/{ident}/action', {'action': 'render', 'preview': True, 'accept_unreviewed': 'true'})[0], 200)
         self.assertFalse(read(p / 'state.json')['accept_unreviewed'])
 

@@ -1,6 +1,6 @@
 # 待核对与声槽（私人收听）
 
-长访谈中，`fill_unassigned_for_review` 将未对齐的字幕分到最近的说话人，并标为「待核对」。同一段有两人时先拆段。逐段更改说话人并保存只确认当前段。若同意已有说话人，可通过逐段证据接口确认。
+长访谈中，`fill_unassigned_for_review` 将未对齐的字幕分到最近的说话人，并标为「待核对」。同一段有两人时先拆段。需要改说话人时先修改并保存，再按当前归属提交逐段证据。保存修改会保留待核标记，只有 `confirm-segments` 能清除。只要仍有待核段，试听和生成都会被挡住。
 
 人数闸通过后，还须逐段核对说话轮次。声槽确认和待核对清零后，仍须检查译稿末段时间码是否超出锁定音源时长。发生越界时保留稿件并检查音源与时轴。
 
@@ -25,7 +25,11 @@
 }
 ```
 
-绑定哈希 v1：将 `document_sha256`、当前段的 `id`、`speaker_id`、
+上例省略 `evidence_type`，按 `official_transcript` 处理。也可用
+`evidence_type: "audio_clip_review"` 提交短音听核凭证，字段与绑定规则见
+[逐段说话人确认凭证](../attention/t644-segment-review-evidence.md)。
+
+官方逐字稿绑定哈希 v1：将 `document_sha256`、当前段的 `id`、`speaker_id`、
 `start_ms`、`end_ms`、`text`，以及上述四个 `official_*` 字段组成一个扁平
 JSON 对象，再计算：
 
@@ -37,7 +41,7 @@ sha256(json.dumps(binding, sort_keys=True, ensure_ascii=False,
 字段按原值编码，不裁剪、不转换类型、不做 Unicode 归一化。共享函数是
 `studio_document.segment_evidence_hash(document_sha256, segment, evidence)`。
 四个官方证据字段都必须为非空字符串。此接口绑定审核者提交的证据，
-不自行下载或核验官方逐字稿内容。`speaker_id` 必须与当前段一致；改说话人仍用原译稿接口。
+不自行下载或核验官方逐字稿内容。`speaker_id` 必须与当前段一致。改说话人仍用原译稿接口。
 
 文件哈希过期时整次请求返回 400，不写入任何内容。逐项错误返回 200，
 `applied` 是通过的段落 ID 列表，`rejected` 包含 `id` 和 `reason`。

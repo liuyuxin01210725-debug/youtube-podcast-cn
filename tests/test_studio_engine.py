@@ -250,7 +250,7 @@ class StudioTests(unittest.TestCase):
         self.assertTrue(speakable_tts(clean_tts_text('>> 肌酸。')))
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
-    def test_expected_two_with_two_slots_renders_even_with_review_override(self):
+    def test_expected_two_with_two_slots_renders_after_review_and_override_cannot_bypass(self):
         class FakeBackend:
             file_suffix = '.mp3'
             def fingerprint(self):
@@ -272,10 +272,16 @@ class StudioTests(unittest.TestCase):
                 'speakers': {'a': {'voice_slot': 'male_1'}, 'b': {'voice_slot': 'male_2'}},
                 'references': {},
             }
-            with patch('studio_engine.build_backend', return_value=FakeBackend()):
-                output = engine.render({'tts': 'edge', 'expected_speakers': 2}, doc, accept_unreviewed=True)
+            config = {'tts': 'edge', 'expected_speakers': 2}
+            with patch('studio_engine.build_backend', return_value=FakeBackend()) as build:
+                with self.assertRaisesRegex(ValueError, '8 段说话人待核对'):
+                    engine.render(config, doc, accept_unreviewed=True)
+                build.assert_not_called()
+                self.assertTrue(all(segment['ambiguous'] for segment in doc['segments']))
+                for segment in doc['segments']:
+                    segment['ambiguous'] = False
+                output = engine.render(config, doc)
             self.assertTrue(output.is_file())
-            self.assertTrue(all(segment['ambiguous'] for segment in doc['segments']))
 
     @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
     def test_edge_writes_silence_instead_of_speaking_bare_punctuation(self):

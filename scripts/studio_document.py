@@ -12,6 +12,10 @@ SEGMENT_CONFIRM_FIELDS = ("id", "speaker_id", "start_ms", "end_ms", "text")
 OFFICIAL_EVIDENCE_FIELDS = (
     "official_source_sha256", "official_speaker", "official_locator", "official_excerpt",
 )
+AUDIO_REVIEW_EVIDENCE_FIELDS = (
+    "evidence_type", "source_audio_sha256", "clip_sha256", "clip_target_start_ms",
+    "clip_target_end_ms", "review_response_sha256", "review_source", "review_basis", "review_summary",
+)
 
 
 def segment_evidence_hash(document_sha256: str, segment: dict, evidence: dict) -> str:
@@ -27,6 +31,34 @@ def segment_evidence_hash(document_sha256: str, segment: dict, evidence: dict) -
     binding.update({field: evidence[field] for field in OFFICIAL_EVIDENCE_FIELDS})
     canonical = json.dumps(binding, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def audio_review_evidence_hash(document_sha256: str, segment: dict, evidence: dict) -> str:
+    """Hash the v1 audio review binding using the submitted field values."""
+    binding = {"evidence_schema": "audio_clip_review:v1", "document_sha256": document_sha256}
+    binding.update({field: segment[field] for field in SEGMENT_CONFIRM_FIELDS})
+    binding.update({field: evidence[field] for field in AUDIO_REVIEW_EVIDENCE_FIELDS})
+    canonical = json.dumps(binding, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def audio_review_evidence_error(evidence: dict) -> str | None:
+    for field in ("source_audio_sha256", "clip_sha256", "review_response_sha256"):
+        value = evidence.get(field)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            return f"invalid_{field}"
+    start, end = evidence.get("clip_target_start_ms"), evidence.get("clip_target_end_ms")
+    if type(start) is not int or start < 0:
+        return "invalid_clip_target_start_ms"
+    if type(end) is not int or end <= start:
+        return "invalid_clip_target_end_ms"
+    for field, limit in (("review_source", 128), ("review_summary", 500)):
+        value = evidence.get(field)
+        if not isinstance(value, str) or not value.strip() or len(value) > limit:
+            return f"invalid_{field}"
+    if evidence.get("review_basis") != "model_assisted_audio_review":
+        return "invalid_review_basis"
+    return None
 
 
 def normalize_ws(value: str) -> str:

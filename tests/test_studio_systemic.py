@@ -256,7 +256,7 @@ def test_laschi_mixed_voice_mapping_requires_explicit_confirmation_without_retra
     synth.assert_called_once()
 
 
-def test_farrar_split_preserves_id_and_only_edited_row_is_confirmed(tmp_path):
+def test_farrar_split_preserves_id_and_speaker_edit_keeps_review_pending(tmp_path):
     studio = Studio(tmp_path / 'jobs')
     ident = 'farrar-fixture'
     job = studio.root / ident
@@ -274,7 +274,7 @@ def test_farrar_split_preserves_id_and_only_edited_row_is_confirmed(tmp_path):
     assert split[2] == rows[1]
     split[1]['speaker_id'] = 'host'
     studio.update_document(ident, {'segments': split})
-    assert [s['ambiguous'] for s in json.loads(path.read_bytes())['segments']] == [True, False, True]
+    assert [s['ambiguous'] for s in json.loads(path.read_bytes())['segments']] == [True, True, True]
     before = path.read_bytes()
     with pytest.raises(ValueError, match='confirm-segments'):
         studio.confirm_speakers(ident)
@@ -282,6 +282,7 @@ def test_farrar_split_preserves_id_and_only_edited_row_is_confirmed(tmp_path):
     ui = (ROOT / 'studio_static/app.js').read_text()
     assert '全部按当前说话人确认' not in ui and '/confirm-speakers' not in ui
     assert all(option in ui for option in ('/split-segment', '/confirm-voices', '逐段'))
+    assert '保存说话人修改后，待核标记会保留' in ui
 
 
 def test_standalone_render_and_failed_job_are_not_picked_up_for_publish(tmp_path, monkeypatch):

@@ -957,6 +957,9 @@ class StudioEngine:
         segments = document['segments']
         if not segments or len({s['id'] for s in segments}) != len(segments):
             raise StudioInputError('段落为空或编号重复')
+        pending = [segment['id'] for segment in segments if segment.get('ambiguous')]
+        if pending:
+            raise StudioInputError(f'有 {len(pending)} 段说话人待核对。请按需拆段或改标，再用 confirm-segments 提交逐段证据。')
         # Drop sponsor windows. Do not insert silence; the surrounding lines join.
         segments = [segment for segment in segments if not segment.get('is_ad')]
         if not segments:
@@ -967,9 +970,6 @@ class StudioEngine:
         self.total = len(selected)
         backend_name = config.get('tts', 'edge')
         edge = backend_name == 'edge'
-        pending = [segment['id'] for segment in selected if segment.get('ambiguous')]
-        if pending and not accept_unreviewed:
-            raise StudioInputError(f'有 {len(pending)} 段说话人待核对。请拆段、逐段修正或凭证确认，再试听或生成。')
         model = config.get('clone_model', CLONE_MODEL)
         backend = None
         if backend_name != 'clone':
@@ -1250,7 +1250,7 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--action', choices=['run', 'prepare', 'render'], default='run')
     parser.add_argument('--preview', type=int)
-    parser.add_argument('--accept-unreviewed', action='store_true')
+    parser.add_argument('--accept-unreviewed', action='store_true', help='兼容旧调用，待核对段仍会阻止合成')
     parser.add_argument('--publish-library', type=Path)
     args = parser.parse_args()
     engine = StudioEngine(args.job_dir)

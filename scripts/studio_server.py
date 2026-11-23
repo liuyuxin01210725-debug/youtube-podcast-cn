@@ -12,12 +12,12 @@ TEXT_UPLOAD_EXT=('.txt','.md')
 MAX_BOOK_UPLOAD=8*1024*1024
 
 from studio_preview import preview_limit, select_preview_segments
-from studio_document import OFFICIAL_EVIDENCE_FIELDS, SEGMENT_CONFIRM_FIELDS, segment_evidence_hash, split_document_segment
+from studio_document import (
+    AUDIO_REVIEW_EVIDENCE_FIELDS, OFFICIAL_EVIDENCE_FIELDS, SEGMENT_CONFIRM_FIELDS,
+    audio_review_evidence_error, audio_review_evidence_hash, segment_evidence_hash, split_document_segment,
+)
 from diarization_cache import assign_studio_voices
 from studio_speakers import expected_speakers, requires_voice_mapping, use_male_slots, validate_speaker_voices
-
-def as_bool(value):
-    return value is True
 
 def lookup_source_metadata(url):
     """English YouTube title and channel. None when oEmbed is unavailable."""
@@ -270,7 +270,9 @@ class Studio:
                 if s.get('status') in ('running','queued','cancelling'): raise ValueError('任务已在队列中')
                 if action not in ('prepare','render','run'): raise ValueError('操作无效')
                 if action=='render' and not (p/'document.json').exists(): raise ValueError('请先准备译稿')
-                s.update(status='queued',action=action,preview=bool(preview),accept_unreviewed=as_bool(accept_unreviewed) if action in ('render','run') else False,message=None)
+                if action in ('render','run') and accept_unreviewed is True:
+                    raise ValueError('请用 confirm-segments 提交逐段证据后再试听或生成。')
+                s.update(status='queued',action=action,preview=bool(preview),accept_unreviewed=False,message=None)
             s['updated_at']=time.time(); write(p/'state.json',s)
     def _editable(self, ident):
         p=self.job(ident); state=read(p/'state.json',{})
@@ -298,11 +300,8 @@ class Studio:
             if len(updates)!=len(doc.get('segments',[])): raise ValueError('译稿段落不完整')
             for original,new in zip(doc['segments'],updates):
                 if original['id']!=new['id'] or new.get('speaker_id') not in doc['speakers'] or not isinstance(new.get('chinese'),str) or len(new['chinese'])>20000: raise ValueError('译稿数据无效')
-                # A text edit must not sign off every 待核对 row. Only the
-                # row whose speaker actually changed is confirmed here.
-                confirmed = original.get('speaker_id') != new.get('speaker_id')
-                if confirmed: doc['voices_confirmed']=False
-                original.update(chinese=new['chinese'],speaker_id=new['speaker_id'],ambiguous=False if confirmed else bool(original.get('ambiguous')))
+                if original.get('speaker_id') != new['speaker_id']: doc['voices_confirmed']=False
+                original.update(chinese=new['chinese'],speaker_id=new['speaker_id'])
             for ident,slot in data.get('voices',{}).items():
                 if ident not in doc['speakers'] or slot not in ('male_1','male_2','male_3','female_1','female_2'): raise ValueError('音色无效')
                 if doc['speakers'][ident].get('voice_slot')!=slot: doc['voices_confirmed']=False
@@ -311,7 +310,7 @@ class Studio:
 
     def confirm_speakers(self, ident):
         self.job(ident)
-        raise ValueError('请用 split-segment 拆段、在译稿中逐段修改，或用 confirm-segments 提交逐段证据。')
+        raise ValueError('按需拆段和修改说话人，再用 confirm-segments 提交逐段证据。')
     def confirm_segments(self, ident, payload):
         """Confirm only listed same-speaker segments with hash-bound evidence."""
         if not isinstance(payload, dict) or set(payload)-{'document_sha256', 'items'}:
@@ -332,6 +331,7 @@ class Studio:
             if not isinstance(doc.get('segment_confirmations',[]), list): raise ValueError('审核记录无效')
             segments={s['id']: s for s in doc['segments'] if isinstance(s, dict) and isinstance(s.get('id'), str)}
             applied=[]; rejected=[]; audits=[]
+            identity_path = p/'source-identity.json'
             for item in items:
                 segment_id=item.get('id') if isinstance(item, dict) else None
                 reason=None
@@ -341,21 +341,42 @@ class Studio:
                     reason='segment_not_found'
                 elif item.get('speaker_id')!=segments[segment_id].get('speaker_id'):
                     reason='speaker_id_mismatch'
+                if reason:
+                    rejected.append({'id':segment_id, 'reason':reason}); continue
+                evidence_type = item.get('evidence_type', 'official_transcript')
+                if evidence_type == 'official_transcript':
+                    fields, hash_evidence = OFFICIAL_EVIDENCE_FIELDS, segment_evidence_hash
+                elif evidence_type == 'audio_clip_review':
+                    fields, hash_evidence = AUDIO_REVIEW_EVIDENCE_FIELDS, audio_review_evidence_hash
                 else:
+                    rejected.append({'id':segment_id, 'reason':'invalid_evidence_type'}); continue
+                if set(item).difference(fields, ('id', 'speaker_id', 'evidence_type', 'evidence_hash')):
+                    reason = 'unexpected_item_fields'
+                elif evidence_type == 'official_transcript':
                     reason=next((f'invalid_{field}' for field in OFFICIAL_EVIDENCE_FIELDS
                                  if not isinstance(item.get(field), str) or not item[field].strip()), None)
+                else:
+                    reason = audio_review_evidence_error(item)
+                    if reason is None:
+                        identity = None if identity_path.is_symlink() else read(
+                            identity_path, {} if not identity_path.exists() else None)
+                        if not isinstance(identity, dict):
+                            reason = 'invalid_source_identity'
+                        elif 'input_sha256' in identity and item['source_audio_sha256'] != identity['input_sha256']:
+                            reason = 'source_audio_sha256_mismatch'
                 if reason:
                     rejected.append({'id':segment_id, 'reason':reason}); continue
                 segment=segments[segment_id]
                 try:
-                    evidence_hash=segment_evidence_hash(digest, segment, item)
+                    evidence_hash=hash_evidence(digest, segment, item)
                 except (KeyError, TypeError, ValueError):
                     rejected.append({'id':segment_id, 'reason':'invalid_segment_fields'}); continue
                 if item.get('evidence_hash')!=evidence_hash:
                     rejected.append({'id':segment_id, 'reason':'evidence_hash_mismatch'}); continue
-                audit={'hash_version':1, 'confirmed_at':time.time(), 'document_sha256':digest, 'evidence_hash':evidence_hash}
+                audit={'hash_version':1, 'confirmed_at':time.time(), 'document_sha256':digest,
+                       'evidence_type':evidence_type, 'evidence_hash':evidence_hash}
                 audit.update({field:segment[field] for field in SEGMENT_CONFIRM_FIELDS})
-                audit.update({field:item[field] for field in OFFICIAL_EVIDENCE_FIELDS})
+                audit.update({field:item[field] for field in fields})
                 audits.append(audit); applied.append(segment_id)
                 segment['ambiguous']=False
             if applied:
@@ -397,8 +418,6 @@ class Studio:
             doc=read(p/'document.json',{}) or {}
             segments=doc.get('segments') if isinstance(doc, dict) else []
             cmd+=['--preview', str(preview_limit(segments or []))]
-        if state.get('accept_unreviewed'):
-            cmd.append('--accept-unreviewed')
         if state.get('action', 'run') != 'prepare' and not state.get('preview'):
             from studio_publish_icloud import default_library_root
             cmd+=['--publish-library', str(default_library_root().resolve())]

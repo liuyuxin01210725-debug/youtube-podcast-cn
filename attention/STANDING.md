@@ -17,3 +17,5 @@ Edge 渲染的请求身份、计数口径及校准边界见 [Edge 渲染证据](
 外部 Gemini 网页译稿的文件接收、按批次记录界面显示模型及后续复核边界见 [t633 Gemini 网页译稿接收](t633-gemini-app-manual-import.md)。
 
 Gemini 优先方向、DeepSeek 回退、禁止自动切换与失败自动重发，以及同一 job 按段接续的规则见 [t636 翻译供应方偏好](t636-translation-provider-preference.md)。
+
+逐段说话人确认与短音听核凭证规则见 [t644 逐段说话人确认凭证](t644-segment-review-evidence.md)。
