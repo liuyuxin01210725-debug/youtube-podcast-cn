@@ -13,3 +13,5 @@ Edge 渲染的请求身份、计数口径及校准边界见 [Edge 渲染证据](
 普通发布的逐段完整性闸与核收边界见 [普通发布逐段完整性](t627-segment-integrity.md)。
 
 本批（t631）已点选积压合格成片可先经官方增量入口导入、不等待逐集试听，听后反馈；未听仍记未听，不改「可听」与质量 PASS 定义。见 [t631 本批先导入后听反馈](t631-import-without-per-episode-listen.md)。
+
+外部 Gemini 网页译稿的文件接收与后续复核边界见 [t633 Gemini 网页译稿接收](t633-gemini-app-manual-import.md)。

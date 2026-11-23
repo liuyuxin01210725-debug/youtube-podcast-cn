@@ -180,13 +180,17 @@ def _read_regular_bytes(path):
         return stream.read()
 
 
-def decode_json_object(value):
+def decode_json(value):
     def object_from_pairs(pairs):
         result = dict(pairs)
         if len(result) != len(pairs):
             raise ValueError('duplicate JSON fields')
         return result
-    result = json.loads(value, object_pairs_hook=object_from_pairs)
+    return json.loads(value, object_pairs_hook=object_from_pairs)
+
+
+def decode_json_object(value):
+    result = decode_json(value)
     if not isinstance(result, dict):
         raise ValueError('expected object')
     return result
