@@ -154,7 +154,7 @@ def _save(path, value, *, exclusive=False):
     _save_bytes(path, json.dumps(value, ensure_ascii=False).encode('utf-8'), exclusive=exclusive)
 
 
-def _save_bytes(path, raw, *, exclusive=False):
+def _save_bytes(path, raw, *, exclusive=False, before_install=None):
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='wb', dir=path.parent, delete=False) as output:
@@ -162,6 +162,8 @@ def _save_bytes(path, raw, *, exclusive=False):
             output.write(raw)
             output.flush()
             os.fsync(output.fileno())
+        if before_install is not None:
+            before_install()
         if exclusive:
             os.link(temporary, path)
         else:
