@@ -30,6 +30,7 @@ struct ListenNoteEditor: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 4
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.accessibilityLabel = "听后感"
+        view.accessibilityIdentifier = "player.listenNote.editor"
         view.isEditable = isEditable
         view.text = text
         return view

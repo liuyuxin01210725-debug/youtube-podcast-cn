@@ -721,6 +721,12 @@ final class LibraryStore: ObservableObject {
             let show = record.show?.trimmingCharacters(in: .whitespacesAndNewlines)
             let guests = (record.guests ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
             let lensIds = (record.lensIds ?? []).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            var companions: Episode.LegacyCompanions?
+            if unavailableReason == nil, let revision, revision.previousPath == "episodes/\(id)",
+               let digest = revision.files["output.mp3"],
+               let folder = try? LibrarySnapshot.path(revision.previousPath, in: root, directory: true) {
+                companions = .init(folder: folder, audioDigest: digest, declaredFiles: Set(revision.files.keys))
+            }
             return Episode(
                 id: id,
                 title: title.flatMap { $0.isEmpty ? nil : $0 } ?? id,
@@ -736,7 +742,8 @@ final class LibraryStore: ObservableObject {
                 pendingTranscript: record.pendingReference(for: id),
                 mediaRevision: revision.flatMap { EpisodeID.isRevisionDigest($0.sha256) ? $0.sha256 : nil },
                 revisionFiles: revisionFiles,
-                unavailableReason: unavailableReason
+                unavailableReason: unavailableReason,
+                legacyCompanions: companions
             )
         }.sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }

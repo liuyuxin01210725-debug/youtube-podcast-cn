@@ -24,6 +24,14 @@ struct Episode: Identifiable, Hashable {
     var revisionFiles: Set<String>? = nil
     var unavailableReason: UnavailableReason? = nil
 
+    /// Optional reading companions can survive a same-audio migration in episodes/<id>.
+    struct LegacyCompanions {
+        let folder: URL
+        let audioDigest: String
+        let declaredFiles: Set<String>
+    }
+    var legacyCompanions: LegacyCompanions? = nil
+
     func publishedAsset(_ name: String) -> URL? {
         guard revisionFiles?.contains(name) != false else { return nil }
         return audioURL.deletingLastPathComponent().appendingPathComponent(name)

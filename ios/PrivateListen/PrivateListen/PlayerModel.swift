@@ -428,7 +428,7 @@ final class PlayerModel: ObservableObject {
         return true
     }
 
-    func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true, waitForPlaybackAdvance: Bool = false) {
+    func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true, waitForPlaybackAdvance: Bool = false, keepTransportRunning: Bool = false) {
         guard seconds.isFinite, player.currentItem != nil else { return }
         if clearClip {
             clearClipPlayback(restoreListenMarkWrites: true)
@@ -438,9 +438,12 @@ final class PlayerModel: ObservableObject {
         bookObservedClock = nil
         let upper = duration > 0 ? duration : max(seconds, 0)
         let targetSeconds = min(max(0, seconds), upper)
-        playWhenReady = autoplay ?? isPlaying
-        player.pause()
-        isPlaying = false
+        let continueRunning = keepTransportRunning && (isPlaying || player.rate > 0)
+        playWhenReady = autoplay ?? (continueRunning || isPlaying || (keepTransportRunning && playWhenReady))
+        if !continueRunning {
+            player.pause()
+            isPlaying = false
+        }
         positionTrusted = false
         pendingResume = nil
         resumeSeekID += 1
@@ -461,6 +464,8 @@ final class PlayerModel: ObservableObject {
                     finished: finished, target: targetSeconds, liveClock: landed, tolerance: tolerance
                 ) else {
                     self.playWhenReady = false
+                    self.player.pause()
+                    self.isPlaying = false
                     self.errorText = "未能定位到这一段，请重新打开音频。"
                     self.updateNowPlaying()
                     return
@@ -479,7 +484,11 @@ final class PlayerModel: ObservableObject {
                         _ = self.onProgress?(id, self.current, self.duration, false)
                     }
                 }
-                if self.playWhenReady {
+                if self.playWhenReady, continueRunning, self.player.rate > 0 {
+                    self.podcastProgress.beginPlayback(at: landed)
+                    self.playWhenReady = false
+                    self.isPlaying = true
+                } else if self.playWhenReady {
                     self.startPlayback()
                 }
                 self.updateNowPlaying()

@@ -67,6 +67,7 @@ struct ListenNoteSection: View {
                         .foregroundStyle(.tertiary)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 16)
+                        .accessibilityIdentifier("player.listenNote.placeholder")
                         .allowsHitTesting(false)
                 }
                 // Fixed height + UITextView: scrolls the full body inside the player ScrollView,
