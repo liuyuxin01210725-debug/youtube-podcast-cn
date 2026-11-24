@@ -44,17 +44,6 @@ struct LibraryView: View {
                     list
                 }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if !searchPresented, let episode = miniEpisode, !player.fullPlayerOpen {
-                    MiniPlayerBar(
-                        episode: episode,
-                        isPlaying: player.isPlaying,
-                        fraction: miniFraction,
-                        status: player.errorText,
-                        onToggle: { toggleMini(episode) }
-                    )
-                }
-            }
             .navigationTitle("资料库")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -67,6 +56,10 @@ struct LibraryView: View {
                     .accessibilityIdentifier("library.search")
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !searchPresented, !player.fullPlayerOpen, let episode = miniEpisode {
+                        MiniPlayerBar(episode: episode, isPlaying: player.isPlaying,
+                                      onToggle: { toggleMini(episode) })
+                    }
                     Menu {
                         Button("导入书包（离线目录）") { pickingBook = true; picking = true }
                             .disabled(books.importing)
@@ -188,6 +181,20 @@ struct LibraryView: View {
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     .listRowBackground(Color.clear)
             }
+            if showsContinueSection && bookWinsContinue, let mark = books.continueMark {
+                Section("继续播放") {
+                    NavigationLink(value: BookRoute(bookID: mark.reference.bookID, revision: mark.reference.packageRevision, chapterID: mark.reference.chapterID, play: true)) {
+                        VStack(alignment: .leading) { Text(mark.bookTitle); Text("\(mark.chapterTitle) · 上次 \(Int(mark.seconds)) 秒").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    .swipeActions { Button("隐藏") { books.dismissContinue(mark) } }
+                }
+            } else if showsContinueSection && !continueSectionRows.isEmpty {
+                ContinueListeningSection(
+                    rows: continueSectionRows,
+                    onPlay: playFromLibrary,
+                    onDismiss: { library.dismissContinue($0.id) }
+                )
+            }
             if library.readingLocalCopyOnly {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
@@ -215,20 +222,6 @@ struct LibraryView: View {
                 }
             }
             if let error = books.errorText { Section { Text(error).font(.footnote).foregroundStyle(.secondary) } }
-            if showsContinueSection && bookWinsContinue, let mark = books.continueMark {
-                Section("继续播放") {
-                    NavigationLink(value: BookRoute(bookID: mark.reference.bookID, revision: mark.reference.packageRevision, chapterID: mark.reference.chapterID, play: true)) {
-                        VStack(alignment: .leading) { Text(mark.bookTitle); Text("\(mark.chapterTitle) · 上次 \(Int(mark.seconds)) 秒").font(.caption).foregroundStyle(.secondary) }
-                    }
-                    .swipeActions { Button("隐藏") { books.dismissContinue(mark) } }
-                }
-            } else if showsContinueSection && !continueSectionRows.isEmpty {
-                ContinueListeningSection(
-                    rows: continueSectionRows,
-                    onPlay: playFromLibrary,
-                    onDismiss: { library.dismissContinue($0.id) }
-                )
-            }
             if !library.inbox.isEmpty && filter == LibraryShelf.defaultChip && searchText.isEmpty {
                 Section("收件箱") {
                     ForEach(library.inbox) { item in
@@ -508,13 +501,6 @@ struct LibraryView: View {
     private var miniEpisode: Episode? {
         guard let current = player.currentEpisode, current.unavailableReason == nil else { return nil }
         return current
-    }
-
-    private var miniFraction: Double? {
-        if player.duration > 1 {
-            return min(1, max(0, player.current / player.duration))
-        }
-        return miniEpisode.flatMap { library.playedFraction(for: $0) }
     }
 
     /// Continue pill uses ListenMark. If 「听这段」 left the playhead elsewhere, seek back.

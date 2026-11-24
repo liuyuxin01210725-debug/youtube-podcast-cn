@@ -47,6 +47,7 @@ struct ContinueListeningSection: View {
                             }
                         }
                     }
+                    .accessibilityIdentifier("library.continue.open.\(row.id)")
                     Button {
                         onPlay(row.episode)
                     } label: {
@@ -56,6 +57,7 @@ struct ContinueListeningSection: View {
                             .frame(width: 36, height: 36)
                             .background(Color.primary, in: Capsule())
                     }
+                    .accessibilityIdentifier("library.continue.transport.\(row.id)")
                     .buttonStyle(.borderless)
                     .accessibilityLabel(row.playing ? "暂停" : "继续播放")
                 }
