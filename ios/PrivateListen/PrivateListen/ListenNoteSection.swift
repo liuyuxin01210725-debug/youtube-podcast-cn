@@ -59,43 +59,53 @@ struct ListenNoteSection: View {
                     .font(.footnote)
             }
 
-            // 单一多行输入：placeholder 即引导；无芯片/长说明/双层展开
-            ZStack(alignment: .topLeading) {
-                if ListenNote.trimmed(draftText).isEmpty {
-                    Text("这期对你真正想记住的是什么？")
-                        .font(.body)
-                        .foregroundStyle(.tertiary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 16)
-                        .accessibilityIdentifier("player.listenNote.placeholder")
-                        .allowsHitTesting(false)
-                }
-                // Fixed height + UITextView: scrolls the full body inside the player ScrollView,
-                // and reopens / first-focuses at the end so append is safe.
-                ListenNoteEditor(
-                    text: Binding(get: { draftText }, set: {
-                        editedDraft = true
-                        draftText = $0
-                    }),
-                    revealEndToken: revealEndToken,
-                    isEditable: !listenNotes.isReadOnly
-                ) { editing in
-                    if isEditing, !editing {
-                        commitNow(flash: true)
+            // 单一多行输入：placeholder 即引导；无芯片/长说明/双层展开，仅附一句系统键盘听写提示
+            VStack(alignment: .leading, spacing: 6) {
+                ZStack(alignment: .topLeading) {
+                    if ListenNote.trimmed(draftText).isEmpty {
+                        Text("这期对你真正想记住的是什么？")
+                            .font(.body)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 16)
+                            .accessibilityIdentifier("player.listenNote.placeholder")
+                            .allowsHitTesting(false)
                     }
-                    isEditing = editing
+                    // Fixed height + UITextView: scrolls the full body inside the player ScrollView,
+                    // and reopens / first-focuses at the end so append is safe.
+                    ListenNoteEditor(
+                        text: Binding(get: { draftText }, set: {
+                            editedDraft = true
+                            draftText = $0
+                        }),
+                        revealEndToken: revealEndToken,
+                        isEditable: !listenNotes.isReadOnly
+                    ) { editing in
+                        if isEditing, !editing {
+                            commitNow(flash: true)
+                        }
+                        isEditing = editing
+                    }
+                    .frame(height: 160)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+                    .accessibilityLabel("听后感")
                 }
-                .frame(height: 160)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 4)
-                .accessibilityLabel("听后感")
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .stroke(Color.primary.opacity(0.08), lineWidth: 1)
+                )
+                .id(Self.editorScrollID)
+
+                if !listenNotes.isReadOnly {
+                    Text("先点输入框，再用 iOS 系统键盘上的麦克风听写（不录音、不上传）")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("player.listenNote.dictationHint")
+                }
             }
-            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .stroke(Color.primary.opacity(0.08), lineWidth: 1)
-            )
-            .id(Self.editorScrollID)
 
             if hasDraftContent && !listenNotes.isReadOnly {
                 HStack {

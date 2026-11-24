@@ -105,11 +105,12 @@ struct ListenAlongSection: View {
                 .submitLabel(.done)
                 .focused($captureFocused)
                 .onSubmit { saveCapture() }
-                .accessibilityHint("可用系统键盘听写")
+                .accessibilityHint("先点输入框，再用 iOS 系统键盘上的麦克风听写；本应用不录音、不上传")
                 .accessibilityIdentifier("player.listenAlong.editor")
-            Text("可用系统键盘听写")
+            Text("先点输入框，再用 iOS 系统键盘上的麦克风听写（不录音、不上传）")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("player.listenAlong.dictationHint")
         }
         .padding(10)

@@ -106,6 +106,13 @@ struct PlayerView: View {
                 if let reference = episode.pendingTranscript, episode.unavailableReason == nil {
                     PendingTranscriptSection(episodeID: episode.id, audioURL: episode.audioURL, reference: reference)
                 } else if let reading {
+                    if !reading.nodes.isEmpty || !reading.lines.isEmpty {
+                        Text("长按段落或分段可查看对应原文；没有原文时会明确说明")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("player.reading.originalHint")
+                    }
                     if !reading.nodes.isEmpty {
                         Text("分段").font(.headline)
                         ForEach(reading.nodes) { node in
@@ -121,6 +128,7 @@ struct PlayerView: View {
                                 }
                             )
                             .accessibilityIdentifier("player.reading.node.\(node.id)")
+                            .accessibilityHint("长按查看对应原文")
                         }
                     }
                     if !reading.lines.isEmpty {

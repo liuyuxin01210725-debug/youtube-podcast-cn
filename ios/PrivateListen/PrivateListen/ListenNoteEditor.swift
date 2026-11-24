@@ -30,6 +30,7 @@ struct ListenNoteEditor: UIViewRepresentable {
         view.textContainer.lineFragmentPadding = 4
         view.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         view.accessibilityLabel = "听后感"
+        view.accessibilityHint = "先点输入框，再用 iOS 系统键盘上的麦克风听写；本应用不录音、不上传"
         view.accessibilityIdentifier = "player.listenNote.editor"
         view.isEditable = isEditable
         view.text = text

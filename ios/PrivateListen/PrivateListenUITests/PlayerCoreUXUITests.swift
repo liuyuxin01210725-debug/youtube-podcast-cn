@@ -53,6 +53,9 @@ final class PlayerCoreUXUITests: XCTestCase {
         XCTAssertTrue(app.buttons["player.skip.forward"].isHittable)
         XCTAssertTrue(app.staticTexts["听后感"].isHittable)
         XCTAssertTrue(app.staticTexts["player.listenNote.placeholder"].exists)
+        let noteDictationHint = app.staticTexts["player.listenNote.dictationHint"]
+        XCTAssertTrue(noteDictationHint.exists)
+        XCTAssertTrue(noteDictationHint.label.contains("麦克风听写"))
         let editor = app.textViews["player.listenNote.editor"]
         XCTAssertTrue(editor.isHittable)
         captureAcceptanceScreenshot("core-ux-playback")
@@ -62,6 +65,7 @@ final class PlayerCoreUXUITests: XCTestCase {
         XCTAssertEqual(editor.value as? String, "Core UX")
         switchSide(in: app, toReading: true)
         XCTAssertTrue(app.staticTexts["player.reading.empty"].waitForExistence(timeout: 20))
+        XCTAssertFalse(app.staticTexts["player.reading.originalHint"].exists)
         switchSide(in: app, toReading: false)
         XCTAssertEqual(editor.value as? String, "Core UX")
         XCTAssertFalse(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "player.timeline.node.")).firstMatch.exists)
@@ -79,7 +83,9 @@ final class PlayerCoreUXUITests: XCTestCase {
 
         let editor = app.textFields["player.listenAlong.editor"]
         XCTAssertTrue(editor.waitForExistence(timeout: 4))
-        XCTAssertTrue(app.staticTexts["player.listenAlong.dictationHint"].exists)
+        let listenAlongDictationHint = app.staticTexts["player.listenAlong.dictationHint"]
+        XCTAssertTrue(listenAlongDictationHint.exists)
+        XCTAssertTrue(listenAlongDictationHint.label.contains("麦克风听写"))
         editor.tap()
         editor.typeText("Step2 note")
 
@@ -126,6 +132,8 @@ final class PlayerCoreUXUITests: XCTestCase {
         switchSide(in: app, toReading: true)
         let bClock = app.staticTexts["player.reading.elapsed"]
         XCTAssertTrue(bClock.waitForExistence(timeout: 5))
+        let originalHint = app.staticTexts["player.reading.originalHint"]
+        XCTAssertTrue(originalHint.waitForExistence(timeout: 15))
         let beforePeek = try seconds(bClock)
 
         let firstParagraph = app.staticTexts["player.reading.paragraph.0"]
@@ -160,6 +168,8 @@ final class PlayerCoreUXUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["正在播放"].waitForExistence(timeout: 8))
 
         switchSide(in: app, toReading: true)
+        let originalHint = app.staticTexts["player.reading.originalHint"]
+        XCTAssertTrue(originalHint.waitForExistence(timeout: 10))
         let firstParagraph = app.staticTexts["player.reading.paragraph.0"]
         XCTAssertTrue(firstParagraph.waitForExistence(timeout: 10))
         firstParagraph.press(forDuration: 0.8)
