@@ -55,7 +55,12 @@ final class PlayerCoreUXUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["player.listenNote.placeholder"].exists)
         let noteDictationHint = app.staticTexts["player.listenNote.dictationHint"]
         XCTAssertTrue(noteDictationHint.exists)
-        XCTAssertTrue(noteDictationHint.label.contains("麦克风听写"))
+        XCTAssertEqual(
+            noteDictationHint.label,
+            "先点输入框，再用系统键盘的麦克风听写；语音处理遵循你的系统与键盘设置。"
+        )
+        XCTAssertFalse(noteDictationHint.label.contains("不录音"))
+        XCTAssertFalse(noteDictationHint.label.contains("不上传"))
         let editor = app.textViews["player.listenNote.editor"]
         XCTAssertTrue(editor.isHittable)
         captureAcceptanceScreenshot("core-ux-playback")
@@ -85,7 +90,12 @@ final class PlayerCoreUXUITests: XCTestCase {
         XCTAssertTrue(editor.waitForExistence(timeout: 4))
         let listenAlongDictationHint = app.staticTexts["player.listenAlong.dictationHint"]
         XCTAssertTrue(listenAlongDictationHint.exists)
-        XCTAssertTrue(listenAlongDictationHint.label.contains("麦克风听写"))
+        XCTAssertEqual(
+            listenAlongDictationHint.label,
+            "先点输入框，再用系统键盘的麦克风听写；语音处理遵循你的系统与键盘设置。"
+        )
+        XCTAssertFalse(listenAlongDictationHint.label.contains("不录音"))
+        XCTAssertFalse(listenAlongDictationHint.label.contains("不上传"))
         editor.tap()
         editor.typeText("Step2 note")
 

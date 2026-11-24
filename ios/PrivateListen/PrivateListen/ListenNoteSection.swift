@@ -99,7 +99,7 @@ struct ListenNoteSection: View {
                 .id(Self.editorScrollID)
 
                 if !listenNotes.isReadOnly {
-                    Text("先点输入框，再用 iOS 系统键盘上的麦克风听写（不录音、不上传）")
+                    Text("先点输入框，再用系统键盘的麦克风听写；语音处理遵循你的系统与键盘设置。")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
