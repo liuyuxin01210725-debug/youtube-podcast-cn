@@ -218,6 +218,7 @@ def snapshot_user_state(container: Path) -> dict:
         "continue_dismissed": sorted(str(item) for item in dismissed),
         "starred": sorted(str(item) for item in starred),
         "listen_notes_sha256": file_sha("listen_notes.json"),
+        "listen_along_notes_sha256": file_sha("listen_along_notes.json"),
         "book_notes_sha256": file_sha("book_notes.v1.json"),
         "book_state_sha256": file_sha("book_state.v1.json"),
     }
@@ -254,6 +255,7 @@ def compare_user_state(before: dict, after: dict, selection: dict) -> dict:
         "dismissed_related_after": related(dismissed_after),
         "starred_unchanged": before.get("starred") == after.get("starred"),
         "listen_notes_unchanged": before.get("listen_notes_sha256") == after.get("listen_notes_sha256"),
+        "listen_along_notes_unchanged": before.get("listen_along_notes_sha256") == after.get("listen_along_notes_sha256"),
         "book_notes_unchanged": before.get("book_notes_sha256") == after.get("book_notes_sha256"),
         "book_state_unchanged": before.get("book_state_sha256") == after.get("book_state_sha256"),
     }

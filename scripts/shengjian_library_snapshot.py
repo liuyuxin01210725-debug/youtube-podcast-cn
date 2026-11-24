@@ -2,12 +2,12 @@
 """Transactional metadata snapshot / restore for 声间 write-set.
 
 Covers the real metadata write set (catalog/manifest/pointers, listen_notes,
-book_notes, book_state, progress/Continue user-state, insights, staging, and
-other mutable indexes). Reuses audio objects; never copies audio; never
-hard-links metadata back onto the live tree. Backup failure refuses the
-caller. Restore is a whole-snapshot swap so a later generation is not
-partially overwritten by an older one. Does not promise full recovery if
-recovery would require uninstalling the app (which deletes Documents).
+listen_along_notes / 听中笔记, book_notes, book_state, progress/Continue
+user-state, insights, staging, and other mutable indexes). Reuses audio objects;
+never copies audio; never hard-links metadata back onto the live tree. Backup
+failure refuses the caller. Restore is a whole-snapshot swap so a later
+generation is not partially overwritten by an older one. Does not promise full
+recovery if recovery would require uninstalling the app (which deletes Documents).
 """
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ AUDIO_SUFFIXES = {'.mp3', '.m4a', '.wav', '.aac', '.caf', '.flac', '.ogg', '.aif
 SKIP_DIR_NAMES = {'objects', '.git', 'DerivedData'}
 DOCUMENTS_KNOWN = (
     'listen_notes.json',
+    'listen_along_notes.json',
     'listen_note_insights.json',
     'book_notes.json',
     'book_notes.v1.json',

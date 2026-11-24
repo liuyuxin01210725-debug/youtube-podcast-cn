@@ -43,6 +43,21 @@ def build_library(root):
     (library / 'episodes' / 'ep-keep' / 'output.mp3').write_bytes(b'AUDIO-ORIGINAL')
     (library / 'objects' / 'x.mp3').write_bytes(b'OBJECT-ORIGINAL')
     (documents / 'listen_notes.json').write_text(json.dumps({'ep-keep': {'body': '听后感', 'rev': 3}}, ensure_ascii=False), encoding='utf-8')
+    (documents / 'listen_along_notes.json').write_text(json.dumps({
+        'schema': 'shengjian.listen_along_notes.v1',
+        'schema_version': 1,
+        'updated_at': '2026-11-24T00:00:00.000Z',
+        'future_doc_ext': {'keep': True},
+        'notes': [{
+            'id': 'n1',
+            'media_key': 'ep-keep',
+            'episode_id': 'ep-keep',
+            'position_sec': 18.0,
+            'text': '听中笔记',
+            'created_at': '2026-11-24T00:00:00.000Z',
+            'future_note_ext': {'tag': 'keep'},
+        }],
+    }, ensure_ascii=False), encoding='utf-8')
     (documents / 'book_notes.json').write_text(json.dumps({'b1': 'note'}, ensure_ascii=False), encoding='utf-8')
     (documents / 'book_state.json').write_text(json.dumps({'b1': {'page': 4}}, ensure_ascii=False), encoding='utf-8')
     return library, documents
@@ -60,9 +75,11 @@ class SnapshotTests(unittest.TestCase):
             rels = {item['rel'] for item in manifest['files']}
             self.assertIn('library.json', rels)
             self.assertIn('user-state.json', rels)
-            self.assertIn('listen_notes.json', {item['rel'] for item in manifest['files'] if item['root'] == 'documents'})
-            self.assertIn('book_notes.json', {item['rel'] for item in manifest['files'] if item['root'] == 'documents'})
-            self.assertIn('book_state.json', {item['rel'] for item in manifest['files'] if item['root'] == 'documents'})
+            doc_rels = {item['rel'] for item in manifest['files'] if item['root'] == 'documents'}
+            self.assertIn('listen_notes.json', doc_rels)
+            self.assertIn('listen_along_notes.json', doc_rels)
+            self.assertIn('book_notes.json', doc_rels)
+            self.assertIn('book_state.json', doc_rels)
             self.assertTrue(any(item['rel'].endswith('manifest.json') for item in manifest['files']))
             self.assertFalse(any(item['rel'].endswith('.mp3') for item in manifest['files']))
             # No hard links back to the live tree.
@@ -78,6 +95,7 @@ class SnapshotTests(unittest.TestCase):
             }), encoding='utf-8')
             (documents / 'listen_notes.json').unlink()
             (documents / 'listen_notes.json').write_text('{}', encoding='utf-8')
+            (documents / 'listen_along_notes.json').write_text('{}', encoding='utf-8')
             (library / 'user-state.json').write_text('{"progress": {}}', encoding='utf-8')
             (library / 'objects' / 'x.mp3').write_bytes(b'OBJECT-ORIGINAL')  # still intact
 
@@ -90,6 +108,10 @@ class SnapshotTests(unittest.TestCase):
             self.assertEqual(restored['unknown_future_field'], {'keep': True})
             notes = json.loads((documents / 'listen_notes.json').read_text(encoding='utf-8'))
             self.assertEqual(notes['ep-keep']['body'], '听后感')
+            along = json.loads((documents / 'listen_along_notes.json').read_text(encoding='utf-8'))
+            self.assertEqual(along['future_doc_ext'], {'keep': True})
+            self.assertEqual(along['notes'][0]['text'], '听中笔记')
+            self.assertEqual(along['notes'][0]['future_note_ext'], {'tag': 'keep'})
             state = json.loads((library / 'user-state.json').read_text(encoding='utf-8'))
             self.assertEqual(state['progress']['ep-keep']['seconds'], 12.5)
             self.assertEqual(state['extra_unknown'], 7)
@@ -109,6 +131,49 @@ class SnapshotTests(unittest.TestCase):
                 snapshot(dest, library=root / 'missing-lib')
             with self.assertRaises(SnapshotError):
                 snapshot(root / 'snap')  # no roots
+
+    def test_absent_listen_along_notes_recorded_and_kept_absent_on_restore(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            library, documents = build_library(root)
+            (documents / 'listen_along_notes.json').unlink()
+            snap = root / 'snap'
+            snapshot(snap, library=library, documents=documents, label='absent-check')
+            manifest = json.loads((snap / 'manifest.json').read_text(encoding='utf-8'))
+            self.assertIn('documents:listen_along_notes.json', manifest['absent'])
+            self.assertNotIn(
+                'listen_along_notes.json',
+                {item['rel'] for item in manifest['files'] if item['root'] == 'documents'},
+            )
+
+            # Later listen_along_notes.json must not linger after restoring the older snapshot.
+            (documents / 'listen_along_notes.json').write_text('{"notes": [{"id": "later"}]}', encoding='utf-8')
+            restore(snap, library=library, documents=documents)
+            self.assertFalse((documents / 'listen_along_notes.json').exists())
+
+    def test_restore_read_failure_does_not_empty_overwrite_live_files(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            library, documents = build_library(root)
+            live_along = documents / 'listen_along_notes.json'
+            live_notes = documents / 'listen_notes.json'
+            original_along = live_along.read_bytes()
+            original_notes = live_notes.read_bytes()
+
+            corrupt_snap = root / 'corrupt-snap'
+            corrupt_snap.mkdir()
+            (corrupt_snap / 'manifest.json').write_text('{broken-json', encoding='utf-8')
+            with self.assertRaises(SnapshotError):
+                restore(corrupt_snap, library=library, documents=documents)
+            self.assertEqual(live_along.read_bytes(), original_along)
+            self.assertEqual(live_notes.read_bytes(), original_notes)
+
+            missing_doc_snap = root / 'lib-only-snap'
+            snapshot(missing_doc_snap, library=library, label='lib-only')
+            with self.assertRaises(SnapshotError):
+                restore(missing_doc_snap, library=library, documents=documents)
+            self.assertEqual(live_along.read_bytes(), original_along)
+            self.assertEqual(live_notes.read_bytes(), original_notes)
 
     def test_copy_of_real_sanitized_metadata_roundtrip(self):
         env = os.environ.get('SHENGJIAN_SANITIZED_LIBRARY_COPY', '')
@@ -144,7 +209,7 @@ class SnapshotTests(unittest.TestCase):
                         if Path(filename).suffix.lower() in {'.mp3', '.m4a', '.wav', '.aac', '.caf'}:
                             continue
                         shutil.copy2(Path(dirpath) / filename, library / rel / filename)
-            for name in ('listen_notes.json', 'listen_note_insights.json',
+            for name in ('listen_notes.json', 'listen_along_notes.json', 'listen_note_insights.json',
                          'book_notes.json', 'book_notes.v1.json',
                          'book_state.json', 'book_state.v1.json'):
                 if (doc_src / name).is_file():

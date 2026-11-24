@@ -451,6 +451,9 @@ enum LibrarySnapshotChecks {
     private static func ingestSerialRemerge(in root: URL) throws {
         let documents = root.appendingPathComponent("remerge", isDirectory: true)
         try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
+        let listenAlong = documents.appendingPathComponent("listen_along_notes.json")
+        let listenAlongBytes = Data("{\"schema\":\"shengjian.listen_along_notes.v1\",\"schema_version\":1,\"updated_at\":\"\",\"notes\":[],\"ext\":true}\n".utf8)
+        try listenAlongBytes.write(to: listenAlong)
         let (storeA, defaultsA, suiteA) = try isolatedStore(documents)
         let (storeB, defaultsB, suiteB) = try isolatedStore(documents)
         defer {
@@ -488,6 +491,8 @@ enum LibrarySnapshotChecks {
                    "phone-unique field survives a later ingest merge")
         try expect(snapshot.transactions["tx-a"] != nil && snapshot.transactions["tx-b"] != nil,
                    "ledger retains both transaction records")
+        try expect(Data(contentsOf: listenAlong) == listenAlongBytes,
+                   "serial ingest merges never overwrite listen_along_notes.json")
     }
 
     private static func ingestLostReceiptRetry(in root: URL) throws {
@@ -625,6 +630,9 @@ enum LibrarySnapshotChecks {
         let notes = documents.appendingPathComponent("listen_notes.json")
         let notesBytes = Data("{\n  \"synthetic\": \"fixture note\"\n}\n".utf8)
         try notesBytes.write(to: notes)
+        let listenAlong = documents.appendingPathComponent("listen_along_notes.json")
+        let listenAlongBytes = Data("{\"schema\":\"shengjian.listen_along_notes.v1\",\"schema_version\":1,\"updated_at\":\"\",\"notes\":[],\"extra_ext\":true}\n".utf8)
+        try listenAlongBytes.write(to: listenAlong)
 
         let (store, defaults, suite) = try isolatedStore(documents)
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -683,8 +691,10 @@ enum LibrarySnapshotChecks {
             try expect(defaults.data(forKey: progressKey) == progressBefore
                        && store.resumeSeconds(for: legacy) == 42 && store.resumeSeconds(for: existing) == 3.5,
                        "\(fault) preserves both progress marks")
-            try expect(Data(contentsOf: notes) == notesBytes && defaults.string(forKey: settingsKey) == "1.25",
-                       "\(fault) preserves notes bytes and settings")
+            try expect(Data(contentsOf: notes) == notesBytes
+                       && Data(contentsOf: listenAlong) == listenAlongBytes
+                       && defaults.string(forKey: settingsKey) == "1.25",
+                       "\(fault) preserves notes, listen-along notes, and settings")
             try expectLegacyFilesUnchanged()
         }
 
@@ -764,8 +774,10 @@ enum LibrarySnapshotChecks {
         reloaded.reload()
         try expect(reloaded.resumeSeconds(for: legacy.id) == 42 && reloaded.resumeSeconds(for: existing) == 3.5,
                    "legacy and consumed progress survive a fresh store load")
-        try expect(Data(contentsOf: notes) == notesBytes && defaults.string(forKey: settingsKey) == "1.25",
-                   "migration preserves notes bytes and settings")
+        try expect(Data(contentsOf: notes) == notesBytes
+                   && Data(contentsOf: listenAlong) == listenAlongBytes
+                   && defaults.string(forKey: settingsKey) == "1.25",
+                   "migration preserves notes, listen-along notes, and settings")
         try expectLegacyFilesUnchanged()
         try expect(try store.migrateLegacyLibrary() == nil && Data(contentsOf: listing) == committed
                    && Data(contentsOf: backup) == before,
@@ -892,9 +904,15 @@ enum LibrarySnapshotChecks {
         }
         try expect(coverKinds == ["cover.png|placeholder": 27, "cover.jpg|thumbnail": 26, "cover.webp|thumbnail": 4],
                    "57 covers preserve their original bytes, manifest hashes and artwork kinds")
-        let unchangedPaths = ["listen_notes.json", "book_notes.v1.json", "book_state.v1.json", "library.json"]
+        var unchangedPaths = ["listen_notes.json", "book_notes.v1.json", "book_state.v1.json", "library.json"]
             + ["ready", "manifest.json", "receipt.json"].map { ".push-staging/\(consumedTx)/\($0)" }
             + consumed.files.keys.map { "中文播客私人库/\(consumed.path)/\($0)" }
+        if fm.fileExists(atPath: source.appendingPathComponent("listen_along_notes.json").path) {
+            unchangedPaths.append("listen_along_notes.json")
+        } else {
+            try expect(!fm.fileExists(atPath: documents.appendingPathComponent("listen_along_notes.json").path),
+                       "migration does not synthesize absent listen_along_notes.json")
+        }
         try expect(unchangedPaths.allSatisfy { path in
             try Data(contentsOf: source.appendingPathComponent(path)) == Data(contentsOf: documents.appendingPathComponent(path))
         }, "notes, progress, staging sidecars, and the six consumed object files retain their bytes")
