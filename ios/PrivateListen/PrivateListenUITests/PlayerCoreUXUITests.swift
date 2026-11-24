@@ -71,6 +71,102 @@ final class PlayerCoreUXUITests: XCTestCase {
         try waitForAdvance(elapsed, from: try seconds(elapsed))
     }
 
+    func testListenAlongCaptureAndEmptyReadingPeek() throws {
+        let app = try openFixture("CORE_UX_EMPTY_ID")
+        let capture = app.buttons["player.listenAlong.capture"]
+        XCTAssertTrue(capture.waitForExistence(timeout: 8))
+        capture.tap()
+
+        let editor = app.textFields["player.listenAlong.editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 4))
+        editor.tap()
+        editor.typeText("Step2 note")
+
+        let save = app.buttons["player.listenAlong.save"]
+        XCTAssertTrue(save.waitForExistence(timeout: 4))
+        save.tap()
+
+        let noteButton = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "player.listenAlong.note.")).firstMatch
+        XCTAssertTrue(noteButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(noteButton.label.contains("Step2 note"))
+        captureAcceptanceScreenshot("core-ux-listen-along")
+
+        switchSide(in: app, toReading: true)
+        let empty = app.staticTexts["player.reading.empty"]
+        let firstParagraph = app.staticTexts["player.reading.paragraph.0"]
+        if empty.waitForExistence(timeout: 15) {
+            empty.press(forDuration: 0.8)
+            XCTAssertTrue(empty.exists)
+        } else if firstParagraph.waitForExistence(timeout: 5) {
+            firstParagraph.press(forDuration: 0.8)
+            assertOriginalPeekShown(in: app)
+            app.buttons["关闭"].tap()
+        } else {
+            XCTFail("Expected either empty reading state or transcript paragraph on B side")
+        }
+
+        switchSide(in: app, toReading: false)
+        XCTAssertTrue(app.textViews["player.listenNote.editor"].waitForExistence(timeout: 5))
+
+        let deleteButton = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "player.listenAlong.delete.")).firstMatch
+        if deleteButton.exists, deleteButton.isHittable {
+            deleteButton.tap()
+        }
+    }
+
+    func testOriginalPeekOnSegmentedEpisodeWithoutStoppingPlayback() throws {
+        let app = try openFixture("CORE_UX_SEGMENTED_ID")
+        let aClock = app.staticTexts["player.elapsed"]
+        let transport = app.buttons["player.transport"]
+        if transport.label != "暂停" { transport.tap() }
+        let origin = try seconds(aClock)
+        try waitForAdvance(aClock, from: origin)
+
+        switchSide(in: app, toReading: true)
+        let bClock = app.staticTexts["player.reading.elapsed"]
+        XCTAssertTrue(bClock.waitForExistence(timeout: 5))
+        let beforePeek = try seconds(bClock)
+
+        let firstParagraph = app.staticTexts["player.reading.paragraph.0"]
+        if scrollToElement(firstParagraph, in: app) {
+            firstParagraph.press(forDuration: 0.8)
+        } else {
+            let firstNode = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "player.reading.node.")).firstMatch
+            XCTAssertTrue(firstNode.waitForExistence(timeout: 15))
+            firstNode.press(forDuration: 0.8)
+        }
+
+        assertOriginalPeekShown(in: app)
+        captureAcceptanceScreenshot("core-ux-original-peek")
+        app.buttons["关闭"].tap()
+
+        XCTAssertTrue(bClock.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(try seconds(bClock), beforePeek)
+
+        switchSide(in: app, toReading: false)
+        XCTAssertTrue(aClock.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(try seconds(aClock), beforePeek)
+        XCTAssertEqual(transport.label, "暂停")
+    }
+
+    private func assertOriginalPeekShown(in app: XCUIApplication) {
+        let original = app.staticTexts["player.reading.original"]
+        let unavailable = app.staticTexts["player.reading.original.unavailable"]
+        let shown = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            original.exists || unavailable.exists
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [shown], timeout: 5), .completed)
+    }
+
+    private func scrollToElement(_ element: XCUIElement, in app: XCUIApplication, maxSwipes: Int = 8) -> Bool {
+        if element.waitForExistence(timeout: 5), element.isHittable { return true }
+        for _ in 0..<maxSwipes {
+            if element.exists, element.isHittable { return true }
+            app.swipeUp()
+        }
+        return element.exists && element.isHittable
+    }
+
     private func openFixture(_ key: String) throws -> XCUIApplication {
         guard let id = ProcessInfo.processInfo.environment[key], !id.isEmpty else {
             throw XCTSkip("This journey requires a preinstalled sanitized library and \(key).")
