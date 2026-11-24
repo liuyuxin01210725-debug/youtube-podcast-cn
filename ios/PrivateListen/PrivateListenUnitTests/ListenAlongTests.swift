@@ -19,6 +19,9 @@ final class ListenAlongTests: XCTestCase {
         let second = try XCTUnwrap(store.add(mediaKey: revKey, episodeId: "ep1", position: 95, text: "后半段"))
         let first = try XCTUnwrap(store.add(mediaKey: revKey, episodeId: "ep1", position: -5, text: "开头夹紧"))
         XCTAssertEqual(first.positionSec, 0)
+        XCTAssertEqual(listenClock(first.positionSec), "0:00")
+        XCTAssertEqual(listenClock(legacyNote.positionSec), "0:42")
+        XCTAssertEqual(listenClock(second.positionSec), "1:35")
 
         let reopened = ListenAlongNoteStore(directory: directory)
         let listed = reopened.notes(for: revKey, legacyEpisodeId: "ep1")
@@ -103,15 +106,17 @@ final class ListenAlongTests: XCTestCase {
         if case let .point(id, _, tStart, reason) = links[0] {
             XCTAssertEqual(id, "overlap")
             XCTAssertEqual(tStart, 95)
-            XCTAssertTrue(reason.contains("1:35"))
-            XCTAssertTrue(reason.contains("品牌"))
+            XCTAssertEqual(reason, "时间接近 1:35 · 关键词重合：品牌")
+            XCTAssertFalse(reason.contains("语义"))
         } else {
             XCTFail("Expected overlapping point first")
         }
 
-        if case let .point(id, _, tStart, _) = links[1] {
+        if case let .point(id, _, tStart, reason) = links[1] {
             XCTAssertEqual(id, "near")
             XCTAssertEqual(tStart, 125)
+            XCTAssertEqual(reason, "时间接近 2:05")
+            XCTAssertFalse(reason.contains("语义"))
         } else {
             XCTFail("Expected second nearest point")
         }
@@ -119,10 +124,20 @@ final class ListenAlongTests: XCTestCase {
         if case let .listenNote(episodeId, summary, reason) = links[2] {
             XCTAssertEqual(episodeId, "ep1")
             XCTAssertEqual(summary, "小而美创业笔记")
-            XCTAssertTrue(reason.contains("小而美"))
+            XCTAssertEqual(reason, "同一期的听后感 · 关键词重合：小而美、品牌")
+            XCTAssertFalse(reason.contains("语义"))
         } else {
             XCTFail("Expected listen note link third")
         }
+
+        let otherEpisodeListenNote = ListenNote(
+            episodeId: "ep2",
+            headline: "小而美另一集",
+            body: "品牌思考",
+            tags: ["品牌"],
+            updatedAt: ""
+        )
+        XCTAssertTrue(ListenAlongAssociation.links(for: note, points: [], listenNote: otherEpisodeListenNote).isEmpty)
 
         let farOnly = ListenAlongAssociation.links(
             for: note,
@@ -143,6 +158,105 @@ final class ListenAlongTests: XCTestCase {
             ListenAlongAssociation.links(for: $0, points: points, listenNote: listenNote)
         }
         XCTAssertTrue(remainingLinks.isEmpty)
+    }
+
+    func testMediaKeyIsolationAndLegacyFallbackScope() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = ListenAlongNoteStore(directory: directory)
+        let revA1 = "epA." + String(repeating: "a", count: 64)
+        let revA2 = "epA." + String(repeating: "b", count: 64)
+        let revB = "epB." + String(repeating: "c", count: 64)
+
+        let noteA = try XCTUnwrap(store.add(mediaKey: revA1, episodeId: "epA", position: 18, text: "epA 修订一笔记"))
+        let legacyB = try XCTUnwrap(store.add(mediaKey: "epB", episodeId: "epB", position: 33, text: "epB 旧笔记"))
+
+        // epA 的笔记不会出现在无关 epB，反之亦然。
+        XCTAssertEqual(store.notes(for: revA1, legacyEpisodeId: "epA"), [noteA])
+        XCTAssertEqual(store.notes(for: "epB", legacyEpisodeId: "epB"), [legacyB])
+        XCTAssertEqual(store.notes(for: revB, legacyEpisodeId: "epB"), [legacyB])
+        XCTAssertTrue(store.notes(for: "epC", legacyEpisodeId: "epC").isEmpty)
+
+        // 有精确 mediaKey 命中时，即使误传其它集的 legacyEpisodeId 也不会串集。
+        XCTAssertEqual(store.notes(for: revA1, legacyEpisodeId: "epB"), [noteA])
+
+        // 无精确命中时，legacy 回退不得借用其它 episodeId 或同集其它修订的笔记。
+        XCTAssertTrue(store.notes(for: revA2, legacyEpisodeId: "epB").isEmpty)
+        XCTAssertTrue(store.notes(for: revA2, legacyEpisodeId: "epA").isEmpty)
+
+        // 仅当存在同一 episodeId 的裸 id 旧记录时，新修订才回退读取。
+        let legacyA = try XCTUnwrap(store.add(mediaKey: "epA", episodeId: "epA", position: 5, text: "epA 裸 id 旧笔记"))
+        XCTAssertEqual(store.notes(for: revA2, legacyEpisodeId: "epA"), [legacyA])
+        XCTAssertEqual(store.notes(for: revA1, legacyEpisodeId: "epA"), [noteA])
+    }
+
+    func testUnknownExtensionFieldsSurviveWriteAndDeleteRoundtrip() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent(ListenAlongNoteStore.fileName)
+
+        let seeded = """
+        {
+          "future_doc_ext": {"flag": true, "items": [1, "keep"]},
+          "notes": [
+            {
+              "created_at": "2026-11-24T00:00:00.000Z",
+              "episode_id": "ep1",
+              "future_note_ext": {"origin": "import", "rank": 2},
+              "id": "note-seeded",
+              "media_key": "ep1",
+              "position_sec": 12.5,
+              "text": "已有笔记"
+            }
+          ],
+          "schema": "shengjian.listen_along_notes.v1",
+          "schema_version": 1,
+          "updated_at": "2026-11-24T00:00:00.000Z"
+        }
+        """
+        try Data(seeded.utf8).write(to: file)
+
+        let store = ListenAlongNoteStore(directory: directory)
+        XCTAssertFalse(store.isReadOnly)
+        XCTAssertEqual(store.notes(for: "ep1").map(\.id), ["note-seeded"])
+
+        let added = try XCTUnwrap(store.add(mediaKey: "ep1", episodeId: "ep1", position: 30, text: "新增笔记"))
+        let afterAdd = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        let docExt = try XCTUnwrap(afterAdd["future_doc_ext"] as? [String: Any])
+        XCTAssertEqual(docExt["flag"] as? Bool, true)
+        let rawNotes = try XCTUnwrap(afterAdd["notes"] as? [[String: Any]])
+        let seededRow = try XCTUnwrap(rawNotes.first { ($0["id"] as? String) == "note-seeded" })
+        let noteExt = try XCTUnwrap(seededRow["future_note_ext"] as? [String: Any])
+        XCTAssertEqual(noteExt["origin"] as? String, "import")
+        XCTAssertEqual(noteExt["rank"] as? Int, 2)
+
+        let reopened = ListenAlongNoteStore(directory: directory)
+        XCTAssertEqual(reopened.notes(for: "ep1").count, 2)
+        XCTAssertTrue(reopened.delete(id: added.id))
+
+        let afterDelete = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertEqual((afterDelete["future_doc_ext"] as? [String: Any])?["flag"] as? Bool, true)
+        let remainingRows = try XCTUnwrap(afterDelete["notes"] as? [[String: Any]])
+        XCTAssertEqual(remainingRows.count, 1)
+        XCTAssertEqual((remainingRows[0]["future_note_ext"] as? [String: Any])?["origin"] as? String, "import")
+    }
+
+    func testPositionClampingForNonFiniteAndNegativeValuesPersistsAcrossReopen() throws {
+        let directory = try makeDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = ListenAlongNoteStore(directory: directory)
+        for (index, rawPosition) in [-12.5, Double.nan, Double.infinity, -Double.infinity].enumerated() {
+            let saved = try XCTUnwrap(store.add(mediaKey: "ep1", episodeId: "ep1", position: rawPosition, text: "位置\(index)"))
+            XCTAssertEqual(saved.positionSec, 0)
+            XCTAssertEqual(listenClock(saved.positionSec), "0:00")
+        }
+
+        let reopened = ListenAlongNoteStore(directory: directory)
+        let listed = reopened.notes(for: "ep1")
+        XCTAssertEqual(listed.count, 4)
+        XCTAssertTrue(listed.allSatisfy { $0.positionSec == 0 && listenClock($0.positionSec) == "0:00" })
     }
 
     private func makeDirectory() throws -> URL {

@@ -99,12 +99,18 @@ struct ListenAlongSection: View {
                 .disabled(draftText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 .accessibilityIdentifier("player.listenAlong.save")
             }
+            // 复用标准 TextField，仅通过 iOS 系统键盘听写输入；不申请麦克风权限，不自建录音或云端 STT。
             TextField("记下此刻想法", text: $draftText)
                 .textFieldStyle(.roundedBorder)
                 .submitLabel(.done)
                 .focused($captureFocused)
                 .onSubmit { saveCapture() }
+                .accessibilityHint("可用系统键盘听写")
                 .accessibilityIdentifier("player.listenAlong.editor")
+            Text("可用系统键盘听写")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("player.listenAlong.dictationHint")
         }
         .padding(10)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 10, style: .continuous))

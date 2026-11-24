@@ -48,8 +48,17 @@ final class ListenAlongNoteStore: ObservableObject {
         return f
     }()
 
+    private static let knownDocumentKeys: Set<String> = [
+        "schema", "schema_version", "updated_at", "notes",
+    ]
+    private static let knownNoteKeys: Set<String> = [
+        "id", "media_key", "episode_id", "position_sec", "text", "created_at",
+    ]
+
     private let fileURL: URL
     private var loadedBytes: Data?
+    private var preservedTopLevelExtensions: [String: Any] = [:]
+    private var preservedNoteExtensions: [String: [String: Any]] = [:]
 
     init(directory: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]) {
         fileURL = directory.appendingPathComponent(Self.fileName)
@@ -63,11 +72,27 @@ final class ListenAlongNoteStore: ObservableObject {
                 return
             }
             let doc = try JSONDecoder().decode(FileDoc.self, from: data)
-            guard doc.schema == Self.schema, doc.schemaVersion == Self.schemaVersion else {
+            guard doc.schema == Self.schema, doc.schemaVersion == Self.schemaVersion,
+                  let rawObject = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let rawNotes = rawObject["notes"] as? [[String: Any]] else {
                 isReadOnly = true
                 return
             }
+            var topExtensions: [String: Any] = [:]
+            for (key, value) in rawObject where !Self.knownDocumentKeys.contains(key) {
+                topExtensions[key] = value
+            }
+            var noteExtensions: [String: [String: Any]] = [:]
+            for rawNote in rawNotes {
+                guard let id = rawNote["id"] as? String else { continue }
+                let extras = rawNote.filter { !Self.knownNoteKeys.contains($0.key) }
+                if !extras.isEmpty {
+                    noteExtensions[id] = extras
+                }
+            }
             notes = doc.notes
+            preservedTopLevelExtensions = topExtensions
+            preservedNoteExtensions = noteExtensions
             loadedBytes = data
             isReadOnly = false
         } catch {
@@ -80,14 +105,14 @@ final class ListenAlongNoteStore: ObservableObject {
         if !exact.isEmpty {
             return Self.sorted(exact)
         }
-        if let legacy = legacyEpisodeId, !legacy.isEmpty, legacy != mediaKey {
-            let legacyExact = notes.filter { $0.mediaKey == legacy }
+        // legacy 回退仅适用于同一 episodeId 对应的裸 id 旧记录，防止跨集或跨修订串集。
+        if let legacy = legacyEpisodeId, !legacy.isEmpty, legacy != mediaKey,
+           mediaKey.hasPrefix(legacy + ".") {
+            let legacyExact = notes.filter {
+                ($0.mediaKey == legacy || $0.mediaKey.isEmpty) && $0.episodeId == legacy
+            }
             if !legacyExact.isEmpty {
                 return Self.sorted(legacyExact)
-            }
-            let byEpisode = notes.filter { $0.episodeId == legacy }
-            if !byEpisode.isEmpty {
-                return Self.sorted(byEpisode)
             }
         }
         return []
@@ -122,6 +147,7 @@ final class ListenAlongNoteStore: ObservableObject {
         updated.removeAll { $0.id == id }
         guard updated.count != beforeCount else { return true }
         guard persist(notes: updated) else { return false }
+        preservedNoteExtensions.removeValue(forKey: id)
         notes = updated
         return true
     }
@@ -158,16 +184,22 @@ final class ListenAlongNoteStore: ObservableObject {
             isReadOnly = true
             return false
         }
-        let doc = FileDoc(
-            schema: Self.schema,
-            schemaVersion: Self.schemaVersion,
-            updatedAt: Self.iso.string(from: Date()),
-            notes: notes
-        )
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        var merged = preservedTopLevelExtensions.filter { !Self.knownDocumentKeys.contains($0.key) }
+        merged["schema"] = Self.schema
+        merged["schema_version"] = Self.schemaVersion
+        merged["updated_at"] = Self.iso.string(from: Date())
+        merged["notes"] = notes.map { note -> [String: Any] in
+            var item = (preservedNoteExtensions[note.id] ?? [:]).filter { !Self.knownNoteKeys.contains($0.key) }
+            item["id"] = note.id
+            item["media_key"] = note.mediaKey
+            item["episode_id"] = note.episodeId
+            item["position_sec"] = note.positionSec.isFinite ? max(0, note.positionSec) : 0
+            item["text"] = note.text
+            item["created_at"] = note.createdAt
+            return item
+        }
         do {
-            let data = try encoder.encode(doc)
+            let data = try JSONSerialization.data(withJSONObject: merged, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: fileURL, options: .atomic)
             loadedBytes = data
             return true

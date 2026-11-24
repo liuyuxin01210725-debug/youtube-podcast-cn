@@ -14,6 +14,7 @@ enum ListenAlongLink: Equatable, Identifiable {
     }
 }
 
+/// 最小可解释关联：仅按时间邻近（≤30s）、同集听后感与可选字面关键词重合匹配。
 enum ListenAlongAssociation {
     static let maxPointDistanceSeconds: Double = 30
     static let maxPointLinks = 2
@@ -51,7 +52,7 @@ enum ListenAlongAssociation {
             var reason = "时间接近 \(listenClock(candidate.tStart))"
             if !candidate.keywords.isEmpty {
                 let matched = candidate.keywords.prefix(2).joined(separator: "、")
-                reason += " · 提到「\(matched)」"
+                reason += " · 关键词重合：\(matched)"
             }
             result.append(
                 .point(
@@ -73,7 +74,7 @@ enum ListenAlongAssociation {
             let reason: String
             if !keywords.isEmpty {
                 let matched = keywords.prefix(2).joined(separator: "、")
-                reason = "同一期的听后感 · 提到「\(matched)」"
+                reason = "同一期的听后感 · 关键词重合：\(matched)"
             } else {
                 reason = "同一期的听后感"
             }
