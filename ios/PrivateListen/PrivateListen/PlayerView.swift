@@ -11,6 +11,7 @@ struct PlayerView: View {
     @State private var readingSide = false
     @State private var reading: PlayerReading?
     @State private var isEditingListenNote = false
+    @State private var originalPeek: OriginalPeek?
 
     init(episode: Episode, player: PlayerModel, opensPaused: Bool = false,
          onPlayedEpisodeExit: @escaping () -> Void = {}) {
@@ -29,9 +30,9 @@ struct PlayerView: View {
 
     private var isPassiveOpen: Bool { opensPaused || episode.pendingTranscript != nil }
 
-    private var playerScrollView: some View {
+    private func playerScrollView(scroll: ScrollViewProxy) -> some View {
         ScrollView {
-            VStack(spacing: 16) {
+            VStack(spacing: 14) {
                 VStack(spacing: 8) {
                     Text(episode.title)
                         .font(.title2.weight(.semibold))
@@ -41,11 +42,28 @@ struct PlayerView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-                PlaybackControls(player: player, episode: episode, reading: reading, jump: jump) {
+                PlaybackControls(
+                    player: player,
+                    episode: episode,
+                    reading: reading,
+                    jump: jump,
+                    peekNode: peekNode
+                ) {
                     library.reload()
                     openEpisode(force: true)
                 }
 
+                Divider()
+                ListenAlongSection(
+                    episode: episode,
+                    player: player,
+                    reading: reading,
+                    onJumpToSeconds: jumpToSeconds
+                ) {
+                    withAnimation {
+                        scroll.scrollTo(ListenNoteSection.editorScrollID, anchor: .top)
+                    }
+                }
                 Divider()
                 ListenNoteSection(
                     episodeId: episode.id,
@@ -57,14 +75,27 @@ struct PlayerView: View {
                     ExtractDetailSection(episode: episode, extracts: extracts)
                 }
             }
-            .padding(18)
+            .padding(16)
         }
     }
 
     private func jump(_ node: ListenViewpoint, in reading: PlayerReading) {
+        guard originalPeek == nil else { return }
         guard episode.unavailableReason == nil, player.isCurrent(episode), let audio = reading.audio, audio.isCurrent,
               audio.url == episode.audioURL, let seconds = node.tStart else { return }
         player.seek(to: seconds, waitForPlaybackAdvance: true, keepTransportRunning: true)
+    }
+
+    private func jumpToSeconds(_ seconds: Double) {
+        guard episode.unavailableReason == nil, episode.isPlayableNow, player.isCurrent(episode) else { return }
+        player.seek(to: seconds, waitForPlaybackAdvance: true, keepTransportRunning: true)
+    }
+
+    private func peekNode(_ node: ListenViewpoint, in reading: PlayerReading) {
+        originalPeek = OriginalPeek(
+            zhText: node.viewpointText,
+            originalText: reading.originalText(for: node)
+        )
     }
 
     private var readingScrollView: some View {
@@ -84,13 +115,28 @@ struct PlayerView: View {
                                     Text(node.viewpointText).multilineTextAlignment(.leading)
                                 }
                             }
+                            .simultaneousGesture(
+                                LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                                    peekNode(node, in: reading)
+                                }
+                            )
                             .accessibilityIdentifier("player.reading.node.\(node.id)")
                         }
                     }
-                    if !reading.paragraphs.isEmpty {
+                    if !reading.lines.isEmpty {
                         Text("中文译稿").font(.headline)
-                        ForEach(reading.paragraphs.indices, id: \.self) { index in
-                            Text(reading.paragraphs[index]).textSelection(.enabled)
+                        ForEach(Array(reading.lines.enumerated()), id: \.offset) { index, line in
+                            Text(line.displayText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                                .onLongPressGesture {
+                                    originalPeek = OriginalPeek(
+                                        zhText: line.displayText,
+                                        originalText: line.originalText
+                                    )
+                                }
+                                .accessibilityIdentifier("player.reading.paragraph.\(index)")
+                                .accessibilityHint("长按查看对应原文")
                         }
                     } else if reading.nodes.isEmpty {
                         Text("本集暂无译稿或分段。")
@@ -104,6 +150,12 @@ struct PlayerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(18)
         }
+    }
+
+    private struct OriginalPeek: Identifiable {
+        let id = UUID()
+        let zhText: String
+        let originalText: String?
     }
 
     private struct ReadingSource: Equatable {
@@ -141,7 +193,7 @@ struct PlayerView: View {
                     if readingSide {
                         readingScrollView
                     } else {
-                        playerScrollView
+                        playerScrollView(scroll: scroll)
                     }
                 }
                 .onChange(of: readingSide) { _, reading in
@@ -192,6 +244,46 @@ struct PlayerView: View {
             if player.isCurrent(episode), player.checkpoint() { onPlayedEpisodeExit() }
             player.fullPlayerOpen = false
         }
+        .sheet(item: $originalPeek) { peek in
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if let original = peek.originalText, !original.isEmpty {
+                            Text("对应原文")
+                                .font(.headline)
+                            Text(original)
+                                .font(.body)
+                                .textSelection(.enabled)
+                                .accessibilityIdentifier("player.reading.original")
+                        } else {
+                            Text("本集没有对应原文")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("player.reading.original.unavailable")
+                        }
+                        if !peek.zhText.isEmpty {
+                            Divider()
+                            Text("中文译稿")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            Text(peek.zhText)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(18)
+                }
+                .navigationTitle("原文对照")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("关闭") { originalPeek = nil }
+                    }
+                }
+            }
+            .presentationDetents([.medium, .large])
+        }
     }
 
     private func openEpisode(force: Bool = false) {
@@ -220,6 +312,7 @@ private struct PlaybackControls: View {
     let episode: Episode
     let reading: PlayerReading?
     let jump: (ListenViewpoint, PlayerReading) -> Void
+    let peekNode: (ListenViewpoint, PlayerReading) -> Void
     let retry: () -> Void
     @State private var dragging = false
     @State private var scrub = 0.0
@@ -320,6 +413,11 @@ private struct PlaybackControls: View {
                             .background(.quaternary, in: Capsule())
                     }
                     .buttonStyle(.plain)
+                    .simultaneousGesture(
+                        LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                            peekNode(node, reading)
+                        }
+                    )
                     .accessibilityLabel("\(listenClock(node.tStart ?? 0))，\(node.viewpointText)")
                     .accessibilityIdentifier("player.timeline.node.\(node.id)")
                 }
