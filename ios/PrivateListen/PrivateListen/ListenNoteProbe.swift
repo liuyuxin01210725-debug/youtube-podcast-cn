@@ -101,6 +101,7 @@ enum ListenNoteProbe {
         let excluded = ListenNoteStore.isShareExcluded("listen_notes.json")
             && ListenNoteStore.isShareExcluded("listen-note-probe.json")
             && ListenNoteStore.isShareExcluded(ListenNoteDownstream.insightsFileName)
+            && ListenNoteStore.isShareExcluded(ListenAlongNoteStore.fileName)
         let schema = ListenNoteStore.schema == "shengjian.listen_notes.v1"
         steps.append([
             "name": "E_hard_gates_local",

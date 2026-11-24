@@ -65,7 +65,12 @@ final class ListenNoteStore: ObservableObject {
     static let fileName = "listen_notes.json"
     static let schema = "shengjian.listen_notes.v1"
     static let schemaVersion = 1
-    static let shareExcludedFileNames: Set<String> = [fileName, "listen-note-probe.json", ListenNoteDownstream.insightsFileName]
+    static let shareExcludedFileNames: Set<String> = [
+        fileName,
+        "listen-note-probe.json",
+        ListenNoteDownstream.insightsFileName,
+        ListenAlongNoteStore.fileName,
+    ]
 
     struct FileDoc: Codable {
         var schema: String

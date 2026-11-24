@@ -9,6 +9,7 @@ struct PrivateListenApp: App {
     @StateObject private var extracts = ExtractStore()
     @StateObject private var pointStars = PointStarStore()
     @StateObject private var listenNotes = ListenNoteStore()
+    @StateObject private var listenAlongNotes = ListenAlongNoteStore()
 
     var body: some Scene {
         WindowGroup {
@@ -32,6 +33,7 @@ struct PrivateListenApp: App {
                 .environmentObject(extracts)
                 .environmentObject(pointStars)
                 .environmentObject(listenNotes)
+                .environmentObject(listenAlongNotes)
                 .task {
                     #if DEBUG
                     guard !DebugSyntheticEpisodeRoute.requested() else { return }
