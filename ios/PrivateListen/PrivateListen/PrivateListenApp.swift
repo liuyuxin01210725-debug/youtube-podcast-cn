@@ -18,7 +18,7 @@ struct PrivateListenApp: App {
             // DiscoverView.swift / DiscoverCatalog.swift remain in the target unused by TabView.
             Group {
                 #if DEBUG && targetEnvironment(simulator)
-                if !DebugSyntheticEpisodeRoute.requested(), PointListenProbe.previewEnabled {
+                if !DebugSyntheticEpisodeRoute.requested(), !DebugBilingualFixtureRoute.requested(), PointListenProbe.previewEnabled {
                     PointListenPreview()
                 } else {
                     LibraryView()
@@ -36,7 +36,7 @@ struct PrivateListenApp: App {
                 .environmentObject(listenAlongNotes)
                 .task {
                     #if DEBUG
-                    guard !DebugSyntheticEpisodeRoute.requested() else { return }
+                    guard !DebugSyntheticEpisodeRoute.requested(), !DebugBilingualFixtureRoute.requested() else { return }
                     #endif
                     #if DEBUG && !targetEnvironment(simulator)
                     await NortonDeviceFourProbe.runIfNeeded(player: player, library: library)

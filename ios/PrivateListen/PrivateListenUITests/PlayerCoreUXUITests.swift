@@ -79,6 +79,7 @@ final class PlayerCoreUXUITests: XCTestCase {
 
         let editor = app.textFields["player.listenAlong.editor"]
         XCTAssertTrue(editor.waitForExistence(timeout: 4))
+        XCTAssertTrue(app.staticTexts["player.listenAlong.dictationHint"].exists)
         editor.tap()
         editor.typeText("Step2 note")
 
@@ -136,7 +137,10 @@ final class PlayerCoreUXUITests: XCTestCase {
             firstNode.press(forDuration: 0.8)
         }
 
-        assertOriginalPeekShown(in: app)
+        let unavailable = app.staticTexts["player.reading.original.unavailable"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 5))
+        XCTAssertEqual(unavailable.label, "本集没有对应原文")
+        XCTAssertFalse(app.staticTexts["player.reading.original"].exists)
         captureAcceptanceScreenshot("core-ux-original-peek")
         app.buttons["关闭"].tap()
 
@@ -147,6 +151,42 @@ final class PlayerCoreUXUITests: XCTestCase {
         XCTAssertTrue(aClock.waitForExistence(timeout: 5))
         XCTAssertGreaterThanOrEqual(try seconds(aClock), beforePeek)
         XCTAssertEqual(transport.label, "暂停")
+    }
+
+    func testOriginalPeekOnSyntheticBilingualFixtureShowsEnglishOriginal() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["-OpenSyntheticBilingualFixture"]
+        app.launch()
+        XCTAssertTrue(app.navigationBars["正在播放"].waitForExistence(timeout: 8))
+
+        switchSide(in: app, toReading: true)
+        let firstParagraph = app.staticTexts["player.reading.paragraph.0"]
+        XCTAssertTrue(firstParagraph.waitForExistence(timeout: 10))
+        firstParagraph.press(forDuration: 0.8)
+
+        let original = app.staticTexts["player.reading.original"]
+        XCTAssertTrue(original.waitForExistence(timeout: 5))
+        XCTAssertTrue(original.label.contains("First synthetic English original paragraph"))
+        XCTAssertFalse(app.staticTexts["player.reading.original.unavailable"].exists)
+        captureAcceptanceScreenshot("core-ux-original-peek-bilingual")
+        app.buttons["关闭"].tap()
+
+        let secondParagraph = app.staticTexts["player.reading.paragraph.1"]
+        XCTAssertTrue(secondParagraph.waitForExistence(timeout: 5))
+        secondParagraph.press(forDuration: 0.8)
+        XCTAssertTrue(original.waitForExistence(timeout: 5))
+        XCTAssertTrue(original.label.contains("Second synthetic English paragraph"))
+        XCTAssertFalse(app.staticTexts["player.reading.original.unavailable"].exists)
+        app.buttons["关闭"].tap()
+
+        let firstNode = app.buttons["player.reading.node.vp-bilingual-1"]
+        if firstNode.waitForExistence(timeout: 5), firstNode.isHittable {
+            firstNode.press(forDuration: 0.8)
+            XCTAssertTrue(original.waitForExistence(timeout: 5))
+            XCTAssertTrue(original.label.contains("First synthetic English original paragraph"))
+            XCTAssertFalse(app.staticTexts["player.reading.original.unavailable"].exists)
+            app.buttons["关闭"].tap()
+        }
     }
 
     private func assertOriginalPeekShown(in app: XCUIApplication) {

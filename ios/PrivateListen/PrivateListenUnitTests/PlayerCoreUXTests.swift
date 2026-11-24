@@ -95,6 +95,36 @@ final class PlayerCoreUXTests: XCTestCase {
         XCTAssertTrue(unpublished.paragraphs.isEmpty)
     }
 
+    #if DEBUG
+    func testSyntheticBilingualFixtureLoadsEnglishOriginalsAndPointNode() async throws {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bilingual-fixture-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        XCTAssertNil(DebugBilingualFixtureRoute.resolve(arguments: [], directory: folder))
+        let route = try XCTUnwrap(
+            DebugBilingualFixtureRoute.resolve(
+                arguments: [DebugBilingualFixtureRoute.flag],
+                directory: folder
+            )
+        )
+        let episode = route.episode
+        XCTAssertEqual(episode.id, DebugBilingualFixtureRoute.episodeID)
+        XCTAssertTrue(episode.isPlayableNow)
+
+        let reading = await PlayerReading.load(episode)
+        XCTAssertEqual(reading.lines.count, 2)
+        XCTAssertEqual(reading.lines[0].originalText, DebugBilingualFixtureRoute.firstOriginal)
+        XCTAssertNotEqual(reading.lines[0].displayText, reading.lines[0].originalText)
+        XCTAssertEqual(reading.lines[1].originalText, DebugBilingualFixtureRoute.secondOriginal)
+        XCTAssertNotEqual(reading.lines[1].displayText, reading.lines[1].originalText)
+
+        let node = try XCTUnwrap(reading.nodes.first)
+        XCTAssertEqual(node.id, DebugBilingualFixtureRoute.viewpointID)
+        XCTAssertEqual(reading.originalText(for: node), DebugBilingualFixtureRoute.firstOriginal)
+    }
+    #endif
+
     private func episode() -> Episode {
         Episode(id: "first", title: "Fixture", guests: [], lensIds: [], createdAt: .distantPast,
                 audioURL: URL(fileURLWithPath: "/fixture/output.mp3"), downloading: false)

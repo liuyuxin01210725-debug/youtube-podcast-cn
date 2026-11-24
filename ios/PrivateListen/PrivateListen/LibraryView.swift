@@ -162,10 +162,15 @@ struct LibraryView: View {
             .navigationDestination(for: DebugSyntheticEpisodeRoute.self) { route in
                 PlayerView(episode: route.episode, player: player, opensPaused: true)
             }
+            .navigationDestination(for: DebugBilingualFixtureRoute.self) { route in
+                PlayerView(episode: route.episode, player: player, opensPaused: true)
+            }
             .task {
                 guard !handledSyntheticEpisodeLaunch else { return }
                 handledSyntheticEpisodeLaunch = true
                 if let route = DebugSyntheticEpisodeRoute.resolve(in: library.episodes) {
+                    path.append(route)
+                } else if let route = DebugBilingualFixtureRoute.resolve() {
                     path.append(route)
                 }
             }
