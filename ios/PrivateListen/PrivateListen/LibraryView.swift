@@ -14,6 +14,8 @@ struct LibraryView: View {
     @EnvironmentObject private var extracts: ExtractStore
     @Environment(\.scenePhase) private var scenePhase
     @State private var path = NavigationPath()
+    @State private var continueToReveal: String?
+    private static let shelfTop = "library.shelf.top"
     @State private var picking = false
     @State private var pickingBook = false
     @State private var showExtractDesign = false
@@ -41,7 +43,15 @@ struct LibraryView: View {
                         detail: "从 Safari、YouTube 或播客 App 分享链接到「声间」。Mac 转换完成后，下拉即可看到。试听不会出现在这里。"
                     )
                 } else {
-                    list
+                    ScrollViewReader { scroll in
+                        list.task(id: continueToReveal) {
+                            guard let id = continueToReveal else { return }
+                            continueToReveal = nil
+                            guard showsContinueSection, !bookWinsContinue,
+                                  continueSectionRows.first?.id == id else { return }
+                            scroll.scrollTo(Self.shelfTop, anchor: .top)
+                        }
+                    }
                 }
             }
             .navigationTitle("资料库")
@@ -144,11 +154,13 @@ struct LibraryView: View {
             }
             .navigationDestination(for: BookRoute.self) { route in BookDetailView(route: route) }
             .navigationDestination(for: Episode.self) { episode in
-                PlayerView(episode: episode)
+                PlayerView(episode: episode, player: player) {
+                    continueToReveal = episode.id
+                }
             }
             #if DEBUG
             .navigationDestination(for: DebugSyntheticEpisodeRoute.self) { route in
-                PlayerView(episode: route.episode, opensPaused: true)
+                PlayerView(episode: route.episode, player: player, opensPaused: true)
             }
             .task {
                 guard !handledSyntheticEpisodeLaunch else { return }
@@ -178,6 +190,7 @@ struct LibraryView: View {
         List {
             Section {
                 chipBar
+                    .id(Self.shelfTop)
                     .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
                     .listRowBackground(Color.clear)
             }

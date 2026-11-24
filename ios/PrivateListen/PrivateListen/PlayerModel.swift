@@ -102,6 +102,9 @@ final class PlayerModel: ObservableObject {
             // Cover may have arrived after the first open — refresh Now Playing artwork.
             artist = mediaArtist
             nowArtwork = artwork
+            if episode != nil, autoplay, !clipSuppressListenMark, !isPlaying, !playWhenReady, player.rate == 0 {
+                resume()
+            }
             updateNowPlaying()
             return
         }
@@ -500,16 +503,18 @@ final class PlayerModel: ObservableObject {
         updateNowPlaying()
     }
 
-    func checkpoint() {
-        guard !clipSuppressListenMark else { return }
-        guard positionTrusted else { return }
+    /// Returns true when the corresponding progress writer received the live playhead.
+    @discardableResult
+    func checkpoint() -> Bool {
+        guard !clipSuppressListenMark, positionTrusted else { return false }
         let liveClock = player.currentTime().seconds
         if let ref = currentBookReference {
             current = ContinueListening.playheadToPersist(observed: current, liveClock: liveClock)
-            onBookProgress?(ref, current, duration, 0, false)
-            return
+            guard let onBookProgress else { return false }
+            onBookProgress(ref, current, duration, 0, false)
+            return true
         }
-        guard let currentID, podcastProgress.observe(seconds: liveClock) else { return }
+        guard let currentID, let onProgress, podcastProgress.observe(seconds: liveClock) else { return false }
         // Observer ticks are 0.5s apart. Leaving must store the clock the
         // listener reached, including a short play that has not crossed 5s.
         current = ContinueListening.playheadToPersist(
@@ -517,12 +522,13 @@ final class PlayerModel: ObservableObject {
             liveClock: liveClock
         )
         lastSaved = current
-        if onProgress?(currentID, current, duration, podcastCheckpointCompletion) == true,
+        if onProgress(currentID, current, duration, podcastCheckpointCompletion),
            podcastCheckpointCompletion == nil {
             // The current point listen just finished by the near-end rule.
             // Later checkpoints in this same playback should not start a replay.
             podcastCheckpointCompletion = true
         }
+        return true
     }
 
     private func handleTimeUpdate() {

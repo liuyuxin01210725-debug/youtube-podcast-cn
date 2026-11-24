@@ -4,16 +4,18 @@ import UIKit
 struct PlayerView: View {
     private let routeEpisode: Episode
     private let opensPaused: Bool
-    @EnvironmentObject private var player: PlayerModel
+    private let player: PlayerModel
+    private let onPlayedEpisodeExit: () -> Void
     @EnvironmentObject private var library: LibraryStore
     @EnvironmentObject private var extracts: ExtractStore
     @State private var readingSide = false
     @State private var reading: PlayerReading?
-    @State private var dragging = false
-    @State private var scrub = 0.0
     @State private var isEditingListenNote = false
 
-    init(episode: Episode, opensPaused: Bool = false) {
+    init(episode: Episode, player: PlayerModel, opensPaused: Bool = false,
+         onPlayedEpisodeExit: @escaping () -> Void = {}) {
+        self.player = player
+        self.onPlayedEpisodeExit = onPlayedEpisodeExit
         routeEpisode = episode
         self.opensPaused = opensPaused
     }
@@ -39,87 +41,9 @@ struct PlayerView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
-                VStack(spacing: 8) {
-                    Slider(
-                        value: Binding(
-                            get: { min(max(0, dragging ? scrub : player.current), sliderUpper) },
-                            set: { scrub = $0 }
-                        ),
-                        in: 0...sliderUpper,
-                        onEditingChanged: { editing in
-                            if editing {
-                                scrub = player.current
-                                dragging = true
-                            } else {
-                                dragging = false
-                                player.seek(to: scrub)
-                            }
-                        }
-                    )
-                    .accessibilityLabel("播放进度")
-                    .accessibilityIdentifier("player.timeline.slider")
-                    .disabled(episode.unavailableReason != nil)
-                    if let reading, !reading.nodes.isEmpty {
-                        timelineNodes(reading)
-                    }
-                    HStack {
-                        Text(listenClock(dragging ? scrub : player.current))
-                            .accessibilityIdentifier("player.elapsed")
-                        Spacer()
-                        Text(player.duration > 0 ? listenClock(player.duration) : episode.durationLabel)
-                    }
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                }
-                if let continueCaption {
-                    Text(continueCaption)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-                HStack(spacing: 36) {
-                    Button { player.skip(-15) } label: {
-                        Image(systemName: "gobackward.15")
-                            .font(.title)
-                    }
-                    .accessibilityIdentifier("player.skip.back")
-                    .accessibilityLabel("后退 15 秒")
-                    Button { player.toggle() } label: {
-                        Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
-                            .font(.system(size: 68))
-                    }
-                    .accessibilityIdentifier("player.transport")
-                    .accessibilityLabel(player.isPlaying ? "暂停" : (continueCaption == nil ? "播放" : "继续听"))
-                    Button { player.skip(15) } label: {
-                        Image(systemName: "goforward.15")
-                            .font(.title)
-                    }
-                    .accessibilityIdentifier("player.skip.forward")
-                    .accessibilityLabel("前进 15 秒")
-                }
-                .buttonStyle(.plain)
-                .disabled(player.errorText != nil || episode.unavailableReason != nil)
-                Picker("倍速", selection: Binding(
-                    get: { player.speed },
-                    set: { player.setSpeed($0) }
-                )) {
-                    ForEach(ListenSpeed.allCases) { speed in
-                        Text(speed.label).tag(speed)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .accessibilityLabel("倍速")
-                .accessibilityIdentifier("player.speed")
-                if let errorText = episode.unavailableReason?.rawValue ?? player.errorText {
-                    VStack(spacing: 8) {
-                        Text(errorText)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .multilineTextAlignment(.center)
-                        Button("重新检查") {
-                            library.reload()
-                            openEpisode(force: true)
-                        }
-                    }
+                PlaybackControls(player: player, episode: episode, reading: reading, jump: jump) {
+                    library.reload()
+                    openEpisode(force: true)
                 }
 
                 Divider()
@@ -143,35 +67,11 @@ struct PlayerView: View {
         player.seek(to: seconds, waitForPlaybackAdvance: true, keepTransportRunning: true)
     }
 
-    private func timelineNodes(_ reading: PlayerReading) -> some View {
-        // A timecode strip below the scrubber keeps adjacent viewpoints separately tappable.
-        ScrollView(.horizontal) {
-            HStack(spacing: 8) {
-                ForEach(reading.nodes) { node in
-                    Button { jump(node, in: reading) } label: {
-                        Label(listenClock(node.tStart ?? 0), systemImage: "diamond.fill")
-                            .font(.caption.monospacedDigit())
-                            .padding(.horizontal, 8)
-                            .frame(minHeight: 36)
-                            .background(.quaternary, in: Capsule())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(listenClock(node.tStart ?? 0))，\(node.viewpointText)")
-                    .accessibilityIdentifier("player.timeline.node.\(node.id)")
-                }
-            }
-        }
-        .scrollIndicators(.hidden)
-    }
-
     private var readingScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 14) {
                 Text(episode.title).font(.title2.weight(.semibold))
-                Text(listenClock(player.current))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("player.reading.elapsed")
+                ReadingElapsed(player: player)
                 if let reference = episode.pendingTranscript, episode.unavailableReason == nil {
                     PendingTranscriptSection(episodeID: episode.id, audioURL: episode.audioURL, reference: reference)
                 } else if let reading {
@@ -213,30 +113,7 @@ struct PlayerView: View {
     }
 
     var body: some View {
-        ScrollViewReader { scroll in
-            VStack(spacing: 0) {
-                if readingSide {
-                    readingScrollView
-                } else {
-                    playerScrollView
-                }
-            }
-            .onChange(of: readingSide) { _, reading in
-                if reading { isEditingListenNote = false }
-            }
-            .onChange(of: isEditingListenNote) { _, isEditing in
-                guard isEditing else { return }
-                scroll.scrollTo(ListenNoteSection.editorScrollID)
-            }
-            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
-                guard isEditingListenNote else { return }
-                // Reposition the whole field once the keyboard has reduced the viewport.
-                withAnimation {
-                    scroll.scrollTo(ListenNoteSection.editorScrollID, anchor: .center)
-                }
-            }
-        }
-        .safeAreaInset(edge: .top, spacing: 0) {
+        VStack(spacing: 0) {
             VStack(spacing: 4) {
                 Picker("播放页", selection: $readingSide) {
                     Text("A 面 · 播放").tag(false)
@@ -257,6 +134,31 @@ struct PlayerView: View {
                 }
             }
             .background(.regularMaterial)
+            .zIndex(1)
+
+            ScrollViewReader { scroll in
+                VStack(spacing: 0) {
+                    if readingSide {
+                        readingScrollView
+                    } else {
+                        playerScrollView
+                    }
+                }
+                .onChange(of: readingSide) { _, reading in
+                    if reading { isEditingListenNote = false }
+                }
+                .onChange(of: isEditingListenNote) { _, isEditing in
+                    guard isEditing else { return }
+                    scroll.scrollTo(ListenNoteSection.editorScrollID)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+                    guard isEditingListenNote else { return }
+                    // Reposition the whole field once the keyboard has reduced the viewport.
+                    withAnimation {
+                        scroll.scrollTo(ListenNoteSection.editorScrollID, anchor: .center)
+                    }
+                }
+            }
         }
         .navigationTitle("正在播放")
         .navigationBarTitleDisplayMode(.inline)
@@ -287,8 +189,8 @@ struct PlayerView: View {
             if !Task.isCancelled { reading = loaded }
         }
         .onDisappear {
+            if player.isCurrent(episode), player.checkpoint() { onPlayedEpisodeExit() }
             player.fullPlayerOpen = false
-            if player.isCurrent(episode) { player.checkpoint() }
         }
     }
 
@@ -299,6 +201,131 @@ struct PlayerView: View {
             force: force,
             autoplay: !library.isFinished(episode) && !isPassiveOpen
         )
+    }
+}
+
+private struct ReadingElapsed: View {
+    @ObservedObject var player: PlayerModel
+
+    var body: some View {
+        Text(listenClock(player.current))
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("player.reading.elapsed")
+    }
+}
+
+private struct PlaybackControls: View {
+    @ObservedObject var player: PlayerModel
+    let episode: Episode
+    let reading: PlayerReading?
+    let jump: (ListenViewpoint, PlayerReading) -> Void
+    let retry: () -> Void
+    @State private var dragging = false
+    @State private var scrub = 0.0
+
+    var body: some View {
+        VStack(spacing: 8) {
+            Slider(
+                value: Binding(
+                    get: { min(max(0, dragging ? scrub : player.current), sliderUpper) },
+                    set: { scrub = $0 }
+                ),
+                in: 0...sliderUpper,
+                onEditingChanged: { editing in
+                    if editing {
+                        scrub = player.current
+                        dragging = true
+                    } else {
+                        dragging = false
+                        player.seek(to: scrub)
+                    }
+                }
+            )
+            .accessibilityLabel("播放进度")
+            .accessibilityIdentifier("player.timeline.slider")
+            .disabled(episode.unavailableReason != nil)
+            if let reading, !reading.nodes.isEmpty {
+                timelineNodes(reading)
+            }
+            HStack {
+                Text(listenClock(dragging ? scrub : player.current))
+                    .accessibilityIdentifier("player.elapsed")
+                Spacer()
+                Text(player.duration > 0 ? listenClock(player.duration) : episode.durationLabel)
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+        }
+        if let continueCaption {
+            Text(continueCaption)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+        HStack(spacing: 36) {
+            Button { player.skip(-15) } label: {
+                Image(systemName: "gobackward.15")
+                    .font(.title)
+            }
+            .accessibilityIdentifier("player.skip.back")
+            .accessibilityLabel("后退 15 秒")
+            Button { player.toggle() } label: {
+                Image(systemName: player.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 68))
+                    .contentShape(Rectangle())
+            }
+            .accessibilityIdentifier("player.transport")
+            .accessibilityLabel(player.isPlaying ? "暂停" : (continueCaption == nil ? "播放" : "继续听"))
+            Button { player.skip(15) } label: {
+                Image(systemName: "goforward.15")
+                    .font(.title)
+            }
+            .accessibilityIdentifier("player.skip.forward")
+            .accessibilityLabel("前进 15 秒")
+        }
+        .buttonStyle(.plain)
+        .disabled(player.errorText != nil || episode.unavailableReason != nil)
+        Picker("倍速", selection: Binding(
+            get: { player.speed },
+            set: { player.setSpeed($0) }
+        )) {
+            ForEach(ListenSpeed.allCases) { speed in
+                Text(speed.label).tag(speed)
+            }
+        }
+        .pickerStyle(.segmented)
+        .accessibilityLabel("倍速")
+        .accessibilityIdentifier("player.speed")
+        if let errorText = episode.unavailableReason?.rawValue ?? player.errorText {
+            VStack(spacing: 8) {
+                Text(errorText)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("重新检查", action: retry)
+            }
+        }
+    }
+
+    private func timelineNodes(_ reading: PlayerReading) -> some View {
+        // A timecode strip below the scrubber keeps adjacent viewpoints separately tappable.
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(reading.nodes) { node in
+                    Button { jump(node, reading) } label: {
+                        Label(listenClock(node.tStart ?? 0), systemImage: "diamond.fill")
+                            .font(.caption.monospacedDigit())
+                            .padding(.horizontal, 8)
+                            .frame(minHeight: 36)
+                            .background(.quaternary, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("\(listenClock(node.tStart ?? 0))，\(node.viewpointText)")
+                    .accessibilityIdentifier("player.timeline.node.\(node.id)")
+                }
+            }
+        }
+        .scrollIndicators(.hidden)
     }
 
     private var sliderUpper: Double {

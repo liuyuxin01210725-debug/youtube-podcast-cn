@@ -19,6 +19,7 @@ struct ContinueListeningSection: View {
     var body: some View {
         Section("继续播放") {
             ForEach(rows) { row in
+                let remaining = ContinueListening.remainingLabel(seconds: row.item.seconds, duration: row.episode.durationSec)
                 HStack(spacing: 12) {
                     NavigationLink(value: row.episode) {
                         HStack(spacing: 12) {
@@ -33,12 +34,9 @@ struct ContinueListeningSection: View {
                                     .foregroundStyle(.primary)
                                     .lineLimit(2)
                                     .multilineTextAlignment(.leading)
-                                Text(ContinueListening.remainingLabel(
-                                    seconds: row.item.seconds,
-                                    duration: row.episode.durationSec
-                                ))
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                                Text(remaining)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
                                 if let fraction = row.item.fraction {
                                     ProgressView(value: fraction)
                                         .progressViewStyle(.linear)
@@ -48,6 +46,8 @@ struct ContinueListeningSection: View {
                         }
                     }
                     .accessibilityIdentifier("library.continue.open.\(row.id)")
+                    .accessibilityLabel("继续播放 \(row.episode.title)")
+                    .accessibilityValue(remaining)
                     Button {
                         onPlay(row.episode)
                     } label: {
@@ -70,7 +70,6 @@ struct ContinueListeningSection: View {
                     }
                 }
                 .accessibilityElement(children: .contain)
-                .accessibilityLabel("继续播放 \(row.episode.title)")
             }
         }
     }
