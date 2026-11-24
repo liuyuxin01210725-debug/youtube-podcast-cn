@@ -7,6 +7,12 @@ enum PlayerPlaybackPolicy {
     /// still resumable. Natural EOF is also tracked by PlayerModel.
     static let endEpsilon: Double = 1.0 / 600
 
+    /// Only return a seek target when replaying context after a real pause.
+    static func smartResumeTarget(current: Double, pausedFor: Duration) -> Double? {
+        guard pausedFor >= .seconds(15), current.isFinite, current > 0 else { return nil }
+        return max(0, current - 3)
+    }
+
     /// Play while paused at/near the end must restart from 0. Mid-track play stays put.
     static func shouldRestartFromBeginning(
         current: Double,

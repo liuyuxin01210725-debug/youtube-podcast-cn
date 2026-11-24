@@ -3,38 +3,6 @@ import Combine
 import MediaPlayer
 import UIKit
 
-enum ListenSpeed: String, CaseIterable, Identifiable {
-    case one = "1"
-    case quarter = "1.25"
-    case half = "1.5"
-    case two = "2"
-
-    var id: String { rawValue }
-
-    var rate: Float {
-        switch self {
-        case .one: return 1
-        case .quarter: return 1.25
-        case .half: return 1.5
-        case .two: return 2
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .one: return "1×"
-        case .quarter: return "1.25×"
-        case .half: return "1.5×"
-        case .two: return "2×"
-        }
-    }
-
-    static func stored(_ raw: String?) -> ListenSpeed {
-        guard let raw, let match = ListenSpeed(rawValue: raw) else { return .one }
-        return match
-    }
-}
-
 @MainActor
 final class PlayerModel: ObservableObject {
     @Published private(set) var currentEpisode: Episode?
@@ -75,7 +43,8 @@ final class PlayerModel: ObservableObject {
     private var openGeneration = 0
     private var resumeSeekID = 0
     private var resumeSeekInFlight = false
-    private let speedKey = "PrivateListen.speed"
+    private let speeds = PlaybackSpeeds()
+    private var pausedAt: ContinuousClock.Instant?
     private var nowArtwork: MPMediaItemArtwork?
     private var artist = "声间"
     /// When set, auto-pause once playhead reaches this time (output.mp3 axis).
@@ -95,7 +64,7 @@ final class PlayerModel: ObservableObject {
     #endif
 
     init() {
-        speed = ListenSpeed.stored(UserDefaults.standard.string(forKey: speedKey))
+        speed = speeds.value(for: nil)
         let session = AVAudioSession.sharedInstance()
         try? session.setCategory(.playback, mode: .spokenAudio)
         UIApplication.shared.beginReceivingRemoteControlEvents()
@@ -152,6 +121,8 @@ final class PlayerModel: ObservableObject {
         resumeSeekID += 1
         podcastProgress.reset()
         clearClipPlayback(restoreListenMarkWrites: true)
+        pausedAt = nil
+        speed = speeds.value(for: episode?.mediaKey, legacyID: episode?.id)
         currentEpisode = episode
         currentBookReference = book
         bookObservedClock = nil
@@ -294,6 +265,15 @@ final class PlayerModel: ObservableObject {
             seek(to: 0, autoplay: true)
             return
         }
+        if let pausedAt {
+            self.pausedAt = nil
+            let elapsed = pausedAt.duration(to: .now)
+            let clock = player.currentTime().seconds
+            if let target = PlayerPlaybackPolicy.smartResumeTarget(current: clock, pausedFor: elapsed) {
+                seek(to: target, autoplay: true)
+                return
+            }
+        }
         startPlayback()
         updateNowPlaying()
     }
@@ -308,7 +288,14 @@ final class PlayerModel: ObservableObject {
         isPlaying = true
     }
 
+    private func recordPauseIfPlaying() {
+        if pausedAt == nil, currentEpisode != nil, !clipSuppressListenMark, isPlaying || player.rate > 0 {
+            pausedAt = .now
+        }
+    }
+
     func pause() {
+        recordPauseIfPlaying()
         playWhenReady = false
         player.pause()
         isPlaying = false
@@ -430,6 +417,7 @@ final class PlayerModel: ObservableObject {
 
     func seek(to seconds: Double, autoplay: Bool? = nil, clearClip: Bool = true, waitForPlaybackAdvance: Bool = false, keepTransportRunning: Bool = false) {
         guard seconds.isFinite, player.currentItem != nil else { return }
+        pausedAt = nil
         if clearClip {
             clearClipPlayback(restoreListenMarkWrites: true)
         }
@@ -505,7 +493,7 @@ final class PlayerModel: ObservableObject {
 
     func setSpeed(_ newSpeed: ListenSpeed) {
         speed = newSpeed
-        UserDefaults.standard.set(newSpeed.rawValue, forKey: speedKey)
+        speeds.set(newSpeed, for: currentEpisode?.mediaKey)
         if isPlaying {
             player.playImmediately(atRate: newSpeed.rate)
         }
@@ -610,6 +598,7 @@ final class PlayerModel: ObservableObject {
         guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         if type == .began {
+            recordPauseIfPlaying()
             isPlaying = false
             checkpoint()
             updateNowPlaying()
