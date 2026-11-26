@@ -421,7 +421,9 @@ class DeliveryTests(unittest.TestCase):
         shutil.copyfile(self.package / "output.mp3", job / "output.mp3")
         fixture.dump(job / "state.json", {"title": "合成普通节目"})
         (job / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"synthetic fixture cover" * 2)
-        normal = publisher.publish_job(job, library_root=self.target)
+        fixture.dump(job / "transcript_zh.json", {"segments": [{"id": "seg-1", "zh": "合成普通节目译稿"}]})
+        with patch.object(publisher, "_require_audio_preflight", return_value=None):
+            normal = publisher.publish_job(job, library_root=self.target)
         rows = {item["id"]: item for item in fixture.load(self.catalog)["episodes"]}
         self.assertEqual(rows[ID], self.record)
         self.assertEqual(rows[job.name]["source_job_id"], normal["source_job_id"])

@@ -150,6 +150,7 @@ class OriginalConsumerTests(unittest.TestCase):
         fixtures.dump(job / "state.json", {"title": "合成普通发布", "status": "complete"})
         shutil.copyfile(self.episode / "output.mp3", job / "output.mp3")
         (job / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"synthetic-cover-fixture" * 2)
+        fixtures.dump(job / "transcript_zh.json", {"segments": [{"id": "seg-1", "zh": "合成普通发布译稿"}]})
         return job
 
     def test_rebuild_preserves_pending_and_catalog_neighbors(self):
@@ -176,14 +177,14 @@ class OriginalConsumerTests(unittest.TestCase):
                 self.assertEqual(fixtures.snapshot(self.library), before)
         self.catalog.write_bytes(original)
         before = fixtures.snapshot(self.library)
-        read_text = Path.read_text
+        read_bytes = publisher._read_library_bytes
 
-        def unreadable(path, *args, **kwargs):
+        def unreadable(path):
             if path == self.catalog:
                 raise PermissionError("synthetic read failure")
-            return read_text(path, *args, **kwargs)
+            return read_bytes(path)
 
-        with patch.object(Path, "read_text", unreadable):
+        with patch.object(publisher, "_read_library_bytes", unreadable):
             with self.assertRaisesRegex(publisher.PublishError, "无法读取现有资料库索引"):
                 publisher.rebuild_library(self.library)
         self.assertEqual(fixtures.snapshot(self.library), before)
@@ -194,7 +195,8 @@ class OriginalConsumerTests(unittest.TestCase):
     def test_real_neighbor_publish_leaves_pending_readable_and_duplicate_noop(self):
         physical = fixtures.snapshot(self.library / "episodes")
         calls = len(COMMANDS)
-        new = publisher.publish_job(self.make_job("normal-neighbor"), library_root=self.library)
+        with patch.object(publisher, "_require_audio_preflight", return_value=None):
+            new = publisher.publish_job(self.make_job("normal-neighbor"), library_root=self.library)
         self.assertEqual(new["source_job_id"], "normal-neighbor")
         self.assertGreater(new["duration_sec"], 0)
         self.assertEqual(len(COMMANDS), calls + 1)

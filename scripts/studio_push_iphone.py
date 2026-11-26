@@ -198,10 +198,28 @@ def _app_container(device_id: str) -> list[str]:
 def copy_to_app(device_id: str, source: Path, destination: str, runner=_default_runner) -> str | None:
     """Copy an episode resource. Returns None on success, else a short error."""
     parts = destination.split('/')
-    legacy = len(parts) >= 3 and parts[0] == 'episodes'
-    revision = len(parts) == 4 and parts[0] == 'revisions' and _SHA256.fullmatch(parts[2])
-    if (not (legacy or revision) or not _JOB_ID.fullmatch(parts[1])
-            or not all(_resource_name(part) for part in parts[1:])):
+    legacy = (
+        len(parts) >= 3
+        and parts[0] == 'episodes'
+        and _JOB_ID.fullmatch(parts[1])
+        and all(_resource_name(part) for part in parts[1:])
+    )
+    revision = (
+        len(parts) == 4
+        and parts[0] == 'revisions'
+        and _JOB_ID.fullmatch(parts[1])
+        and _SHA256.fullmatch(parts[2])
+        and _resource_name(parts[3])
+        and _REVISION_RESOURCE.fullmatch(parts[3])
+    )
+    obj = (
+        len(parts) == 3
+        and parts[0] == 'objects'
+        and _SHA256.fullmatch(parts[1])
+        and _resource_name(parts[2])
+        and _REVISION_RESOURCE.fullmatch(parts[2])
+    )
+    if not (legacy or revision or obj):
         return '目标不是安全的节目资源路径'
     return _copy_to_container(device_id, source, f'{DEVICE_LIBRARY}/{destination}', runner)
 
@@ -375,16 +393,31 @@ def _backup_index(device_id: str, root: Path, runner, entry: dict) -> bytes | No
 AtomicCommit = Callable[[str, bytes, bytes | None], str | None]
 
 
-def _requested_episode(requested: Path | str, library: Path) -> tuple[str, str | None]:
+def _requested_episode(
+    requested: Path | str, library: Path, catalog: dict[str, dict] | None = None
+) -> tuple[str, str | None]:
     if isinstance(requested, str) and _JOB_ID.fullmatch(requested):
         return requested, None
     path = Path(requested).expanduser().absolute()
     if '..' not in path.parts and path.is_relative_to(library):
         parts = path.relative_to(library).parts
-        if len(parts) == 2 and parts[0] == 'episodes':
+        if len(parts) == 2 and parts[0] == 'episodes' and _JOB_ID.fullmatch(parts[1]):
             return parts[1], None
-        if len(parts) == 3 and parts[0] == 'revisions':
+        if len(parts) == 3 and parts[0] == 'revisions' and _JOB_ID.fullmatch(parts[1]) and _SHA256.fullmatch(parts[2]):
             return parts[1], '/'.join(parts)
+        if len(parts) == 2 and parts[0] == 'objects' and _SHA256.fullmatch(parts[1]):
+            if catalog is None:
+                raise ValueError('缺少资料库索引，无法反查对象修订')
+            target_prefix = f'objects/{parts[1]}'
+            matches = [
+                ident for ident, row in catalog.items()
+                if isinstance(row.get('media_revision'), dict) and row['media_revision'].get('path') == target_prefix
+            ]
+            if not matches:
+                raise ValueError(f'资料库索引中未找到对象修订：{target_prefix}')
+            if len(matches) > 1:
+                raise ValueError(f'对象修订命中多条节目存在歧义：{target_prefix}')
+            return matches[0], target_prefix
     raise ValueError(f'请求节目不属于资料库：{path.name}')
 
 
@@ -393,13 +426,16 @@ def _revision_files(row: dict, ident: str) -> tuple[str, dict[str, str]]:
     sha = revision.get('sha256') if isinstance(revision, dict) else None
     if not isinstance(sha, str) or not _SHA256.fullmatch(sha):
         raise ValueError(f'节目修订摘要无效：{ident}')
-    path = f'revisions/{ident}/{sha}'
-    if revision.get('path') != path:
+    path = revision.get('path')
+    if path not in (f'objects/{sha}', f'revisions/{ident}/{sha}'):
         raise ValueError(f'节目修订路径无效：{ident}')
     prior = revision.get('previous_path')
-    if (not isinstance(prior, str) or prior == path or revision.get('resume_policy') != 'reset_unmapped'
-            or not (prior == f'episodes/{ident}'
-                    or re.fullmatch(rf'(?:revisions/{ident}|objects)/[0-9a-f]{{64}}', prior))):
+    valid_prior = isinstance(prior, str) and prior != path and (
+        prior == f'episodes/{ident}'
+        or bool(re.fullmatch(rf'(?:revisions/{ident}|objects)/[0-9a-f]{{64}}', prior))
+        or (prior == '' and path == f'objects/{sha}')
+    )
+    if not valid_prior or revision.get('resume_policy') != 'reset_unmapped':
         raise ValueError(f'节目修订历史指针无效：{ident}')
     files = revision.get('files')
     if (not isinstance(files, dict) or not _REQUIRED_FILES.issubset(files)
@@ -413,7 +449,13 @@ def _revision_files(row: dict, ident: str) -> tuple[str, dict[str, str]]:
     return path, files
 
 
-def _prepare_push(library: Path, requests: list[Path | str] | None, work: Path):
+def _prepare_push(
+    library: Path,
+    requests: list[Path | str] | None,
+    work: Path,
+    *,
+    expected_revisions: dict[str, str] | None = None,
+):
     listing = library / _INDEX
     if library.is_symlink() or '..' in library.parts:
         raise ValueError('资料库或索引路径无效')
@@ -423,7 +465,7 @@ def _prepare_push(library: Path, requests: list[Path | str] | None, work: Path):
     delta = {}
     plan = []
     for requested in sorted(catalog) if requests is None else requests:
-        ident, requested_revision = _requested_episode(requested, library)
+        ident, requested_revision = _requested_episode(requested, library, catalog=catalog)
         if ident not in catalog:
             raise ValueError(f'请求节目不属于资料库索引：{ident}')
         row = catalog[ident]
@@ -431,7 +473,11 @@ def _prepare_push(library: Path, requests: list[Path | str] | None, work: Path):
         hashes = {}
         if 'media_revision' in row:
             prefix, hashes = _revision_files(row, ident)
-        if requested_revision is not None and requested_revision != prefix:
+        expected_rev = expected_revisions.get(ident) if expected_revisions else None
+        if requested_revision is not None and expected_rev is not None and requested_revision != expected_rev:
+            raise ValueError(f'请求路径与期望节目修订不一致：{ident}')
+        target_expected = expected_rev if expected_rev is not None else requested_revision
+        if target_expected is not None and target_expected != prefix:
             raise ValueError(f'请求路径与当前节目修订不一致：{ident}')
         if ident in delta:
             continue
@@ -571,7 +617,8 @@ def _stage_prepared(device_id: str, records: dict, delta: dict, plan: list, work
 
 
 def push_episodes(episode_dirs: list[Path | str] | None, library: Path, *, runner=_default_runner,
-                  backup_root: Path | None = None, atomic_commit: AtomicCommit | None = None) -> dict:
+                  backup_root: Path | None = None, atomic_commit: AtomicCommit | None = None,
+                  expected_revisions: dict[str, str] | None = None) -> dict:
     """Select catalog IDs or package paths. None selects every row in the same snapshot."""
     summary = {'ok': False, 'devices': [], 'reason': None, 'episodes': []}
     if os.environ.get(ENV_SWITCH, '').strip().lower() in _DISABLED:
@@ -581,7 +628,12 @@ def push_episodes(episode_dirs: list[Path | str] | None, library: Path, *, runne
     with tempfile.TemporaryDirectory(prefix='privatelisten-push-') as temporary:
         work = Path(temporary)
         try:
-            delta, plan = _prepare_push(Path(library).expanduser().absolute(), episode_dirs, work)
+            delta, plan = _prepare_push(
+                Path(library).expanduser().absolute(),
+                episode_dirs,
+                work,
+                expected_revisions=expected_revisions,
+            )
         except (OSError, ValueError, RecursionError) as error:
             summary['reason'] = f'本地增量无效：{error}'
             return summary
@@ -669,11 +721,28 @@ def push_after_publish(result: dict, job_dir: Path | None = None, *, runner=_def
     """Hook for engine / server / CLI after `publish_job` succeeded. Never raises."""
     try:
         library = Path(result.get('library') or default_library_root())
-        requested = Path(result['episode_dir']) if result.get('episode_dir') else str(result.get('id') or '')
+        ep_id = result.get('id')
+        ep_dir_raw = result.get('episode_dir')
+        expected_revisions = None
+        if isinstance(ep_id, str) and _JOB_ID.fullmatch(ep_id) and ep_dir_raw:
+            ep_dir = Path(ep_dir_raw).expanduser().absolute()
+            abs_lib = library.expanduser().absolute()
+            if '..' not in ep_dir.parts and ep_dir.is_relative_to(abs_lib):
+                rel_parts = ep_dir.relative_to(abs_lib).parts
+                if len(rel_parts) == 2 and rel_parts[0] == 'objects' and _SHA256.fullmatch(rel_parts[1]):
+                    requested = ep_id
+                    expected_revisions = {ep_id: f'objects/{rel_parts[1]}'}
+                else:
+                    requested = ep_dir
+            else:
+                requested = ep_dir
+        else:
+            requested = Path(ep_dir_raw) if ep_dir_raw else str(ep_id or '')
         if not push_enabled(library):
             return {'ok': False, 'skipped': True, 'reason': '资料库不是默认的 iCloud 位置，或已关闭', 'devices': []}
         summary = push_episodes([requested], library, runner=runner,
-                                backup_root=backup_root, atomic_commit=atomic_commit)
+                                backup_root=backup_root, atomic_commit=atomic_commit,
+                                expected_revisions=expected_revisions)
         if summary.get('reason') in ('这台机器没有 xcrun devicectl', '没有连着的 iPhone'):
             summary['skipped'] = True
     except Exception as error:

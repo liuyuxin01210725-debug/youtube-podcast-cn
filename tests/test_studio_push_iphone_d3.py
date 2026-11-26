@@ -588,3 +588,115 @@ def test_requested_directory_outside_staging_or_symlink_is_rejected(tmp_path, st
     episode.symlink_to(outside, target_is_directory=True)
     result = push_delta(tmp_path, staging, fake, 'ep-40')
     assert not result['ok'] and not fake.events
+
+
+def _make_objects_revision_library(tmp_path: Path, entries: list[tuple[str, str, dict[str, bytes]]]):
+    library = tmp_path / 'obj-lib'
+    library.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for ep_id, prev_path, extra_files in entries:
+        base_files = {
+            push.AUDIO_NAME: b'obj-audio-' + ep_id.encode(),
+            'episode.json': encoded({'id': ep_id, 'title': ep_id}),
+            'document.json': encoded({'segments': []}),
+            'source-identity.json': encoded({}),
+            'render-identity.json': encoded({}),
+            **extra_files,
+        }
+        hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in sorted(base_files.items())}
+        rev_sha = push.digest(push.json_bytes(hashes))
+        pkg_dir = library / 'objects' / rev_sha
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+        for name, raw in base_files.items():
+            (pkg_dir / name).write_bytes(raw)
+        rows.append({
+            'id': ep_id,
+            'title': ep_id,
+            'created_at': '2026-11-26T00:00:00+00:00',
+            'source_job_id': ep_id,
+            'file': push.AUDIO_NAME,
+            'media_revision': {
+                'sha256': rev_sha,
+                'path': f'objects/{rev_sha}',
+                'previous_path': prev_path,
+                'resume_policy': 'reset_unmapped',
+                'files': hashes,
+            },
+        })
+    (library / 'library.json').write_bytes(encoded({'schema': 'private-listen.library.v2', 'generation': 4, 'episodes': rows}))
+    return library, rows
+
+
+def test_objects_lookup_copy_to_app_and_sidecar_staging(tmp_path, monkeypatch):
+    # 5a & 5d: single match with previous_path == "" and previous_path == "episodes/<id>", plus sidecars
+    sidecars = {
+        'transcript_zh.json': encoded({'segments': [{'id': 's1', 'zh': '译稿'}]}),
+        'extract.json': encoded({'packet_id': 'p1', 'work_id': 'ep-obj-1'}),
+        'extract.live.json': encoded({'packet_id': 'p2', 'work_id': 'ep-obj-1'}),
+        'point-listen.json': encoded({'work_id': 'ep-obj-1'}),
+    }
+    library, rows = _make_objects_revision_library(
+        tmp_path,
+        [
+            ('ep-obj-1', '', sidecars),
+            ('ep-obj-2', 'episodes/ep-obj-2', {}),
+        ],
+    )
+    fake = StubDevicectl(None)
+    fake.listings['phone-1', push.DEVICE_LIBRARY] = {'files': []}
+    monkeypatch.setenv(push.ENV_SWITCH, '1')
+    rev1 = rows[0]['media_revision']
+    rev2 = rows[1]['media_revision']
+    res1 = push.push_episodes([library / rev1['path']], library, runner=fake, backup_root=tmp_path / 'b1')
+    assert res1['staged'] and res1['episodes'] == ['ep-obj-1']
+    for name in sidecars:
+        assert ('phone-1', f"Documents/.push-staging/{res1['devices'][0]['transaction']}/{rev1['path']}/{name}") in fake.assets
+
+    res2 = push.push_episodes([library / rev2['path']], library, runner=fake, backup_root=tmp_path / 'b2')
+    assert res2['staged'] and res2['episodes'] == ['ep-obj-2']
+
+    # 5a: 0 matches & >1 ambiguous matches fail-closed
+    missing_sha = '0' * 64
+    res_miss = push.push_episodes([library / 'objects' / missing_sha], library, runner=fake, backup_root=tmp_path / 'b3')
+    assert not res_miss['ok'] and not res_miss.get('staged')
+
+    dup_lib, dup_rows = _make_objects_revision_library(
+        tmp_path / 'dup',
+        [('dup-1', '', {}), ('dup-2', '', {})],
+    )
+    # Force dup-2 to share dup-1's objects/<sha>
+    dup_catalog = json.loads((dup_lib / 'library.json').read_bytes())
+    dup_catalog['episodes'][1]['media_revision'] = dup_catalog['episodes'][0]['media_revision']
+    (dup_lib / 'library.json').write_bytes(encoded(dup_catalog))
+    dup_sha = dup_rows[0]['media_revision']['sha256']
+    res_ambig = push.push_episodes([dup_lib / 'objects' / dup_sha], dup_lib, runner=fake, backup_root=tmp_path / 'b4')
+    assert not res_ambig['ok'] and '歧义' in res_ambig['reason']
+
+    # 5b: push_after_publish passes id + expected_revisions to disambiguate & guard drift
+    res_disambig = push.push_after_publish(
+        {'id': 'dup-1', 'episode_dir': str(dup_lib / 'objects' / dup_sha), 'library': str(dup_lib)},
+        runner=fake, announce=None, backup_root=tmp_path / 'b5',
+    )
+    assert res_disambig['staged']
+    res_drift = push.push_after_publish(
+        {'id': 'dup-1', 'episode_dir': str(dup_lib / 'objects' / ('1' * 64)), 'library': str(dup_lib)},
+        runner=fake, announce=None, backup_root=tmp_path / 'b6',
+    )
+    assert not res_drift['ok'] and not res_drift.get('staged')
+
+    # 5c: copy_to_app strict path checks
+    src_file = tmp_path / 'asset.bin'
+    src_file.write_bytes(b'x')
+    ok_runner = lambda cmd, timeout: (0, '', '')
+    valid_sha = 'a' * 64
+    assert push.copy_to_app('dev', src_file, f'objects/{valid_sha}/transcript_zh.json', runner=ok_runner) is None
+    assert push.copy_to_app('dev', src_file, f'objects/{valid_sha}/output.mp3', runner=ok_runner) is None
+    for bad_dest in (
+        'objects/not-a-sha/output.mp3',
+        f'objects/{"A" * 64}/output.mp3',
+        f'objects/{valid_sha}/sub/a.json',
+        f'objects/{valid_sha}/.hidden',
+        f'objects/{valid_sha}/a.tmp',
+        'objects/../episodes/x/output.mp3',
+    ):
+        assert push.copy_to_app('dev', src_file, bad_dest, runner=ok_runner) == '目标不是安全的节目资源路径'

@@ -27,16 +27,38 @@ from studio_server import Studio, write
 
 
 
-def _shengjian_skip_publish_hooks():
-    preflight = patch('studio_publish_icloud._require_audio_preflight', return_value=None)
-    snapshot = patch('studio_publish_icloud._snapshot_library_or_refuse', return_value=None)
-    restore = patch('studio_publish_icloud._restore_library_snapshot', return_value=None)
-    discard = patch('studio_publish_icloud._discard_library_snapshot', return_value=None)
-    preflight.start(); snapshot.start(); restore.start(); discard.start()
-    return preflight, snapshot, restore, discard
+_PUBLISH_HOOK_PATCHES = []
 
 
-_PUBLISH_HOOK_PATCHES = _shengjian_skip_publish_hooks()
+def setUpModule():
+    targets = (
+        'studio_publish_icloud._require_audio_preflight',
+        'studio_publish_icloud._snapshot_library_or_refuse',
+        'studio_publish_icloud._restore_library_snapshot',
+        'studio_publish_icloud._discard_library_snapshot',
+    )
+    try:
+        for target in targets:
+            p = patch(target, return_value=None)
+            p.start()
+            _PUBLISH_HOOK_PATCHES.append(p)
+    except Exception:
+        while _PUBLISH_HOOK_PATCHES:
+            try:
+                _PUBLISH_HOOK_PATCHES.pop().stop()
+            except Exception:
+                pass
+        raise
+
+
+def tearDownModule():
+    while _PUBLISH_HOOK_PATCHES:
+        p = _PUBLISH_HOOK_PATCHES.pop()
+        try:
+            p.stop()
+        except Exception:
+            pass
+
 
 class PublishTests(unittest.TestCase):
     def make_job(self, root, name='6d898d4192de495fafcec86b9c938430', title='肌酸对谈', youtube='https://www.youtube.com/watch?v=MM-C3JqCXBk', audio=b'full-audio'):
@@ -45,6 +67,7 @@ class PublishTests(unittest.TestCase):
         write(job / 'state.json', {'title': title, 'status': 'complete', 'action': 'render'})
         write(job / 'config.json', {'source': {'kind': 'youtube', 'value': youtube}})
         (job / 'output.mp3').write_bytes(audio)
+        write(job / 'transcript_zh.json', {'segments': [{'id': 'seg-1', 'zh': f'{title}测试译稿'}]})
         return job
 
     def test_youtube_id_parser(self):
@@ -373,7 +396,7 @@ class EngineHookTests(unittest.TestCase):
     def ready_engine(self, root):
         engine = StudioEngine(Path(root) / '6d898d4192de495fafcec86b9c938430')
         document = {'segments': [
-            {'id': 'seg-000001', 'speaker_id': 'host', 'start_ms': 0, 'end_ms': 1000},
+            {'id': 'seg-000001', 'speaker_id': 'host', 'start_ms': 0, 'end_ms': 1000, 'chinese': '肌酸对谈测试段落。'},
         ], 'speakers': {'host': {'voice_slot': 'male_1'}}}
         write(engine.job / 'document.json', document)
         write(engine.job / 'state.json', {'title': '肌酸对谈'})
@@ -399,9 +422,17 @@ class EngineHookTests(unittest.TestCase):
             with patch.dict(os.environ, {'PRIVATE_LISTEN_LIBRARY': library}):
                 with patch.object(engine, 'render', return_value=mp3), patch(
                     'studio_publish_icloud.probe_duration_sec', return_value=1.0,
+                ), patch(
+                    'studio_publish_icloud._validate_revision_audio', return_value=None,
                 ):
                     self.assertEqual(engine.run(config, 'render'), mp3)
-                published = Path(library) / 'episodes' / engine.job.name / 'output.mp3'
+                catalog = json.loads((Path(library) / 'library.json').read_text(encoding='utf-8'))
+                [row] = catalog['episodes']
+                rev = row['media_revision']
+                self.assertEqual(rev['path'], f"objects/{rev['sha256']}")
+                self.assertEqual(rev['previous_path'], '')
+                self.assertIn('transcript_zh.json', rev['files'])
+                published = Path(library) / rev['path'] / 'output.mp3'
                 self.assertEqual(published.read_bytes(), b'full-audio')
                 progress = json.loads((engine.job / 'progress.json').read_text(encoding='utf-8'))
                 self.assertEqual(progress['stage'], 'complete')

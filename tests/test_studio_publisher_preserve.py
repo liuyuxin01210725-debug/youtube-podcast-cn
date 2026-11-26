@@ -27,6 +27,7 @@ def fixture_job(tmp_path, ident, title, timestamp, youtube_id):
     job.mkdir()
     write_json(job / 'state.json', {'title': title, 'status': 'complete', 'action': 'render'})
     write_json(job / 'metadata.json', {'video_id': youtube_id})
+    write_json(job / 'transcript_zh.json', {'segments': [{'id': 'seg-1', 'zh': f'{title}测试译稿'}]})
     audio = job / 'output.mp3'
     audio.write_bytes(b'fixture audio')
     os.utime(audio, (timestamp, timestamp))
@@ -83,7 +84,7 @@ def test_publish_preserves_heterogeneous_records_and_overlays_refreshed_core(mon
         'duration_sec': 149.75,
         'youtube_id': 'DietSource2',
     }}
-    assert next(iter(updated)) == target.name
+    assert list(updated) == ['fresh-04', 'rest-03', 'diet-02', 'sleep-01']
 
 
 @pytest.mark.parametrize('id_key', ['episode_id', 'source_job_id'])
@@ -192,15 +193,15 @@ def test_rebuild_read_failure_preserves_bytes_then_merges_after_access_returns(m
     extension = {'show': '原来节目', 'lens_ids': ['sleep'], 'custom': {'pinned': True}}
     write_json(listing, {'episodes': [{'id': 'kept', 'title': '原来标题', **extension}], 'theme': 'default'})
     before = listing.read_bytes()
-    read_text = Path.read_text
+    read_bytes = publisher._read_library_bytes
 
-    def unreadable(path, *args, **kwargs):
+    def unreadable(path):
         if path == listing:
             raise error
-        return read_text(path, *args, **kwargs)
+        return read_bytes(path)
 
     with monkeypatch.context() as patcher:
-        patcher.setattr(Path, 'read_text', unreadable)
+        patcher.setattr(publisher, '_read_library_bytes', unreadable)
         with pytest.raises(publisher.PublishError, match='无法读取现有资料库索引'):
             publisher.rebuild_library(library)
         assert listing.read_bytes() == before

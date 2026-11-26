@@ -29,11 +29,24 @@ from studio_document import check_source_coverage
 from studio_edge_input import (EDGE_INPUT_VERSION, SILENCE_FRAMES, SILENCE_RATE, clean_tts_text,
                                speakable_tts, valid_edge_input)
 from studio_recovery import _sync_dir, decode_json_object
+from studio_sidecars import (
+    EXTRACT_FILES,
+    POINT_LISTEN_FILE,
+    SIDECAR_FILES,
+    SidecarError,
+    TRANSCRIPT_FILE,
+    build_point_listen_from_bound_segments,
+    materialize_transcript_zh_from_document,
+    validate_extract_packet,
+    validate_point_listen,
+    validate_transcript_zh,
+)
 from studio_speakers import validate_speaker_voices
 from temporary_audio import sha256_file
 from studio_urls import is_public_https
 
 LIBRARY_NAME = '中文播客私人库'
+LIBRARY_SCHEMA = 'private-listen.library.v2'
 AUDIO_NAME = 'output.mp3'
 RENDER_FILES = ('document.json', 'source-identity.json', 'render-identity.json')
 _JOB_ID = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
@@ -667,21 +680,30 @@ def decode_library_index(text: str) -> tuple[dict, dict[str, dict]]:
     return prior, prior_by_id
 
 
-def _read_library_index(listing: Path) -> tuple[dict, dict[str, dict]]:
+def _read_library_bytes(listing: Path) -> bytes:
+    return original_pending.read_bytes(listing)
+
+
+def _read_library_index(listing: Path) -> tuple[dict, dict[str, dict], bytes | None]:
     try:
         mode = listing.lstat().st_mode
     except FileNotFoundError:
-        return {}, {}
+        return {}, {}, None
     except OSError:
         raise PublishError('无法读取现有资料库索引') from None
 
+    if not stat.S_ISREG(mode):
+        raise PublishError('现有资料库索引格式无效')
     try:
-        if not stat.S_ISREG(mode):
-            raise ValueError
-        return decode_library_index(listing.read_text(encoding='utf-8'))
+        raw = _read_library_bytes(listing)
+    except original_pending.IntakeError:
+        raise PublishError('现有资料库索引格式无效') from None
     except OSError:
         raise PublishError('无法读取现有资料库索引') from None
-    except (ValueError, RecursionError):
+    try:
+        prior, prior_by_id = decode_library_index(raw.decode('utf-8'))
+        return prior, prior_by_id, raw
+    except (UnicodeDecodeError, ValueError, RecursionError):
         raise PublishError('现有资料库索引格式无效') from None
 
 
@@ -693,7 +715,7 @@ def rebuild_library(library: Path) -> dict:
 
 def _rebuild_library_locked(library: Path) -> dict:
     listing = library / 'library.json'
-    prior, prior_by_id = _read_library_index(listing)
+    prior, prior_by_id, old_index = _read_library_index(listing)
     root = library / 'episodes'
     pending_id = original_pending.EPISODE_ID
     pending_dir = root / pending_id
@@ -713,19 +735,85 @@ def _rebuild_library_locked(library: Path) -> dict:
             record = _episode_record(episode_dir, prior_by_id.get(ident, {}))
             if record is not None:
                 records[ident] = record
-    return _write_snapshot(listing, prior, records)
+    return _write_snapshot(listing, prior, records, old_index=old_index)
 
 
-def _write_snapshot(listing, prior, records):
-    ordered = sorted(records.items(), key=lambda entry: (
-        entry[1]['created_at'] if isinstance(entry[1].get('created_at'), str) else '', entry[0],
-    ), reverse=True)
-    payload = {
+def _record_identity(item: dict) -> str | None:
+    return next((item[key] for key in ('id', 'episode_id', 'source_job_id') if item.get(key) is not None), None)
+
+
+def _write_snapshot(
+    listing: Path,
+    prior: dict,
+    records: dict[str, dict],
+    *,
+    old_index: bytes | None = None,
+    v2_write: bool = False,
+    tx_id: str | None = None,
+    request_digest: str | None = None,
+):
+    is_v2 = v2_write or prior.get('schema') == LIBRARY_SCHEMA or type(prior.get('generation')) is int
+    if is_v2 and bool(prior) and old_index is None:
+        raise PublishError('缺少现有资料库索引基线字节，禁止写入 v2 目录快照')
+
+    prior_order: list[str] = []
+    seen_prior: set[str] = set()
+    for item in prior.get('episodes') or []:
+        if isinstance(item, dict):
+            ident = _record_identity(item)
+            if isinstance(ident, str) and ident in records and ident not in seen_prior:
+                prior_order.append(ident)
+                seen_prior.add(ident)
+
+    new_ids = sorted(
+        (ident for ident in records if ident not in seen_prior),
+        key=lambda ident: (
+            records[ident]['created_at'] if isinstance(records[ident].get('created_at'), str) else '',
+            ident,
+        ),
+        reverse=True,
+    )
+    ordered_ids = new_ids + prior_order
+    payload: dict = {
         **prior,
         'updated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-        'episodes': [record for _, record in ordered],
+        'episodes': [records[ident] for ident in ordered_ids],
     }
+    if is_v2:
+        new_gen = (prior['generation'] if type(prior.get('generation')) is int else 0) + 1
+        payload['schema'] = LIBRARY_SCHEMA
+        payload['generation'] = new_gen
+        if old_index is not None:
+            payload['parent'] = original_pending.digest(old_index)
+        if tx_id and request_digest:
+            body_for_digest = {k: v for k, v in payload.items() if k != 'transactions'}
+            result_digest = original_pending.digest(
+                json.dumps(body_for_digest, sort_keys=True, separators=(',', ':'),
+                           ensure_ascii=False, allow_nan=False).encode('utf-8')
+            )
+            txs = dict(prior.get('transactions') or {}) if isinstance(prior.get('transactions'), dict) else {}
+            txs[tx_id] = {
+                'request_digest': request_digest,
+                'generation': new_gen,
+                'result_digest': result_digest,
+            }
+            payload['transactions'] = txs
+
+    if old_index is not None:
+        if not (listing.exists() or listing.is_symlink()):
+            actual = None
+        else:
+            try:
+                actual = _read_library_bytes(listing)
+            except (OSError, original_pending.IntakeError):
+                raise PublishError('无法读取现有资料库索引') from None
+        if actual != old_index:
+            raise PublishError('资料库索引已变化，请重新核对再发布')
+    elif not prior and (listing.exists() or listing.is_symlink()):
+        raise PublishError('资料库索引已变化，请重新核对再发布')
+
     atomic_write_json(listing, payload)
+    _sync_dir(listing.parent)
     return payload
 
 
@@ -790,10 +878,10 @@ def _validate_render(folder: Path, config: dict, duration_sec: float | None, *, 
                 raise ValueError
             count = row['end_frame'] - frames
             frames = row['end_frame']
+            raw_text = segment.get('chinese')
+            if not isinstance(raw_text, str) or not raw_text.strip():
+                raise PublishError('非广告段缺少可核验的译文')
             if edge_evidence:
-                raw_text = segment['chinese']
-                if not isinstance(raw_text, str) or not raw_text.strip():
-                    raise PublishError('非广告段缺少可核验的译文')
                 text = raw_text.strip()
                 slot = document['speakers'][segment['speaker_id']].get('voice_slot', 'male_1')
                 spoken = clean_tts_text(text)
@@ -882,8 +970,12 @@ def _current_episode_dir(library, job_id, old_record):
         digest = revision.get('sha256') if isinstance(revision, dict) else None
         if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
             raise PublishError('现有节目修订指针无效')
-        path = library / 'revisions' / job_id / digest
-        if revision.get('path') != path.relative_to(library).as_posix():
+        raw_path = revision.get('path')
+        if raw_path == f'objects/{digest}':
+            path = library / 'objects' / digest
+        elif raw_path == f'revisions/{job_id}/{digest}':
+            path = library / 'revisions' / job_id / digest
+        else:
             raise PublishError('现有节目修订指针无效')
     if path.resolve() != path:
         raise PublishError('节目目录不能使用符号链接')
@@ -898,7 +990,7 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
     ident = record['id']
     files = _revision_files(stage)
     revision = original_pending.digest(original_pending.json_bytes(files))
-    parent = library / 'revisions' / ident
+    parent = library / 'objects'
     if parent.resolve() != parent:
         raise PublishError('修订目录不能使用符号链接')
     parent.mkdir(parents=True, exist_ok=True)
@@ -911,23 +1003,35 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
                 os.fsync(asset.fileno())
         _sync_dir(stage)
         stage.rename(final)
-    for folder in (parent, parent.parent, library):
+    for folder in (parent, library):
         _sync_dir(folder)
     listing = library / 'library.json'
-    if (listing.read_bytes() if listing.exists() else None) != old_index:
+    if not (listing.exists() or listing.is_symlink()):
+        actual = None
+    else:
+        try:
+            actual = _read_library_bytes(listing)
+        except (OSError, original_pending.IntakeError):
+            raise PublishError('无法读取现有资料库索引') from None
+    if actual != old_index:
         raise PublishError('资料库索引已变化，请重新核对再发布')
     old_record = records.get(ident, {})
     # Keep unrelated extensions. Listening marks are bound to the old media.
     inherited = {key: value for key, value in old_record.items()
                  if key not in ('resume_seconds', 'resume_sec', 'position_seconds', 'playback_progress',
                                 'artwork', 'artwork_kind')}
+    if current is None or ident not in records:
+        previous_path = ''
+    elif final == current:
+        previous_path = old_record['media_revision']['previous_path']
+    else:
+        previous_path = current.relative_to(library).as_posix()
     row = {**inherited, **record, 'media_revision': {
         'sha256': revision, 'path': final.relative_to(library).as_posix(), 'files': files,
-        'previous_path': (old_record['media_revision']['previous_path']
-                          if final == current else current.relative_to(library).as_posix()),
+        'previous_path': previous_path,
         'resume_policy': 'reset_unmapped',
     }}
-    _write_snapshot(listing, prior, {**records, ident: row})
+    _write_snapshot(listing, prior, {**records, ident: row}, old_index=old_index, v2_write=True)
     return final, row
 
 
@@ -1004,19 +1108,33 @@ def publish_job(job_dir, library_root=None) -> dict:
     return {**record, 'episode_dir': str(episode_dir), 'library': str(library)}
 
 
+def _copy_verified_revision_files(current: Path, stage: Path, expected_files: dict) -> None:
+    if not isinstance(expected_files, dict) or not expected_files:
+        raise PublishError('现有节目修订文件清单无效')
+    for name, expected_sha in expected_files.items():
+        if not isinstance(name, str) or not isinstance(expected_sha, str):
+            raise PublishError('现有节目修订文件清单无效')
+        src_file = current / name
+        raw = original_pending.read_bytes(src_file)
+        if original_pending.digest(raw) != expected_sha:
+            raise PublishError(f'现有节目修订文件摘要不匹配：{name}')
+        original_pending.write_bytes(stage / name, raw)
+
+
 def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
     job_id = job.name
     listing = library / 'library.json'
-    prior, records = _read_library_index(listing)
-    old_index = listing.read_bytes() if listing.exists() else None
+    prior, records, old_index = _read_library_index(listing)
     legacy = library / 'episodes' / job_id
-    current = _current_episode_dir(library, job_id, records.get(job_id, {}))
+    old_record = records.get(job_id, {})
+    has_revision = 'media_revision' in old_record
+    current = _current_episode_dir(library, job_id, old_record)
     existing = job_id in records or current.exists()
     has_render = any((job / name).exists() or (job / name).is_symlink() for name in RENDER_FILES)
     if receipt_sha and not has_render:
         raise PublishError('预检后逐段收据已变化，拒绝提交')
     if existing and not has_render:
-        if current != legacy or not (current / AUDIO_NAME).is_file() \
+        if not (current / AUDIO_NAME).is_file() or (current / AUDIO_NAME).is_symlink() \
                 or original_pending.file_digest(src) != original_pending.file_digest(current / AUDIO_NAME):
             raise PublishError('同编号新版需要可核验的音频、译稿与合成时轴')
     created_at = datetime.fromtimestamp(src.stat().st_mtime, timezone.utc).isoformat(timespec='seconds')
@@ -1036,7 +1154,10 @@ def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
         record['youtube_id'] = youtube_id
     with tempfile.TemporaryDirectory(prefix='.render-', dir=library) as staging:
         stage = Path(staging)
-        _copy_audio(src, stage)
+        if existing and not has_render and has_revision:
+            _copy_verified_revision_files(current, stage, old_record.get('media_revision', {}).get('files'))
+        else:
+            _copy_audio(src, stage)
         record['duration_sec'] = probe_duration_sec(stage / AUDIO_NAME)
         if has_render:
             for name in RENDER_FILES:
@@ -1046,37 +1167,177 @@ def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
             config = read_json(job / 'config.json')
             if (job / 'config.json').exists() and not isinstance(config, dict):
                 raise PublishError('任务配置无效')
-            document_sha = _validate_render(stage, config or {}, record['duration_sec'])
-        _stage_cover(job, stage, record)
-        if existing and has_render:
+            _validate_render(stage, config or {}, record['duration_sec'])
             _validate_revision_audio(stage / AUDIO_NAME)
-            original_pending.file_digest(current / AUDIO_NAME)
-            extract = current / 'extract.json'
-            if extract.exists():
-                from studio_extract import preserve_extract_on_republish
 
-                original_pending.write_bytes(stage / extract.name, original_pending.read_bytes(extract))
-                preserve_extract_on_republish(stage, new_transcript_hash=document_sha)
-            atomic_write_json(stage / 'episode.json', record)
-            return _publish_revision(library, current, prior, records, record, stage,
-                                     old_index=old_index)
+        new_audio_sha = original_pending.file_digest(stage / AUDIO_NAME)
+        audio_changed = False
+        if existing and (current / AUDIO_NAME).is_file() and not (current / AUDIO_NAME).is_symlink():
+            audio_changed = (new_audio_sha != original_pending.file_digest(current / AUDIO_NAME))
+
+        same_audio_legacy = (
+            legacy if existing and legacy != current and (legacy / AUDIO_NAME).is_file()
+            and not (legacy / AUDIO_NAME).is_symlink()
+            and original_pending.file_digest(legacy / AUDIO_NAME) == new_audio_sha
+            else None
+        )
+
+        # D4 gate: require or deterministically materialize transcript_zh.json.
+        job_transcript = job / TRANSCRIPT_FILE
+        if job_transcript.exists() or job_transcript.is_symlink():
+            if not job_transcript.is_file() or job_transcript.is_symlink():
+                raise PublishError('缺少中文译稿 transcript_zh.json，禁止发布（D4）')
+            raw_tr = original_pending.read_bytes(job_transcript)
+            if not raw_tr:
+                raise PublishError('缺少中文译稿 transcript_zh.json，禁止发布（D4）')
+            original_pending.write_bytes(stage / TRANSCRIPT_FILE, raw_tr)
+        elif has_render:
+            try:
+                doc_obj = decode_json_object(original_pending.read_bytes(stage / 'document.json'))
+                id_obj = decode_json_object(original_pending.read_bytes(stage / 'render-identity.json'))
+                tr_bytes, tr_meta = materialize_transcript_zh_from_document(
+                    doc_obj,
+                    id_obj,
+                    audio_sha256=new_audio_sha,
+                    duration_sec=record['duration_sec'],
+                    strict_all_non_ad=True,
+                    generated_at=created_at,
+                )
+            except (SidecarError, ValueError) as error:
+                raise PublishError(str(error)) from error
+            if tr_meta.get('timeline') != 'output.mp3.seconds':
+                raise PublishError('成片合成时轴无法与译稿对齐，禁止发布（D4）')
+            original_pending.write_bytes(stage / TRANSCRIPT_FILE, tr_bytes)
+        elif existing and not audio_changed:
+            if not (stage / TRANSCRIPT_FILE).exists():
+                candidate_tr = None
+                if (current / TRANSCRIPT_FILE).is_file() and not (current / TRANSCRIPT_FILE).is_symlink():
+                    candidate_tr = current / TRANSCRIPT_FILE
+                elif same_audio_legacy and (same_audio_legacy / TRANSCRIPT_FILE).is_file() \
+                        and not (same_audio_legacy / TRANSCRIPT_FILE).is_symlink():
+                    candidate_tr = same_audio_legacy / TRANSCRIPT_FILE
+                if candidate_tr is None:
+                    raise PublishError('缺少中文译稿 transcript_zh.json，禁止发布（D4）')
+                original_pending.write_bytes(stage / TRANSCRIPT_FILE, original_pending.read_bytes(candidate_tr))
+        else:
+            raise PublishError('缺少中文译稿 transcript_zh.json，禁止发布（D4）')
+
+        try:
+            tr_summary = validate_transcript_zh(
+                original_pending.read_bytes(stage / TRANSCRIPT_FILE),
+                expected_audio_sha256=new_audio_sha,
+            )
+        except SidecarError as error:
+            raise PublishError(str(error)) from error
+        new_transcript_hash = tr_summary['transcript_hash']
+
+        # Stage extract.json / extract.live.json and apply preserve/stale rules.
+        from studio_extract import preserve_extract_on_republish
+
+        job_deep_packets: list[dict] = []
+        stage_extract_packets: list[dict] = []
+        for ext_name in EXTRACT_FILES:
+            job_ext = job / ext_name
+            if job_ext.exists() or job_ext.is_symlink():
+                try:
+                    raw_ext = original_pending.read_bytes(job_ext)
+                    ext_info = validate_extract_packet(raw_ext, episode_id=job_id)
+                except SidecarError as error:
+                    raise PublishError(str(error)) from error
+                original_pending.write_bytes(stage / ext_name, raw_ext)
+                stage_extract_packets.append(ext_info['packet'])
+                if ext_info['is_deep_ready']:
+                    job_deep_packets.append(ext_info['packet'])
+            elif existing:
+                if not (stage / ext_name).exists():
+                    src_ext = None
+                    if (current / ext_name).is_file() and not (current / ext_name).is_symlink():
+                        src_ext = current / ext_name
+                    elif same_audio_legacy and (same_audio_legacy / ext_name).is_file() \
+                            and not (same_audio_legacy / ext_name).is_symlink():
+                        src_ext = same_audio_legacy / ext_name
+                    if src_ext is not None:
+                        original_pending.write_bytes(stage / ext_name, original_pending.read_bytes(src_ext))
+                if (stage / ext_name).exists():
+                    updated = preserve_extract_on_republish(
+                        stage,
+                        new_transcript_hash=new_transcript_hash,
+                        audio_changed=audio_changed,
+                        filename=ext_name,
+                    )
+                    if isinstance(updated, dict):
+                        stage_extract_packets.append(updated)
+
+        # Stage / validate / strip point-listen.json.
+        job_pl = job / POINT_LISTEN_FILE
+        if job_pl.exists() or job_pl.is_symlink():
+            original_pending.write_bytes(stage / POINT_LISTEN_FILE, original_pending.read_bytes(job_pl))
+        elif existing:
+            if not (stage / POINT_LISTEN_FILE).exists() and not audio_changed:
+                src_pl = None
+                if (current / POINT_LISTEN_FILE).is_file() and not (current / POINT_LISTEN_FILE).is_symlink():
+                    src_pl = current / POINT_LISTEN_FILE
+                elif same_audio_legacy and (same_audio_legacy / POINT_LISTEN_FILE).is_file() \
+                        and not (same_audio_legacy / POINT_LISTEN_FILE).is_symlink():
+                    src_pl = same_audio_legacy / POINT_LISTEN_FILE
+                if src_pl is not None:
+                    original_pending.write_bytes(stage / POINT_LISTEN_FILE, original_pending.read_bytes(src_pl))
+            if (stage / POINT_LISTEN_FILE).exists():
+                has_ready_deep = any(
+                    pkt.get('status') == 'ready' and pkt.get('mode') != 'light'
+                    for pkt in stage_extract_packets
+                )
+                if audio_changed or not has_ready_deep:
+                    (stage / POINT_LISTEN_FILE).unlink(missing_ok=True)
+        if not (stage / POINT_LISTEN_FILE).exists() and job_deep_packets and tr_summary.get('timeline') == 'output.mp3.seconds':
+            for pkt in job_deep_packets:
+                generated_pl = build_point_listen_from_bound_segments(
+                    episode_id=job_id,
+                    audio_sha256=new_audio_sha,
+                    duration_sec=record['duration_sec'],
+                    transcript_summary=tr_summary,
+                    packet=pkt,
+                )
+                if generated_pl is not None:
+                    atomic_write_json(stage / POINT_LISTEN_FILE, generated_pl)
+                    break
+
+        if (stage / POINT_LISTEN_FILE).exists():
+            try:
+                validate_point_listen(
+                    original_pending.read_bytes(stage / POINT_LISTEN_FILE),
+                    episode_id=job_id,
+                    audio_sha256=new_audio_sha,
+                    duration_sec=record['duration_sec'],
+                    extract_packets=stage_extract_packets,
+                )
+            except SidecarError as error:
+                raise PublishError(str(error)) from error
+
+        _stage_cover(job, stage, record)
         atomic_write_json(stage / 'episode.json', record)
+        if has_render or (existing and has_revision):
+            return _publish_revision(library, current if existing else None, prior, records, record, stage,
+                                     old_index=old_index)
         legacy.parent.mkdir(parents=True, exist_ok=True)
         if not existing:
             stage.rename(legacy)
         try:
             if existing:
                 # Same audio; metadata and cover refresh keep the existing media.
+                keep_point_listen = (stage / POINT_LISTEN_FILE).exists()
                 for entry in stage.iterdir():
                     if entry.name != AUDIO_NAME:
                         entry.replace(legacy / entry.name)
+                if not keep_point_listen:
+                    (legacy / POINT_LISTEN_FILE).unlink(missing_ok=True)
             if old_index is None:
                 _rebuild_library_locked(library)
             else:
                 row = _episode_record(legacy, records.get(job_id, {}))
                 if row is None:
                     raise PublishError('发布的节目清单格式无效')
-                _write_snapshot(listing, prior, {**records, job_id: row})
+                _write_snapshot(listing, prior, {**records, job_id: row}, old_index=old_index)
         except Exception:
             if existing:
                 _restore_library_snapshot(snap, library)

@@ -98,6 +98,10 @@ class PublishTransactionTests(unittest.TestCase):
             job.mkdir()
             source = job / 'output.mp3'
             shutil.copyfile(FIXTURE_AUDIO, source)
+            (job / 'transcript_zh.json').write_text(
+                json.dumps({'segments': [{'id': 'seg-1', 'zh': '测试译稿'}]}, ensure_ascii=False),
+                encoding='utf-8',
+            )
             library = scratch / 'explicit-library'
             library.mkdir()
             listing = library / 'library.json'
@@ -135,6 +139,10 @@ class PublishTransactionTests(unittest.TestCase):
             failed_job = scratch / 'fixture-failed'
             failed_job.mkdir()
             shutil.copyfile(source, failed_job / source.name)
+            (failed_job / 'transcript_zh.json').write_text(
+                json.dumps({'segments': [{'id': 'seg-1', 'zh': '测试译稿'}]}, ensure_ascii=False),
+                encoding='utf-8',
+            )
             installed = library / 'episodes' / failed_job.name
             replace = os.replace
 
@@ -180,6 +188,10 @@ class PublishHookTests(unittest.TestCase):
             job = Path(raw) / '6d898d4192de495fafcec86b9c938430'
             job.mkdir()
             (job / 'output.mp3').write_bytes(b'x')
+            (job / 'transcript_zh.json').write_text(
+                json.dumps({'segments': [{'id': 'seg-1', 'zh': '测试译稿'}]}, ensure_ascii=False),
+                encoding='utf-8',
+            )
             library = Path(raw) / 'library'
             library.mkdir()
             with patch('studio_publish_icloud._require_audio_preflight', return_value={'verdict': 'CLEAR'}):
@@ -194,6 +206,10 @@ class PublishHookTests(unittest.TestCase):
             job = Path(raw) / '6d898d4192de495fafcec86b9c938430'
             job.mkdir()
             (job / 'output.mp3').write_bytes(b'x')
+            (job / 'transcript_zh.json').write_text(
+                json.dumps({'segments': [{'id': 'seg-1', 'zh': '测试译稿'}]}, ensure_ascii=False),
+                encoding='utf-8',
+            )
             library = Path(raw) / 'library'
             legacy = library / 'episodes' / job.name
             legacy.mkdir(parents=True)

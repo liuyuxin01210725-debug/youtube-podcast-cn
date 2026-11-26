@@ -102,6 +102,7 @@ def test_default_publish_and_app_consume(tmp_path, monkeypatch, entry, failure, 
     monkeypatch.setenv('PRIVATE_LISTEN_LIBRARY', str(library))
     monkeypatch.setenv(push.ENV_SWITCH, '1')
     monkeypatch.setattr('studio_artwork.attach_cover', lambda *args, **kwargs: None)
+    monkeypatch.setattr(publisher, '_require_audio_preflight', lambda *a, **k: None)
     transport = DocumentsTransport(documents, subprocess.run)
     monkeypatch.setattr(subprocess, 'run', transport)
 
@@ -146,7 +147,7 @@ def test_default_publish_and_app_consume(tmp_path, monkeypatch, entry, failure, 
     transport.interrupt = failure == 'transfer'
     offered = offer(2, entry)
     [published] = json.loads((library / 'library.json').read_bytes())['episodes']
-    assert published['id'] == job.name and published['media_revision']['previous_path'] == f'episodes/{job.name}'
+    assert published['id'] == job.name and published['media_revision']['previous_path'] == old['media_revision']['path']
     assert index.read_bytes() == before
     assert Path(offered['devices'][0]['backup']).read_bytes() == before
     if failure == 'transfer':

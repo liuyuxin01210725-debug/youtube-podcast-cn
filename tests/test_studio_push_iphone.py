@@ -289,11 +289,36 @@ class SwitchTests(unittest.TestCase):
 
 
 class HookTests(unittest.TestCase):
+    _SHORT_MP3_BYTES: bytes | None = None
+
+    @classmethod
+    def _short_mp3(cls) -> bytes:
+        if cls._SHORT_MP3_BYTES is None:
+            import subprocess
+            with tempfile.TemporaryDirectory() as tmp:
+                out = Path(tmp) / 'tone.mp3'
+                subprocess.run(
+                    ['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono',
+                     '-t', '1', '-c:a', 'libmp3lame', str(out)],
+                    check=True,
+                )
+                cls._SHORT_MP3_BYTES = out.read_bytes()
+        return cls._SHORT_MP3_BYTES
+
+    def setUp(self):
+        p = patch('studio_publish_icloud._require_audio_preflight', return_value=None)
+        p.start()
+        self.addCleanup(p.stop)
+
     def make_job(self, root, ident='07c1dddbdc684968b69199ad4f32e86b'):
         job = Path(root) / ident
         job.mkdir()
         (job / 'state.json').write_text(json.dumps({'title': '马克·库班 · The Diary Of A CEO'}), encoding='utf-8')
-        (job / 'output.mp3').write_bytes(b'full-audio')
+        (job / 'output.mp3').write_bytes(self._short_mp3())
+        (job / 'transcript_zh.json').write_text(
+            json.dumps({'segments': [{'id': 'seg-1', 'zh': '马克·库班测试译稿。'}]}, ensure_ascii=False),
+            encoding='utf-8',
+        )
         return job
 
     def render_fixture(self, job):
@@ -301,7 +326,8 @@ class HookTests(unittest.TestCase):
 
         config = {'source': {'kind': 'youtube', 'value': 'https://www.youtube.com/watch?v=MM-C3JqCXBk'},
                   'expected_speakers': 1}
-        doc = {'segments': [{'id': 'seg-000001', 'speaker_id': 'host', 'start_ms': 0, 'end_ms': 1000}],
+        doc = {'segments': [{'id': 'seg-000001', 'speaker_id': 'host', 'start_ms': 0, 'end_ms': 1000,
+                             'chinese': '马克·库班测试译稿。'}],
                'speakers': {'host': {'voice_slot': 'male_1'}}}
         lock = job / 'source-identity.json'
         fixture = {
@@ -377,7 +403,7 @@ class HookTests(unittest.TestCase):
             engine = StudioEngine(Path(root) / '07c1dddbdc684968b69199ad4f32e86b')
             (engine.job / 'state.json').write_text(json.dumps({'title': '马克·库班'}), encoding='utf-8')
             mp3 = engine.job / 'output.mp3'
-            mp3.write_bytes(b'full-audio')
+            mp3.write_bytes(self._short_mp3())
             config = self.render_fixture(engine.job)
             seen = []
 

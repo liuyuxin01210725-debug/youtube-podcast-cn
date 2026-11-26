@@ -54,6 +54,11 @@ def fixture_render(job, version):
     })
 
 
+@pytest.fixture(autouse=True)
+def _stub_audio_preflight(monkeypatch):
+    monkeypatch.setattr(publisher, '_require_audio_preflight', lambda *a, **k: None)
+
+
 @pytest.fixture
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setattr('studio_artwork.attach_cover', lambda *args, **kwargs: None)
@@ -62,7 +67,8 @@ def isolated(tmp_path, monkeypatch):
     fixture_render(job, 1)
     first = publisher.publish_job(job, library)
     legacy = Path(first['episode_dir'])
-    assert legacy == library / 'episodes' / LAUREN
+    assert legacy == library / 'objects' / first['media_revision']['sha256']
+    assert first['media_revision']['previous_path'] == ''
     write(legacy / 'extract.json', {
         'packet_id': 'first', 'work_id': LAUREN, 'schema_id': 'ferment', 'mode': 'deep',
         'transcript_hash': 'a' * 64, 'status': 'ready',
@@ -130,13 +136,13 @@ def test_real_publisher_pushes_legacy_then_revision_with_catalog_readback(tmp_pa
     first = publisher.publish_job(job, library)
     [first_row] = json.loads((library / 'library.json').read_bytes())['episodes']
     legacy = Path(first['episode_dir'])
-    assert legacy == library / 'episodes' / job.name
-    assert 'media_revision' not in first_row
+    assert legacy == library / 'objects' / first_row['media_revision']['sha256']
+    assert first_row['media_revision']['previous_path'] == ''
     result = sync(first, fake.commit)
     assert result['ok'], result
     assert json.loads(fake.indexes[phone])['episodes'] == [first_row]
     old_media = fake.assets.copy()
-    assert old_media == {(phone, f'{push.DEVICE_LIBRARY}/episodes/{job.name}/{p.name}'): p.read_bytes()
+    assert old_media == {(phone, f'{push.DEVICE_LIBRARY}/{first_row["media_revision"]["path"]}/{p.name}'): p.read_bytes()
                          for p in legacy.iterdir()}
 
     # Add device-local metadata. The App probe checks this also survives the commit.
@@ -151,7 +157,7 @@ def test_real_publisher_pushes_legacy_then_revision_with_catalog_readback(tmp_pa
     revision = row['media_revision']
     current = Path(second['episode_dir'])
     assert revision == second['media_revision']
-    assert current == library / revision['path'] == library / 'revisions' / job.name / revision['sha256']
+    assert current == library / revision['path'] == library / 'objects' / revision['sha256']
     new_files = {p.name: p.read_bytes() for p in current.iterdir()}
     hashes = {name: hashlib.sha256(new_files[name]).hexdigest() for name in sorted(new_files)}
     assert revision['files'] == hashes
@@ -204,8 +210,9 @@ def test_failure_after_staged_revision_leaves_old_snapshot_and_bytes(isolated, m
     real_write = publisher._write_snapshot
     inspected = []
 
-    def fail(listing, prior, records):
+    def fail(listing, prior, records, **kwargs):
         assert listing == index and index.read_bytes() == before
+        assert kwargs.get('old_index') == before and kwargs.get('v2_write') is True
         assert {p.name: p.read_bytes() for p in legacy.iterdir()} == old
         row = records[LAUREN]['media_revision']
         staged = library / row['path']
@@ -223,7 +230,7 @@ def test_failure_after_staged_revision_leaves_old_snapshot_and_bytes(isolated, m
     assert index.read_bytes() == before
     assert {p.name: p.read_bytes() for p in legacy.iterdir()} == old
     assert not list(library.glob('.render-*'))
-    assert 'media_revision' not in publisher.rebuild_library(library)['episodes'][0]
+    assert publisher.rebuild_library(library)['episodes'][0]['media_revision']['path'] == legacy.relative_to(library).as_posix()
     monkeypatch.setattr(publisher, '_write_snapshot', real_write)
     retried = publisher.publish_job(job, library)
     assert Path(retried['episode_dir']) == inspected[0]
@@ -232,22 +239,24 @@ def test_failure_after_staged_revision_leaves_old_snapshot_and_bytes(isolated, m
 @pytest.mark.parametrize('failure', ['broken', 'unreadable'])
 def test_existing_catalog_is_fail_closed_before_revision_staging(isolated, monkeypatch, failure):
     job, library, legacy, index, old = isolated
+    before_objects = sorted(p.name for p in (library / 'objects').iterdir())
     if failure == 'broken':
         index.write_bytes(b'{"episodes": false}')
     else:
-        original_read = Path.read_text
+        original_read = publisher._read_library_bytes
 
-        def denied(path, *args, **kwargs):
+        def denied(path):
             if path == index:
                 raise PermissionError('synthetic read refusal')
-            return original_read(path, *args, **kwargs)
+            return original_read(path)
 
-        monkeypatch.setattr(Path, 'read_text', denied)
+        monkeypatch.setattr(publisher, '_read_library_bytes', denied)
     before = index.read_bytes()
     with pytest.raises(publisher.PublishError, match='现有资料库索引'):
         publisher.publish_job(job, library)
     assert index.read_bytes() == before
     assert {p.name: p.read_bytes() for p in legacy.iterdir()} == old
+    assert sorted(p.name for p in (library / 'objects').iterdir()) == before_objects
     assert not (library / 'revisions').exists()
     assert not list(library.glob('.render-*'))
 
@@ -256,6 +265,7 @@ def test_existing_catalog_is_fail_closed_before_revision_staging(isolated, monke
 def test_mismatched_or_unreviewed_staged_media_cannot_replace_revision(isolated, corruption):
     job, library, legacy, index, old = isolated
     before = index.read_bytes()
+    before_objects = sorted(p.name for p in (library / 'objects').iterdir())
     receipt_path = job / 'render-identity.json'
     receipt = json.loads(receipt_path.read_bytes())
     if corruption == 'audio':
@@ -282,4 +292,5 @@ def test_mismatched_or_unreviewed_staged_media_cannot_replace_revision(isolated,
         publisher.publish_job(job, library)
     assert index.read_bytes() == before
     assert {p.name: p.read_bytes() for p in legacy.iterdir()} == old
+    assert sorted(p.name for p in (library / 'objects').iterdir()) == before_objects
     assert not (library / 'revisions').exists()

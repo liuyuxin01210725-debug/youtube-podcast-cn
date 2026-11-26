@@ -571,31 +571,72 @@ def merge_extract_state(existing: dict | None, incoming: dict) -> dict:
     return out
 
 
-def load_extract(episode_dir: Path) -> dict | None:
-    data = _read_json(Path(episode_dir) / 'extract.json')
+def load_extract(episode_dir: Path, filename: str = 'extract.json') -> dict | None:
+    data = _read_json(Path(episode_dir) / filename)
     return data if isinstance(data, dict) else None
 
 
-def save_extract(episode_dir: Path, packet: dict) -> Path:
-    path = Path(episode_dir) / 'extract.json'
+def save_extract(episode_dir: Path, packet: dict, filename: str = 'extract.json') -> Path:
+    path = Path(episode_dir) / filename
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'.extract.json.{os.getpid()}.tmp')
+    temporary = path.with_name(f'.{filename}.{os.getpid()}.tmp')
     temporary.write_text(json.dumps(packet, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     os.replace(temporary, path)
     return path
 
 
-def preserve_extract_on_republish(episode_dir: Path, *, new_transcript_hash: str | None = None) -> dict | None:
-    """发布流程调用：保留 extract.json；哈希变则标 stale。"""
-    existing = load_extract(episode_dir)
+def preserve_extract_on_republish(
+    episode_dir: Path,
+    *,
+    new_transcript_hash: str | None = None,
+    audio_changed: bool = False,
+    filename: str = 'extract.json',
+) -> dict | None:
+    """发布流程调用：保留 extract 文件；译稿哈希或音频变更则标 stale。"""
+    from studio_sidecars import normalize_transcript_hash
+
+    existing = load_extract(episode_dir, filename=filename)
     if not existing:
         return None
     out = deepcopy(existing)
-    if new_transcript_hash and existing.get('transcript_hash') and existing['transcript_hash'] != new_transcript_hash:
+    old_hash = existing.get('transcript_hash')
+    hash_changed = False
+    if new_transcript_hash and old_hash:
+        norm_old = normalize_transcript_hash(old_hash)
+        norm_new = normalize_transcript_hash(new_transcript_hash)
+        if norm_old is not None and norm_new is not None:
+            hash_changed = (norm_old != norm_new)
+        else:
+            hash_changed = (old_hash != new_transcript_hash)
+    if hash_changed:
         out['status'] = 'stale'
         out['stale_reason'] = 'transcript_hash_changed'
-        save_extract(episode_dir, out)
+        save_extract(episode_dir, out, filename=filename)
+    elif audio_changed:
+        out['status'] = 'stale'
+        out['stale_reason'] = 'audio_changed'
+        save_extract(episode_dir, out, filename=filename)
     return out
+
+
+def preserve_extract_files_on_republish(
+    episode_dir: Path,
+    *,
+    new_transcript_hash: str | None = None,
+    audio_changed: bool = False,
+) -> dict[str, dict]:
+    """批量处理 extract.json 与 extract.live.json。"""
+    results: dict[str, dict] = {}
+    for name in ('extract.json', 'extract.live.json'):
+        updated = preserve_extract_on_republish(
+            episode_dir,
+            new_transcript_hash=new_transcript_hash,
+            audio_changed=audio_changed,
+            filename=name,
+        )
+        if updated is not None:
+            results[name] = updated
+    return results
 
 
 def enqueue_deep(*, episode_dir: Path, work_id: str, schema_id: str,

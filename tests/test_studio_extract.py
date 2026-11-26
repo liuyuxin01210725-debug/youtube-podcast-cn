@@ -155,6 +155,37 @@ class MergePublishTests(unittest.TestCase):
             self.assertEqual(out['status'], 'stale')
             self.assertEqual(load_extract(ep)['status'], 'stale')
 
+    def test_preserve_on_republish_normalizes_64_vs_16_and_audio_changed_and_live(self):
+        from studio_extract import preserve_extract_files_on_republish, save_extract
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ep = Path(tmp) / 'ep'
+            ep.mkdir()
+            full_hash = '0123456789abcdef' * 4
+            packet = mock_deep_extract(
+                work_id='ep', schema_id='health',
+                transcript=json.loads((FIXTURES / 'transcripts.json').read_text())['health'],
+            )
+            packet['transcript_hash'] = full_hash.upper()
+            save_extract(ep, packet, filename='extract.json')
+            save_extract(ep, {**packet, 'packet_id': 'ep-live'}, filename='extract.live.json')
+
+            # Same normalized 16-char hash and audio_changed=False -> keep ready.
+            kept = preserve_extract_files_on_republish(
+                ep, new_transcript_hash=full_hash[:16], audio_changed=False
+            )
+            self.assertEqual(kept['extract.json']['status'], 'ready')
+            self.assertEqual(kept['extract.live.json']['status'], 'ready')
+
+            # Same transcript hash but audio_changed=True -> mark stale with audio_changed.
+            stale = preserve_extract_files_on_republish(
+                ep, new_transcript_hash=full_hash[:16], audio_changed=True
+            )
+            self.assertEqual(stale['extract.json']['status'], 'stale')
+            self.assertEqual(stale['extract.json']['stale_reason'], 'audio_changed')
+            self.assertEqual(stale['extract.live.json']['status'], 'stale')
+            self.assertEqual(stale['extract.live.json']['stale_reason'], 'audio_changed')
+
 
 class GoldenFixtureTests(unittest.TestCase):
     def test_ferment_craft_card(self):
