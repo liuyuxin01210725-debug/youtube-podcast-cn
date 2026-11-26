@@ -13,6 +13,9 @@ struct PlayerReading {
     var lines: [Line] = []
     var nodes: [ListenViewpoint] = []
     var audio: PointListenAudio?
+    var index: PointListenIndex?
+    var packet: ExtractionPacket?
+    var picks: [ListenPick] = []
 
     var paragraphs: [String] { lines.map(\.displayText) }
 
@@ -78,10 +81,20 @@ struct PlayerReading {
                 .compactMap({ data($0).flatMap(ExtractPacketDecoding.decode) }).first(where: { $0.packetId == index.packetId }),
               let audio = try? await PointListenAudio.load(episode.audioURL) else { return result }
         result.audio = audio
+        result.index = index
+        result.packet = packet
         result.nodes = PointListening.rows(packet: packet, index: index).filter {
             PointListening.refusal(row: $0, index: index, packet: packet, episodeID: episode.id,
                                    audioHash: audio.sha256, duration: audio.duration) == nil
         }.sorted { ($0.tStart ?? 0) < ($1.tStart ?? 0) }
+        result.picks = ListenPicks.select(
+            nodes: result.nodes,
+            index: index,
+            packet: packet,
+            episode: episode,
+            audioHash: audio.sha256,
+            duration: audio.duration
+        )
         return result
     }
 

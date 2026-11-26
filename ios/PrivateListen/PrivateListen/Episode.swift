@@ -31,6 +31,8 @@ struct Episode: Identifiable, Hashable {
         let declaredFiles: Set<String>
     }
     var legacyCompanions: LegacyCompanions? = nil
+    var audioKind: String? = nil
+    var hasChineseRenderSidecar: Bool = false
 
     func publishedAsset(_ name: String) -> URL? {
         guard revisionFiles?.contains(name) != false else { return nil }

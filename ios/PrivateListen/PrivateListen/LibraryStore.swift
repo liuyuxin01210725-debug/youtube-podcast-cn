@@ -727,6 +727,14 @@ final class LibraryStore: ObservableObject {
                let folder = try? LibrarySnapshot.path(revision.previousPath, in: root, directory: true) {
                 companions = .init(folder: folder, audioDigest: digest, declaredFiles: Set(revision.files.keys))
             }
+            var hasChineseRenderSidecar = false
+            if revision == nil, unavailableReason == nil,
+               let folder = try? LibrarySnapshot.path("episodes/\(id)", in: root, directory: true) {
+                hasChineseRenderSidecar = ["render-identity.json", "document.json"].contains { name in
+                    guard let url = try? LibrarySnapshot.path(name, in: folder) else { return false }
+                    return LocalAudio.isPlayable(url)
+                }
+            }
             return Episode(
                 id: id,
                 title: title.flatMap { $0.isEmpty ? nil : $0 } ?? id,
@@ -743,7 +751,9 @@ final class LibraryStore: ObservableObject {
                 mediaRevision: revision.flatMap { EpisodeID.isRevisionDigest($0.sha256) ? $0.sha256 : nil },
                 revisionFiles: revisionFiles,
                 unavailableReason: unavailableReason,
-                legacyCompanions: companions
+                legacyCompanions: companions,
+                audioKind: record.audioKind,
+                hasChineseRenderSidecar: hasChineseRenderSidecar
             )
         }.sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }

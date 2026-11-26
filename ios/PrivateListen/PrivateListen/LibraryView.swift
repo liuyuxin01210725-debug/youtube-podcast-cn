@@ -165,12 +165,17 @@ struct LibraryView: View {
             .navigationDestination(for: DebugBilingualFixtureRoute.self) { route in
                 PlayerView(episode: route.episode, player: player, opensPaused: true)
             }
+            .navigationDestination(for: DebugListenPicksFixtureRoute.self) { route in
+                PlayerView(episode: route.episode, player: player, opensPaused: true)
+            }
             .task {
                 guard !handledSyntheticEpisodeLaunch else { return }
                 handledSyntheticEpisodeLaunch = true
                 if let route = DebugSyntheticEpisodeRoute.resolve(in: library.episodes) {
                     path.append(route)
                 } else if let route = DebugBilingualFixtureRoute.resolve() {
+                    path.append(route)
+                } else if let route = DebugListenPicksFixtureRoute.resolve() {
                     path.append(route)
                 }
             }
@@ -567,6 +572,11 @@ struct LibraryView: View {
             starred: extracts.isStarred(episode.id),
             extra: badge
         )
+        let contentStatus = EpisodeContentStatus.resolve(episode: episode)
+        let appendedStatus = LibraryShelf.appendedStatusChip(
+            existingCount: marks.count,
+            statusLabel: contentStatus.listBadgeLabel
+        )
         let secondary = rowSecondary(episode)
         return VStack(alignment: .leading, spacing: 4) {
             Text(episode.title)
@@ -581,10 +591,14 @@ struct LibraryView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
-            if !marks.isEmpty {
+            if !marks.isEmpty || appendedStatus != nil {
                 HStack(spacing: 6) {
                     ForEach(0..<marks.count, id: \.self) { index in
                         rowMark(marks[index])
+                    }
+                    if let appendedStatus {
+                        listenBadge(appendedStatus, emphasized: false)
+                            .accessibilityIdentifier("library.episode.status.\(episode.id)")
                     }
                 }
             }

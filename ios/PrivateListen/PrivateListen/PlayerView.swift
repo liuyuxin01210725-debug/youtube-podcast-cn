@@ -12,6 +12,7 @@ struct PlayerView: View {
     @State private var reading: PlayerReading?
     @State private var isEditingListenNote = false
     @State private var originalPeek: OriginalPeek?
+    @State private var pickRefusalMessage: String?
 
     init(episode: Episode, player: PlayerModel, opensPaused: Bool = false,
          onPlayedEpisodeExit: @escaping () -> Void = {}) {
@@ -33,7 +34,7 @@ struct PlayerView: View {
     private func playerScrollView(scroll: ScrollViewProxy) -> some View {
         ScrollView {
             VStack(spacing: 14) {
-                VStack(spacing: 8) {
+                VStack(spacing: 6) {
                     Text(episode.title)
                         .font(.title2.weight(.semibold))
                         .lineLimit(3)
@@ -41,6 +42,7 @@ struct PlayerView: View {
                     Text(episode.dateLabel)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                    contentStatusRow
                 }
                 PlaybackControls(
                     player: player,
@@ -51,6 +53,10 @@ struct PlayerView: View {
                 ) {
                     library.reload()
                     openEpisode(force: true)
+                }
+
+                if episode.unavailableReason == nil, episode.pendingTranscript == nil {
+                    listenPicksSection
                 }
 
                 Divider()
@@ -79,6 +85,104 @@ struct PlayerView: View {
         }
     }
 
+    private var contentStatusRow: some View {
+        let status = EpisodeContentStatus.resolve(episode: episode)
+        return HStack(spacing: 6) {
+            Text(status.primaryLabel)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.primary)
+                .accessibilityIdentifier("player.contentStatus")
+            Text("·")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(status.detailLabel)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("player.contentStatus.review")
+        }
+        .lineLimit(1)
+    }
+
+    @ViewBuilder
+    private var listenPicksSection: some View {
+        if let reading {
+            if !reading.picks.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("本集精选")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    ForEach(reading.picks) { pick in
+                        Button {
+                            jumpToPick(pick, in: reading)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(pick.node.viewpointText)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                    .multilineTextAlignment(.leading)
+                                Text("起点 \(listenClock(pick.tStart)) · \(pick.anchorSpanLabel) · \(pick.reason)")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(.quaternary.opacity(0.6), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                        .buttonStyle(.plain)
+                        .simultaneousGesture(
+                            LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                                peekNode(pick.node, in: reading)
+                            }
+                        )
+                        .accessibilityLabel("\(listenClock(pick.tStart))，\(pick.anchorSpanLabel)，\(pick.reason)，\(pick.node.viewpointText)")
+                        .accessibilityIdentifier("player.picks.item.\(pick.id)")
+                    }
+                    if let pickRefusalMessage {
+                        Text(pickRefusalMessage)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("player.picks.refusal")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Text("本集尚无精选")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("player.picks.empty")
+            }
+        }
+    }
+
+    private func jumpToPick(_ pick: ListenPick, in reading: PlayerReading) {
+        guard originalPeek == nil else { return }
+        guard episode.unavailableReason == nil,
+              episode.pendingTranscript == nil,
+              episode.isPlayableNow,
+              player.isCurrent(episode),
+              let audio = reading.audio,
+              audio.isCurrent,
+              audio.url == episode.audioURL,
+              let packet = reading.packet,
+              PointListening.refusal(
+                  row: pick.node,
+                  index: reading.index,
+                  packet: packet,
+                  episodeID: episode.id,
+                  audioHash: audio.sha256,
+                  duration: audio.duration
+              ) == nil else {
+            pickRefusalMessage = "成片已变化，无法跳到该精选"
+            return
+        }
+        pickRefusalMessage = nil
+        player.seek(to: pick.tStart, autoplay: true, waitForPlaybackAdvance: true, keepTransportRunning: true)
+    }
+
     private func jump(_ node: ListenViewpoint, in reading: PlayerReading) {
         guard originalPeek == nil else { return }
         guard episode.unavailableReason == nil, player.isCurrent(episode), let audio = reading.audio, audio.isCurrent,
@@ -96,68 +200,6 @@ struct PlayerView: View {
             zhText: node.viewpointText,
             originalText: reading.originalText(for: node)
         )
-    }
-
-    private var readingScrollView: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 14) {
-                Text(episode.title).font(.title2.weight(.semibold))
-                ReadingElapsed(player: player)
-                if let reference = episode.pendingTranscript, episode.unavailableReason == nil {
-                    PendingTranscriptSection(episodeID: episode.id, audioURL: episode.audioURL, reference: reference)
-                } else if let reading {
-                    if !reading.nodes.isEmpty || !reading.lines.isEmpty {
-                        Text("长按段落或分段可查看对应原文；没有原文时会明确说明")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .accessibilityIdentifier("player.reading.originalHint")
-                    }
-                    if !reading.nodes.isEmpty {
-                        Text("分段").font(.headline)
-                        ForEach(reading.nodes) { node in
-                            Button { jump(node, in: reading) } label: {
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text(listenClock(node.tStart ?? 0)).monospacedDigit()
-                                    Text(node.viewpointText).multilineTextAlignment(.leading)
-                                }
-                            }
-                            .simultaneousGesture(
-                                LongPressGesture(minimumDuration: 0.5).onEnded { _ in
-                                    peekNode(node, in: reading)
-                                }
-                            )
-                            .accessibilityIdentifier("player.reading.node.\(node.id)")
-                            .accessibilityHint("长按查看对应原文")
-                        }
-                    }
-                    if !reading.lines.isEmpty {
-                        Text("中文译稿").font(.headline)
-                        ForEach(Array(reading.lines.enumerated()), id: \.offset) { index, line in
-                            Text(line.displayText)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .onLongPressGesture {
-                                    originalPeek = OriginalPeek(
-                                        zhText: line.displayText,
-                                        originalText: line.originalText
-                                    )
-                                }
-                                .accessibilityIdentifier("player.reading.paragraph.\(index)")
-                                .accessibilityHint("长按查看对应原文")
-                        }
-                    } else if reading.nodes.isEmpty {
-                        Text("本集暂无译稿或分段。")
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("player.reading.empty")
-                    }
-                } else {
-                    ProgressView("正在读取节目包")
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(18)
-        }
     }
 
     private struct OriginalPeek: Identifiable {
@@ -196,29 +238,36 @@ struct PlayerView: View {
             .background(.regularMaterial)
             .zIndex(1)
 
-            ScrollViewReader { scroll in
-                VStack(spacing: 0) {
-                    if readingSide {
-                        readingScrollView
-                    } else {
-                        playerScrollView(scroll: scroll)
+            if readingSide {
+                PlayerReadingPane(
+                    episode: episode,
+                    player: player,
+                    reading: reading,
+                    jump: jump,
+                    peekNode: peekNode,
+                    onPeekLine: { zhText, originalText in
+                        originalPeek = OriginalPeek(zhText: zhText, originalText: originalText)
                     }
-                }
-                .onChange(of: readingSide) { _, reading in
-                    if reading { isEditingListenNote = false }
-                }
-                .onChange(of: isEditingListenNote) { _, isEditing in
-                    guard isEditing else { return }
-                    scroll.scrollTo(ListenNoteSection.editorScrollID)
-                }
-                .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
-                    guard isEditingListenNote else { return }
-                    // Reposition the whole field once the keyboard has reduced the viewport.
-                    withAnimation {
-                        scroll.scrollTo(ListenNoteSection.editorScrollID, anchor: .center)
-                    }
+                )
+            } else {
+                ScrollViewReader { scroll in
+                    playerScrollView(scroll: scroll)
+                        .onChange(of: isEditingListenNote) { _, isEditing in
+                            guard isEditing else { return }
+                            scroll.scrollTo(ListenNoteSection.editorScrollID)
+                        }
+                        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardDidShowNotification)) { _ in
+                            guard isEditingListenNote else { return }
+                            // Reposition the whole field once the keyboard has reduced the viewport.
+                            withAnimation {
+                                scroll.scrollTo(ListenNoteSection.editorScrollID, anchor: .center)
+                            }
+                        }
                 }
             }
+        }
+        .onChange(of: readingSide) { _, reading in
+            if reading { isEditingListenNote = false }
         }
         .navigationTitle("正在播放")
         .navigationBarTitleDisplayMode(.inline)
@@ -409,16 +458,22 @@ private struct PlaybackControls: View {
     }
 
     private func timelineNodes(_ reading: PlayerReading) -> some View {
+        let activeID = activeNodeID(in: reading)
         // A timecode strip below the scrubber keeps adjacent viewpoints separately tappable.
-        ScrollView(.horizontal) {
+        return ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 ForEach(reading.nodes) { node in
+                    let isActive = node.id == activeID
                     Button { jump(node, reading) } label: {
                         Label(listenClock(node.tStart ?? 0), systemImage: "diamond.fill")
                             .font(.caption.monospacedDigit())
+                            .foregroundStyle(isActive ? Color.accentColor : Color.primary)
                             .padding(.horizontal, 8)
                             .frame(minHeight: 36)
-                            .background(.quaternary, in: Capsule())
+                            .background(
+                                (isActive ? Color.accentColor.opacity(0.18) : Color.secondary.opacity(0.12)),
+                                in: Capsule()
+                            )
                     }
                     .buttonStyle(.plain)
                     .simultaneousGesture(
@@ -427,11 +482,25 @@ private struct PlaybackControls: View {
                         }
                     )
                     .accessibilityLabel("\(listenClock(node.tStart ?? 0))，\(node.viewpointText)")
+                    .accessibilityValue(isActive ? "当前段" : "")
                     .accessibilityIdentifier("player.timeline.node.\(node.id)")
                 }
             }
         }
         .scrollIndicators(.hidden)
+    }
+
+    private func activeNodeID(in reading: PlayerReading) -> String? {
+        guard let audio = reading.audio else { return nil }
+        return SegmentPlaybackTracker.activeNodeID(
+            at: player.current,
+            in: reading.nodes,
+            duration: audio.duration,
+            isCurrentEpisode: player.isCurrent(episode),
+            isAudioCurrent: audio.isCurrent,
+            isPendingTranscript: episode.pendingTranscript != nil,
+            isUnavailable: episode.unavailableReason != nil
+        )
     }
 
     private var sliderUpper: Double {
@@ -446,5 +515,170 @@ private struct PlaybackControls: View {
         guard position > 5 else { return nil }
         if player.duration > 1, position >= player.duration - 15 { return nil }
         return "继续听 · \(listenClock(position))"
+    }
+}
+
+private struct PlayerReadingPane: View {
+    let episode: Episode
+    @ObservedObject var player: PlayerModel
+    let reading: PlayerReading?
+    let jump: (ListenViewpoint, PlayerReading) -> Void
+    let peekNode: (ListenViewpoint, PlayerReading) -> Void
+    let onPeekLine: (String, String?) -> Void
+
+    @State private var followState = SegmentScrollFollowState()
+
+    private var activeNodeID: String? {
+        guard let reading, let audio = reading.audio else { return nil }
+        return SegmentPlaybackTracker.activeNodeID(
+            at: player.current,
+            in: reading.nodes,
+            duration: audio.duration,
+            isCurrentEpisode: player.isCurrent(episode),
+            isAudioCurrent: audio.isCurrent,
+            isPendingTranscript: episode.pendingTranscript != nil,
+            isUnavailable: episode.unavailableReason != nil
+        )
+    }
+
+    var body: some View {
+        ScrollViewReader { scroll in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text(episode.title).font(.title2.weight(.semibold))
+                    ReadingElapsed(player: player)
+                    if let reference = episode.pendingTranscript, episode.unavailableReason == nil {
+                        PendingTranscriptSection(episodeID: episode.id, audioURL: episode.audioURL, reference: reference)
+                    } else if let reading {
+                        if !reading.nodes.isEmpty || !reading.lines.isEmpty {
+                            Text("长按段落或分段可查看对应原文；没有原文时会明确说明")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .accessibilityIdentifier("player.reading.originalHint")
+                        }
+                        if !reading.nodes.isEmpty {
+                            Text("分段").font(.headline)
+                            ForEach(reading.nodes) { node in
+                                let isActive = node.id == activeNodeID
+                                Button { jump(node, reading) } label: {
+                                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(isActive ? Color.accentColor : Color.clear)
+                                            .frame(width: 3, height: 16)
+                                        Text(listenClock(node.tStart ?? 0))
+                                            .monospacedDigit()
+                                            .foregroundStyle(isActive ? Color.accentColor : Color.secondary)
+                                        Text(node.viewpointText)
+                                            .foregroundStyle(.primary)
+                                            .multilineTextAlignment(.leading)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(.vertical, 6)
+                                    .padding(.horizontal, 8)
+                                    .background(
+                                        isActive ? Color.accentColor.opacity(0.12) : Color.clear,
+                                        in: RoundedRectangle(cornerRadius: 8)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                                .id(node.id)
+                                .onAppear { followState.nodeAppeared(node.id) }
+                                .onDisappear { followState.nodeDisappeared(node.id) }
+                                .simultaneousGesture(
+                                    LongPressGesture(minimumDuration: 0.5).onEnded { _ in
+                                        peekNode(node, reading)
+                                    }
+                                )
+                                .accessibilityIdentifier("player.reading.node.\(node.id)")
+                                .accessibilityValue(isActive ? "当前段" : "")
+                                .accessibilityHint("长按查看对应原文")
+                            }
+                        }
+                        if !reading.lines.isEmpty {
+                            Text("中文译稿").font(.headline)
+                            ForEach(Array(reading.lines.enumerated()), id: \.offset) { index, line in
+                                Text(line.displayText)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                    .onLongPressGesture {
+                                        onPeekLine(line.displayText, line.originalText)
+                                    }
+                                    .accessibilityIdentifier("player.reading.paragraph.\(index)")
+                                    .accessibilityHint("长按查看对应原文")
+                            }
+                        } else if reading.nodes.isEmpty {
+                            Text("本集暂无译稿或分段。")
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("player.reading.empty")
+                        }
+                    } else {
+                        ProgressView("正在读取节目包")
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(18)
+            }
+            .modifier(UserScrollDetector(onUserScroll: {
+                followState.userDidScroll()
+            }))
+            .onAppear {
+                if followState.isFollowing, let activeID = activeNodeID {
+                    scroll.scrollTo(activeID, anchor: .center)
+                    followState.markAutoScrolled(activeID)
+                }
+            }
+            .onChange(of: activeNodeID) { _, newID in
+                guard followState.shouldAutoScroll(to: newID), let newID else { return }
+                withAnimation {
+                    scroll.scrollTo(newID, anchor: .center)
+                }
+                followState.markAutoScrolled(newID)
+            }
+            .onChange(of: episode.mediaKey) { _, _ in
+                followState.resetForNewEpisode()
+            }
+            .safeAreaInset(edge: .bottom) {
+                if followState.showsBackToCurrentButton(activeID: activeNodeID),
+                   let activeID = activeNodeID {
+                    Button {
+                        followState.returnToCurrent()
+                        withAnimation {
+                            scroll.scrollTo(activeID, anchor: .center)
+                        }
+                        followState.markAutoScrolled(activeID)
+                    } label: {
+                        Label("回到当前段", systemImage: "arrow.uturn.backward.circle.fill")
+                            .font(.subheadline.weight(.medium))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(.regularMaterial, in: Capsule())
+                            .shadow(radius: 2)
+                    }
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("player.reading.backToCurrent")
+                }
+            }
+        }
+    }
+}
+
+private struct UserScrollDetector: ViewModifier {
+    let onUserScroll: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollPhaseChange { _, newPhase in
+                if newPhase == .interacting {
+                    onUserScroll()
+                }
+            }
+        } else {
+            content.simultaneousGesture(
+                DragGesture(minimumDistance: 6).onChanged { _ in
+                    onUserScroll()
+                }
+            )
+        }
     }
 }

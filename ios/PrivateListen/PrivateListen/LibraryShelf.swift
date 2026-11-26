@@ -271,6 +271,15 @@ enum LibraryShelf {
         return marks
     }
 
+    static func appendedStatusChip(existingCount: Int, statusLabel: String?) -> String? {
+        guard existingCount < rowStatusChipCap,
+              let label = statusLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !label.isEmpty else {
+            return nil
+        }
+        return label
+    }
+
     private static func matches(_ row: Row, query: String) -> Bool {
         if query.isEmpty { return true }
         if row.title.localizedCaseInsensitiveContains(query) { return true }
