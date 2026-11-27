@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 import tempfile
@@ -8,12 +9,133 @@ from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from studio_engine import (select_preview_segments, StudioEngine, Cancelled, asr_pieces, select_references, fingerprint, raw_reference_pieces, classify_failure, StudioError, user_facing_message, clean_tts_text, speakable_tts, SILENCE_FRAMES, SILENCE_RATE)
+from studio_document import check_source_coverage
 from diarization_cache import assign_studio_voices, VOICE_ORDER
 from studio_preview import preview_limit
 from podcast_cn import DeepSeekConfigurationError, PodcastPipelineError
 from tts_backends import TTSBackendError
 from podcast_captions import CaptionPiece
 from diarization_core import SpeakerAssignment, DiarizationTurn
+
+
+class SourceLockBackfillTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.engine = StudioEngine(root / 'original-job-id')
+        self.selector = {'kind': 'web', 'value': 'https://example.com/audio.mp3',
+                         'title': '原始标题', 'extra': {'episode': 'E-1110-01'}}
+        self.identity_path = self.engine.job / 'source-identity.json'
+        self.identity_path.write_text(json.dumps(self.selector))
+        self.document = {'segments': [
+            {'id': 's1', 'start_ms': 0, 'end_ms': 500, 'chinese': '译文'},
+            {'id': 'ad', 'start_ms': 500, 'end_ms': 1000, 'is_ad': True, 'ambiguous': True},
+        ]}
+        self.document_path = self.engine.job / 'document.json'
+        self.document_path.write_text(json.dumps(self.document))
+        self.original = root / 'restored.wav'
+        with wave.open(str(self.original), 'wb') as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(8000)
+            out.writeframes(b'\x01\x00' * 8000)
+
+    def backfill(self):
+        return self.engine.backfill_source_lock(self.selector, self.original,
+                                                expected_bytes=self.original.stat().st_size)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_backfill_matches_regular_wave_lock_and_is_idempotent(self):
+        original_wav = self.original
+        self.original = original_wav.with_suffix('.mp3')
+        self.engine.ffmpeg('-i', original_wav, self.original)
+        expected_engine = StudioEngine(self.original.parent / 'fresh-job')
+        expected_engine.temp.mkdir()
+        normalized = expected_engine.acquire({'source': {'kind': 'local', 'value': str(self.original)}})
+        expected = expected_engine.locked_source(self.selector, normalized)
+        self.assertEqual(expected['sha256'], hashlib.sha256(normalized.read_bytes()).hexdigest())
+        self.assertNotEqual(expected['bytes'], self.original.stat().st_size)
+        self.document['segments'][-1]['end_ms'] = expected['duration_ms']
+        self.document_path.write_text(json.dumps(self.document))
+        document_before = self.document_path.read_bytes()
+        original_before = self.original.read_bytes()
+
+        self.assertEqual(self.backfill(), expected)
+        self.assertEqual(self.engine.locked_source(self.selector), expected)
+        self.assertEqual(json.loads(self.identity_path.read_bytes()), expected)
+        self.assertEqual(check_source_coverage(self.document, expected), [])
+        self.assertEqual(self.document_path.read_bytes(), document_before)
+        self.assertEqual(self.original.read_bytes(), original_before)
+        self.assertFalse((self.engine.job / 'render-identity.json').exists())
+        self.assertFalse((self.engine.job / 'output.mp3').exists())
+        self.assertFalse(self.engine.temp.exists())
+        with patch('studio_engine._save_bytes') as write:
+            self.assertEqual(self.backfill(), expected)
+            write.assert_not_called()
+        with patch.object(self.engine, 'acquire') as acquire, patch.object(self.engine, 'render') as render:
+            self.engine.run({'source': self.selector}, 'render', publish=False)
+            acquire.assert_not_called()
+            self.assertEqual(render.call_args.args[1], self.document)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_backfill_replaces_entirely_invalid_lock_fields(self):
+        self.identity_path.write_text(json.dumps({
+            **self.selector, 'sha256': 'invalid', 'bytes': None, 'duration_ms': False,
+        }))
+        identity = self.backfill()
+        self.assertEqual(check_source_coverage(self.document, identity), [])
+        self.assertEqual(self.engine.locked_source(self.selector), identity)
+
+    def test_backfill_checks_original_bytes_before_converting(self):
+        before = self.identity_path.read_bytes()
+        with patch.object(self.engine, 'ffmpeg') as convert:
+            for size in (self.original.stat().st_size + 1, True, float(self.original.stat().st_size)):
+                with self.subTest(size=size), self.assertRaisesRegex(ValueError, '字节数'):
+                    self.engine.backfill_source_lock(self.selector, self.original, expected_bytes=size)
+            convert.assert_not_called()
+        self.assertEqual(self.identity_path.read_bytes(), before)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_backfill_refuses_audio_shorter_than_ad_segment(self):
+        self.document['segments'][-1]['end_ms'] = 1001
+        self.document_path.write_text(json.dumps(self.document))
+        before = self.identity_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, '段落超出'):
+            self.backfill()
+        self.assertEqual(self.identity_path.read_bytes(), before)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'ffmpeg required')
+    def test_backfill_refuses_different_complete_lock_and_valid_partial_lock(self):
+        for fields in ({'sha256': 'a' * 64, 'bytes': 100, 'duration_ms': 1000},
+                       {'duration_ms': 1000}, {'bytes': 100}, {'sha256': 'a' * 64}):
+            with self.subTest(fields=fields):
+                self.identity_path.write_text(json.dumps({**self.selector, **fields}))
+                before = self.identity_path.read_bytes()
+                with self.assertRaisesRegex(ValueError, '来源已经改变'):
+                    self.backfill()
+                self.assertEqual(self.identity_path.read_bytes(), before)
+
+    def test_backfill_requires_existing_identity_and_matching_selector(self):
+        before = self.identity_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, '来源已经改变'):
+            self.engine.backfill_source_lock({**self.selector, 'value': 'https://example.com/other.mp3'},
+                                             self.original, expected_bytes=self.original.stat().st_size)
+        self.assertEqual(self.identity_path.read_bytes(), before)
+        for raw in (b'[]', b'{"kind":"web","kind":"local"}'):
+            self.identity_path.write_bytes(raw)
+            with self.assertRaisesRegex(ValueError, '已有来源身份无法核验'):
+                self.backfill()
+            self.assertEqual(self.identity_path.read_bytes(), raw)
+        self.identity_path.unlink()
+        with self.assertRaisesRegex(ValueError, '缺少已有来源身份'):
+            self.backfill()
+        self.assertFalse(self.identity_path.exists())
+
+    def test_ordinary_locked_source_still_refuses_legacy_identity_with_wav(self):
+        before = self.identity_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, '旧任务缺少音频锁'):
+            self.engine.locked_source(self.selector, self.original)
+        self.assertEqual(self.identity_path.read_bytes(), before)
+
 
 class StudioTests(unittest.TestCase):
     @staticmethod

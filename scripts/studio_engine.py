@@ -53,7 +53,7 @@ from studio_edge_input import (EDGE_INPUT_VERSION, EDGE_SILENCE, SILENCE_FRAMES,
 from studio_recovery import (
     StudioRecoveryError, TranslationJournal, _read_regular_bytes, _save_bytes, _sync_dir,
     decode_json_object, load_source,
-    podcast_job_lock, save_source,
+    podcast_job_lock, save_source, studio_root_lock,
 )
 from studio_speakers import (SpeakerGateError, expected_speakers, requires_voice_mapping, use_male_slots,
                              validate_speaker_ids, validate_speaker_voices)
@@ -493,12 +493,19 @@ class StudioEngine:
         else:
             raise StudioInputError('不支持的来源类型')
         wav = self.temp / 'source.wav'
-        self.ffmpeg('-i', media, '-vn', '-ac', 1, '-ar', 16000, '-c:a', 'pcm_s16le', wav)
+        self._normalize_source_audio(media, wav)
         return wav
+
+    def _normalize_source_audio(self, media, wav):
+        self.ffmpeg('-i', media, '-vn', '-ac', 1, '-ar', 16000, '-c:a', 'pcm_s16le', wav)
 
     def duration_ms(self, wav):
         with wave.open(str(wav)) as audio:
             return round(audio.getnframes() / audio.getframerate() * 1000)
+
+    def _source_media_fields(self, wav):
+        return {'sha256': sha256_file(wav), 'bytes': wav.stat().st_size,
+                'duration_ms': self.duration_ms(wav)}
 
     def locked_source(self, selector, wav=None):
         path = self.job / 'source-identity.json'
@@ -518,13 +525,61 @@ class StudioEngine:
             raise StudioInputError('来源已经改变，请为新来源创建新任务')
         if wav is None:
             return prior
-        identity = {**selector, 'sha256': sha256_file(wav), 'bytes': wav.stat().st_size,
-                    'duration_ms': self.duration_ms(wav)}
+        identity = {**selector, **self._source_media_fields(wav)}
         if prior is not None and prior != identity:
             raise StudioInputError('来源已经改变，或旧任务缺少音频锁，请创建新任务')
         if prior is None:
             atomic_json(path, identity)
         return identity
+
+    def backfill_source_lock(self, selector, original_media, *, expected_bytes: int):
+        """Verify a restored original and lock its normalized WAV for an existing audio job."""
+        if type(expected_bytes) is not int or expected_bytes <= 0:
+            raise StudioInputError('原始媒体预期字节数必须为正整数')
+        if (not isinstance(selector, dict) or selector.get('kind') not in ('web', 'youtube', 'local')
+                or not isinstance(selector.get('value'), str) or not selector['value']):
+            raise StudioInputError('已有音频来源无法核验')
+        with studio_root_lock(self.job.parent, create=False), podcast_job_lock(self.job):
+            prior = self.locked_source(selector)
+            if prior is None:
+                raise StudioInputError('缺少已有来源身份，无法补锁')
+            valid_fields = (
+                isinstance(prior.get('sha256'), str) and bool(re.fullmatch(r'[0-9a-f]{64}', prior['sha256'])),
+                type(prior.get('bytes')) is int and prior['bytes'] > 0,
+                type(prior.get('duration_ms')) is int and prior['duration_ms'] > 0,
+            )
+            lock_error = '来源已经改变，或旧任务缺少音频锁，请创建新任务'
+            complete_lock = all(valid_fields)
+            if any(valid_fields) and not complete_lock:
+                raise StudioInputError(lock_error)
+
+            media = Path(original_media).expanduser().resolve(strict=True)
+            original_stat = media.stat()
+            if not stat.S_ISREG(original_stat.st_mode) or original_stat.st_size != expected_bytes:
+                raise StudioInputError('恢复的原始媒体字节数与预期不符')
+            if selector['kind'] == 'local' and selector.get('input_sha256') != sha256_file(media):
+                raise StudioInputError(lock_error)
+            with tempfile.TemporaryDirectory() as root:
+                wav = Path(root) / 'source.wav'
+                self._normalize_source_audio(media, wav)
+                identity = {**prior, **self._source_media_fields(wav)}
+            final_stat = media.stat()
+            if (not os.path.samestat(original_stat, final_stat)
+                    or final_stat.st_size != original_stat.st_size
+                    or final_stat.st_mtime_ns != original_stat.st_mtime_ns
+                    or final_stat.st_ctime_ns != original_stat.st_ctime_ns):
+                raise StudioInputError('恢复的原始媒体在核验期间发生变化')
+            if complete_lock and prior != identity:
+                raise StudioInputError(lock_error)
+
+            document = decode_json_object(_read_regular_bytes(self.job / 'document.json'))
+            if check_source_coverage(document, identity):
+                raise StudioInputError('译稿有段落超出恢复音源时长，请核对来源与时轴')
+            if complete_lock:
+                return prior
+            path = self.job / 'source-identity.json'
+            _save_bytes(path, json.dumps(identity, ensure_ascii=False, indent=2).encode('utf-8'))
+            return identity
 
     def validate_coverage(self, document, identity):
         try:
