@@ -3,7 +3,7 @@ import Foundation
 @main
 struct LibrarySnapshotProbe {
     @MainActor
-    static func main() {
+    static func main() async {
         do {
             var args = Array(CommandLine.arguments.dropFirst())
             if args.count == 2 && args[0] == "--publisher-only" {
@@ -18,7 +18,8 @@ struct LibrarySnapshotProbe {
                 try LibrarySnapshotChecks.migrateLegacyDeviceShape(fixture: URL(fileURLWithPath: args[1], isDirectory: true))
                 return
             }
-            try LibrarySnapshotChecks.run()
+            try await LibrarySnapshotChecks.runReadAvailability()
+            try await LibrarySnapshotChecks.run()
             if let idx = args.firstIndex(of: "--adapter-documents"), args.indices.contains(idx + 1) {
                 try LibrarySnapshotChecks.consumeAdapterDocuments(URL(fileURLWithPath: args[idx + 1], isDirectory: true))
                 args.removeSubrange(idx...idx + 1)

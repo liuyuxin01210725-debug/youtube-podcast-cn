@@ -10,7 +10,7 @@ enum LibrarySnapshotChecks {
         let description: String
     }
 
-    static func runReadAvailability() throws {
+    static func runReadAvailability() async throws {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let listing = libraryListing(scratch)
@@ -57,11 +57,20 @@ enum LibrarySnapshotChecks {
         let point = folder.appendingPathComponent("point-listen.json")
         try fm.removeItem(at: cover)
         try Data("wrong point bytes".utf8).write(to: point)
-        let optionalDamage = LibraryStore.loadEpisodes(from: root, localCopy: true)
-        let noOptionalAssets = optionalDamage.episodes.first { $0.id == target.id }
-        try expect(optionalDamage.accepted && optionalDamage.episodes.count == 2 &&
-                   noOptionalAssets?.isPlayableNow == true && noOptionalAssets?.artworkURL == nil &&
-                   noOptionalAssets?.publishedAsset("point-listen.json") == nil,
+        let lightweightOptional = LibraryStore.loadEpisodes(from: root, localCopy: true)
+        let lightweightTarget = lightweightOptional.episodes.first { $0.id == target.id }
+        try expect(lightweightOptional.accepted && lightweightOptional.episodes.count == 2 &&
+                   lightweightTarget?.isPlayableNow == true && lightweightTarget?.artworkURL == nil,
+                   "missing cover takes effect immediately in lightweight load while episode stays playable")
+        store.reload()
+        await store.waitForVerification()
+        let noOptionalAssets = store.episodes.first { $0.id == target.id }
+        let fullOptionalDamage = LibraryStore.loadEpisodes(from: root, localCopy: true, verification: .full)
+        let fullNoOptionalAssets = fullOptionalDamage.episodes.first { $0.id == target.id }
+        try expect(noOptionalAssets?.isPlayableNow == true && noOptionalAssets?.artworkURL == nil &&
+                   noOptionalAssets?.publishedAsset("point-listen.json") == nil &&
+                   fullOptionalDamage.accepted && fullNoOptionalAssets?.isPlayableNow == true &&
+                   fullNoOptionalAssets?.artworkURL == nil && fullNoOptionalAssets?.publishedAsset("point-listen.json") == nil,
                    "missing cover and wrong-hash point index leave the episode playable")
         try refuses { try store.commitLocalSnapshot(healthyBytes, expecting: digest) }
         try fixture.files["cover.jpg"]!.write(to: cover)
@@ -77,6 +86,13 @@ enum LibrarySnapshotChecks {
             try fm.removeItem(at: asset)
             if let brokenBytes { try brokenBytes.write(to: asset) }
             store.reload()
+            if brokenBytes == nil {
+                let immediateUnavailable = store.episodes.first { $0.id == target.id }
+                try expect(store.episodes.count == 2 && store.episodes.filter(\.isPlayableNow).count == 1
+                           && immediateUnavailable?.unavailableReason == reason && immediateUnavailable?.audioURL == target.audioURL,
+                           "missing critical asset is synchronously unavailable on reload")
+            }
+            await store.waitForVerification()
             let unplayable = store.episodes.first { $0.id == target.id }
             try expect(store.episodes.count == 2 && store.episodes.filter(\.isPlayableNow).count == 1
                        && unplayable?.unavailableReason == reason && unplayable?.audioURL == target.audioURL,
@@ -124,7 +140,7 @@ enum LibrarySnapshotChecks {
         }
     }
 
-    static func run() throws {
+    static func run() async throws {
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let root = scratch.appendingPathComponent("中文播客私人库", isDirectory: true)
@@ -289,6 +305,7 @@ enum LibrarySnapshotChecks {
         try refuses { try store.commitLocalSnapshot(proposed, expecting: nil) }
         try expect(Data(contentsOf: listing) == Data("{\"episodes\":false}".utf8), "CAS fails closed on a malformed prior index")
         try runIngestContract()
+        try await runVerificationAndStreamingChecks()
     }
 
     static func runIngestContract() throws {
@@ -1105,6 +1122,188 @@ enum LibrarySnapshotChecks {
         let data = try JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
         try data.write(to: root.appendingPathComponent(PushStaging.manifestName))
         try Data().write(to: root.appendingPathComponent(PushStaging.readyName))
+    }
+
+    static func runVerificationAndStreamingChecks() async throws {
+        let fm = FileManager.default
+        let scratch = fm.temporaryDirectory.appendingPathComponent("private-listen-verify-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: scratch) }
+
+        // 1. Cold start / reload must not hash the library on the main thread.
+        do {
+            let docs = scratch.appendingPathComponent("cold-start", isDirectory: true)
+            try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+            let (seedStore, seedDefaults, seedSuite) = try isolatedStore(docs)
+            defer { seedDefaults.removePersistentDomain(forName: seedSuite) }
+            let packages = try (1...3).map { index in
+                try stagingPackage(id: "ep-cold-\(index)", title: "Cold \(index)", audio: "cold-audio-\(index)", extras: "cold-\(index)")
+            }
+            try writeStaging(documents: docs, txId: "tx-cold", packages: packages)
+            _ = try seedStore.consumePushStaging()
+
+            let suite = "PrivateListen.cold.\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else { throw Failure(description: "cold defaults") }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let coldStore = LibraryStore(defaults: defaults, loadLibraryOnInit: true, documentsDirectory: docs)
+            try expect(coldStore.hasLoadedOnce && coldStore.episodes.count == 3 && coldStore.episodes.allSatisfy(\.isPlayableNow),
+                       "cold start synchronously presents all playable episodes")
+            try expect(coldStore.verifierForTesting.hashComputeCount == 0 && !coldStore.verifierForTesting.hashedOnMainThread,
+                       "cold start performs zero SHA hashing on main thread")
+            await coldStore.waitForVerification()
+            try expect(coldStore.verifierForTesting.hashComputeCount > 0 && !coldStore.verifierForTesting.hashedOnMainThread,
+                       "background verification hashes off the main thread")
+
+            // 4. Repeated reload() does not re-hash the full library.
+            let countBefore = coldStore.verifierForTesting.hashComputeCount
+            for _ in 0..<3 {
+                coldStore.reload()
+                await coldStore.waitForVerification()
+            }
+            try expect(coldStore.verifierForTesting.hashComputeCount == countBefore,
+                       "repeated reload reuses positive stamp cache without re-hashing")
+        }
+
+        // 2. Same-length tampered bytes detected, negative cache prevents whitewash, and repair recovers.
+        do {
+            let docs = scratch.appendingPathComponent("same-len-tamper", isDirectory: true)
+            try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+            let (store, defaults, suite) = try isolatedStore(docs)
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let originalAudio = "1234567890"
+            let tamperedAudio = Data("X234567890".utf8)
+            let pkg = try stagingPackage(id: "ep-tamper", title: "Tamper", audio: originalAudio, extras: "t")
+            try writeStaging(documents: docs, txId: "tx-tamper", packages: [pkg])
+            _ = try store.consumePushStaging()
+            guard let target = store.episodes.first else { throw Failure(description: "tamper seed") }
+
+            let freshSuite = "PrivateListen.tamper.\(UUID().uuidString)"
+            guard let freshDefaults = UserDefaults(suiteName: freshSuite) else { throw Failure(description: "tamper defaults") }
+            defer { freshDefaults.removePersistentDomain(forName: freshSuite) }
+            try tamperedAudio.write(to: target.audioURL, options: .atomic)
+            let reader = LibraryStore(defaults: freshDefaults, loadLibraryOnInit: false, documentsDirectory: docs)
+            reader.reload()
+            try expect(reader.episodes.count == 1 && reader.verifierForTesting.hashComputeCount == 0,
+                       "reload returns synchronously before hashing same-length tampered audio")
+            await reader.waitForVerification()
+            try expect(reader.episodes.first?.unavailableReason == .audio && reader.episodes.first?.isPlayableNow == false,
+                       "background verification catches same-length wrong-byte audio")
+
+            reader.reload()
+            try expect(reader.episodes.first?.unavailableReason == .audio && reader.episodes.first?.isPlayableNow == false,
+                       "negative stamp cache prevents subsequent lightweight reload from whitewashing bad episode")
+
+            try Data(originalAudio.utf8).write(to: target.audioURL, options: .atomic)
+            try fm.setAttributes([.modificationDate: Date().addingTimeInterval(2)], ofItemAtPath: target.audioURL.path)
+            reader.reload()
+            await reader.waitForVerification()
+            try expect(reader.episodes.first?.unavailableReason == nil && reader.episodes.first?.isPlayableNow == true,
+                       "repairing the audio invalidates negative stamp cache and restores playback")
+        }
+
+        // 3. On-demand verifyEpisodeNow intercepts bad audio and cancelled validation never writes .failed.
+        do {
+            let docs = scratch.appendingPathComponent("on-demand", isDirectory: true)
+            try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+            let (seedStore, seedDefaults, seedSuite) = try isolatedStore(docs)
+            defer { seedDefaults.removePersistentDomain(forName: seedSuite) }
+            let pkg = try stagingPackage(id: "ep-ondemand", title: "On Demand", audio: "abcdefghij", extras: "od")
+            try writeStaging(documents: docs, txId: "tx-od", packages: [pkg])
+            _ = try seedStore.consumePushStaging()
+            guard let seeded = seedStore.episodes.first else { throw Failure(description: "on-demand seed") }
+            try Data("Zbcdefghij".utf8).write(to: seeded.audioURL, options: .atomic)
+
+            let suite = "PrivateListen.ondemand.\(UUID().uuidString)"
+            guard let defaults = UserDefaults(suiteName: suite) else { throw Failure(description: "ondemand defaults") }
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let store = LibraryStore(defaults: defaults, loadLibraryOnInit: true, documentsDirectory: docs)
+            guard let target = store.episodes.first else { throw Failure(description: "on-demand target") }
+            let checked = await store.verifyEpisodeNow(target)
+            try expect(checked.unavailableReason == .audio
+                       && store.episodes.first?.unavailableReason == .audio
+                       && !store.remember(episode: target, seconds: 12, duration: 60, finished: false)
+                       && defaults.data(forKey: "PrivateListen.progress") == nil,
+                       "verifyEpisodeNow blocks tampered audio, updates shelf, and rejects dirty progress")
+
+            let validFile = scratch.appendingPathComponent("cancel-valid.bin")
+            let validData = Data("cancel-check-bytes".utf8)
+            try validData.write(to: validFile)
+            let validDigest = LibrarySnapshot.digest(validData)
+            let cancelVerifier = RevisionAssetVerifier()
+            let cancelledTask = Task {
+                try cancelVerifier.validate(validFile, digest: validDigest, checkCancellation: true)
+            }
+            cancelledTask.cancel()
+            do {
+                try await cancelledTask.value
+            } catch is CancellationError {
+                // Expected cancellation path.
+            }
+            try expect(cancelVerifier.lightweightStatus(validFile, digest: validDigest) != .failed,
+                       "cancelled validate never writes .failed into cache")
+            try cancelVerifier.validate(validFile, digest: validDigest, checkCancellation: false)
+        }
+
+        // 5. >1MiB multi-chunk (2.5MiB) streaming ingest & strict commit contract.
+        do {
+            let docs = scratch.appendingPathComponent("streaming-2m5", isDirectory: true)
+            try fm.createDirectory(at: docs, withIntermediateDirectories: true)
+            let (store, defaults, suite) = try isolatedStore(docs)
+            defer { defaults.removePersistentDomain(forName: suite) }
+            let size = 2 * 1_048_576 + 524_288 // 2.5 MiB
+            var bigBytes = Data((0..<size).map { UInt8($0 & 0xff) })
+            let bigString = String(decoding: bigBytes.map { ($0 % 26) + 65 }, as: UTF8.self)
+            bigBytes = Data(bigString.utf8)
+            let bigPkg = try stagingPackage(id: "ep-big", title: "Big Audio", audio: bigString, extras: "big")
+            try writeStaging(documents: docs, txId: "tx-big-ok", packages: [bigPkg])
+            let receipts = try store.consumePushStaging()
+            try expect(receipts.count == 1 && store.episodes.count == 1 && store.episodes[0].isPlayableNow,
+                       "2.5MiB multi-chunk staging package ingests cleanly")
+            await store.waitForVerification()
+            try expect(store.isEpisodeVerified(store.episodes[0]),
+                       "2.5MiB episode passes multi-chunk background SHA")
+
+            // Flip 1 byte in the 2nd MiB (same length) -> verifyPackages refuses and keeps library.json intact.
+            let listing = libraryListing(docs)
+            let beforeCatalog = try Data(contentsOf: listing)
+            let badPkg = try stagingPackage(id: "ep-big-bad", title: "Big Bad", audio: bigString, extras: "bad")
+            try writeStaging(documents: docs, txId: "tx-big-bad", packages: [badPkg])
+            let stagedAudio = docs.appendingPathComponent(".push-staging/tx-big-bad/objects/\(badPkg.revision)/output.mp3")
+            var tamperedBig = bigBytes
+            tamperedBig[1_500_000] ^= 0x01
+            try tamperedBig.write(to: stagedAudio)
+            try ingestRefuses(store, "2.5MiB 2nd-MiB single-byte tamper rejected by streaming verifyPackages")
+            try expect(Data(contentsOf: listing) == beforeCatalog,
+                       "rejected 2.5MiB staging leaves library.json unchanged")
+
+            // Tamper existing installed object at 2nd MiB -> installObject and commitLocalSnapshot both refuse.
+            try clearStaging(docs)
+            let existingPkg = try stagingPackage(id: "ep-big-existing", title: "Big Existing", audio: bigString, extras: "ex")
+            let existingDir = docs.appendingPathComponent("中文播客私人库/objects/\(existingPkg.revision)", isDirectory: true)
+            try fm.createDirectory(at: existingDir, withIntermediateDirectories: true)
+            for (name, data) in existingPkg.files {
+                try data.write(to: existingDir.appendingPathComponent(name))
+            }
+            try tamperedBig.write(to: existingDir.appendingPathComponent("output.mp3"))
+            try writeStaging(documents: docs, txId: "tx-big-existing", packages: [existingPkg])
+            try ingestRefuses(store, "2.5MiB existing object tampered at 2nd MiB rejected by installObject")
+
+            let snapshot = try LibrarySnapshot(beforeCatalog)
+            var badRows = snapshot.rows
+            var badRow = badRows[0]
+            var rev = badRow["media_revision"] as! [String: Any]
+            rev["sha256"] = existingPkg.revision
+            rev["path"] = "objects/\(existingPkg.revision)"
+            rev["previous_path"] = ""
+            rev["files"] = existingPkg.files.mapValues(LibrarySnapshot.digest)
+            badRow["id"] = "ep-big-existing"
+            badRow["media_revision"] = rev
+            badRows.append(badRow)
+            let proposed = try json(["episodes": badRows])
+            try refuses { try store.commitLocalSnapshot(proposed, expecting: LibrarySnapshot.digest(beforeCatalog)) }
+            try expect(Data(contentsOf: listing) == beforeCatalog,
+                       "strict commitLocalSnapshot refuses 2.5MiB object tampered in 2nd MiB")
+        }
     }
 
     private static func json(_ object: [String: Any]) throws -> Data {

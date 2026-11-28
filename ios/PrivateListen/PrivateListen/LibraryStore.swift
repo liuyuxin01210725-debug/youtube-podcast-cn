@@ -56,9 +56,79 @@ final class LibraryStore: ObservableObject {
     private let revisionVerifier = RevisionAssetVerifier()
     private var lastSnapshot: (root: URL, episodes: [Episode])?
     private var visibleByID: [String: Episode] = [:]
+    private(set) var hasLoadedOnce = false
+
+    private struct RevisionSpec: Sendable {
+        let root: URL
+        let folder: URL
+        let localCopy: Bool
+        let revision: MediaRevision
+        let declaredArtwork: String?
+    }
+
+    private struct VerificationSignature: Equatable {
+        let root: URL
+        let fingerprintsByMediaKey: [String: [String: RevisionAssetVerifier.FileFingerprint?]]
+
+        func covers(_ other: VerificationSignature) -> Bool {
+            guard root == other.root else { return false }
+            return other.fingerprintsByMediaKey.allSatisfy { key, fingerprints in
+                fingerprintsByMediaKey[key] == fingerprints
+            }
+        }
+    }
+
+    private struct VerificationOutcome: Sendable {
+        let episodeID: String
+        let mediaKey: String
+        let root: URL
+        let unavailableReason: Episode.UnavailableReason?
+        let revisionFiles: Set<String>
+        let artworkFile: String?
+    }
+
+    private final class VerificationFlight: @unchecked Sendable {
+        let id = UUID()
+        let task: Task<Episode?, Never>
+        private let lock = NSLock()
+        private var activeTokens: Set<UUID> = []
+
+        init(task: Task<Episode?, Never>) {
+            self.task = task
+        }
+
+        func acquireToken() -> UUID {
+            let token = UUID()
+            lock.lock()
+            activeTokens.insert(token)
+            lock.unlock()
+            return token
+        }
+
+        func releaseToken(_ token: UUID, cancelIfEmpty: Bool) {
+            lock.lock()
+            let removed = activeTokens.remove(token) != nil
+            let shouldCancel = removed && cancelIfEmpty && activeTokens.isEmpty
+            lock.unlock()
+            if shouldCancel {
+                task.cancel()
+            }
+        }
+    }
+
+    private var revisionSpecsByKey: [String: RevisionSpec] = [:]
+    private var verificationGeneration: UInt64 = 0
+    private var verificationTask: Task<Void, Never>?
+    private var activeVerificationSignature: VerificationSignature?
+    private var inFlightEpisodeVerifications: [String: VerificationFlight] = [:]
+
+    #if DEBUG || os(macOS)
+    var verifierForTesting: RevisionAssetVerifier { revisionVerifier }
+    #endif
 
     private let defaults: UserDefaults
     private let documentsDirectory: URL?
+    private let allowHostCloudDiscovery: Bool
     /// In-process ingest lock. Must not live in UserDefaults: a crash would stick it.
     private var ingestBusy = false
 
@@ -66,6 +136,8 @@ final class LibraryStore: ObservableObject {
          documentsDirectory: URL? = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first) {
         self.defaults = defaults
         self.documentsDirectory = documentsDirectory
+        let defaultDocs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        self.allowHostCloudDiscovery = documentsDirectory?.standardizedFileURL == defaultDocs?.standardizedFileURL
         if let data = defaults.data(forKey: progressKey),
            let stored = try? JSONDecoder().decode([String: ListenMark].self, from: data) {
             progress = stored
@@ -487,22 +559,327 @@ final class LibraryStore: ObservableObject {
         hasCloudFolder = folderURL != nil
         hasFolder = root != nil
         guard let root else {
+            cancelBackgroundVerification()
+            revisionSpecsByKey = [:]
             lastSnapshot = nil
             visibleByID = [:]
             episodes = []
             waitingOnCloud = false
+            hasLoadedOnce = true
             return
         }
 
-        let loaded = Self.loadEpisodes(from: root, localCopy: folderURL == nil, verifier: revisionVerifier)
-        if loaded.accepted {
-            lastSnapshot = (root, loaded.episodes)
+        let loaded = Self.loadEpisodesWithSpecs(
+            from: root,
+            localCopy: folderURL == nil,
+            verifier: revisionVerifier,
+            mode: .lightweight
+        )
+        if loaded.result.accepted {
+            lastSnapshot = (root, loaded.result.episodes)
+            revisionSpecsByKey = loaded.specsByKey
+            pruneInFlightVerifications(keepingKeys: Set(loaded.specsByKey.keys))
+        } else if lastSnapshot?.root != root {
+            revisionSpecsByKey = [:]
+            pruneInFlightVerifications(keepingKeys: [])
         }
         let visible = lastSnapshot?.root == root ? lastSnapshot?.episodes ?? [] : []
         visibleByID = Dictionary(uniqueKeysWithValues: visible.map { ($0.id, $0) })
         episodes = visible
-        waitingOnCloud = loaded.waiting || visible.contains { $0.downloading }
+        waitingOnCloud = loaded.result.waiting || visible.contains { $0.downloading }
         adoptLegacyListenMarks(in: visible)
+        hasLoadedOnce = true
+        if lastSnapshot?.root == root {
+            scheduleBackgroundVerification(root: root, episodes: visible)
+        } else {
+            cancelBackgroundVerification()
+        }
+    }
+
+    func waitForVerification() async {
+        while let task = verificationTask {
+            await task.value
+        }
+    }
+
+    func isEpisodeVerified(_ episode: Episode) -> Bool {
+        if episode.unavailableReason != nil || episode.mediaRevision == nil {
+            return true
+        }
+        guard let spec = revisionSpecsByKey[episode.mediaKey] else {
+            return true
+        }
+        for (name, digest) in spec.revision.files {
+            guard let asset = try? LibrarySnapshot.path(name, in: spec.folder) else {
+                return false
+            }
+            switch revisionVerifier.lightweightStatus(asset, digest: digest) {
+            case .verified:
+                continue
+            case .unverifiedCandidate:
+                return false
+            case .failed:
+                if MediaRevision.requiredFiles.contains(name)
+                    || episode.revisionFiles?.contains(name) != false {
+                    return false
+                }
+            }
+        }
+        return true
+    }
+
+    func verifyEpisodeNow(_ episode: Episode) async -> Episode {
+        let current = visibleByID[episode.id] ?? episode
+        guard current.mediaRevision != nil, current.unavailableReason == nil else {
+            return current
+        }
+        if isEpisodeVerified(current) {
+            return current
+        }
+        let key = current.mediaKey
+        guard let spec = revisionSpecsByKey[key] else {
+            return current
+        }
+        if Task.isCancelled {
+            return current
+        }
+        let flight: VerificationFlight
+        if let existing = inFlightEpisodeVerifications[key] {
+            flight = existing
+        } else {
+            let generation = verificationGeneration
+            let verifier = revisionVerifier
+            let episodeID = current.id
+            let driver = Task<Episode?, Never> { [weak self] in
+                let outcome = await Self.runSingleVerification(
+                    episodeID: episodeID,
+                    mediaKey: key,
+                    spec: spec,
+                    verifier: verifier
+                )
+                guard let self else { return nil }
+                guard let outcome else { return nil }
+                return self.applyVerificationOutcome(outcome, expectedGeneration: generation)
+            }
+            let createdFlight = VerificationFlight(task: driver)
+            inFlightEpisodeVerifications[key] = createdFlight
+            flight = createdFlight
+            Task { @MainActor [weak self] in
+                _ = await createdFlight.task.value
+                guard let self else { return }
+                if self.inFlightEpisodeVerifications[key]?.id == createdFlight.id {
+                    self.inFlightEpisodeVerifications.removeValue(forKey: key)
+                }
+            }
+        }
+        let token = flight.acquireToken()
+        let result = await withTaskCancellationHandler {
+            await flight.task.value
+        } onCancel: {
+            flight.releaseToken(token, cancelIfEmpty: true)
+        }
+        flight.releaseToken(token, cancelIfEmpty: false)
+        return result ?? visibleByID[current.id] ?? current
+    }
+
+    private func pruneInFlightVerifications(keepingKeys: Set<String>) {
+        for (key, flight) in inFlightEpisodeVerifications where !keepingKeys.contains(key) {
+            flight.task.cancel()
+            inFlightEpisodeVerifications.removeValue(forKey: key)
+        }
+    }
+
+    private func cancelBackgroundVerification() {
+        verificationTask?.cancel()
+        verificationTask = nil
+        activeVerificationSignature = nil
+        verificationGeneration &+= 1
+    }
+
+    private func scheduleBackgroundVerification(root: URL, episodes: [Episode]) {
+        let pending = episodes.filter { episode in
+            episode.unavailableReason == nil
+                && episode.mediaRevision != nil
+                && revisionSpecsByKey[episode.mediaKey] != nil
+                && !isEpisodeVerified(episode)
+        }
+        guard !pending.isEmpty else {
+            cancelBackgroundVerification()
+            return
+        }
+        let continueIDs = Set(continueEntries(in: episodes).map(\.id))
+        let orderedPending = pending.filter { continueIDs.contains($0.id) }
+            + pending.filter { !continueIDs.contains($0.id) }
+        var fingerprintsByMediaKey: [String: [String: RevisionAssetVerifier.FileFingerprint?]] = [:]
+        for ep in orderedPending {
+            guard let spec = revisionSpecsByKey[ep.mediaKey] else { continue }
+            var fileMap: [String: RevisionAssetVerifier.FileFingerprint?] = [:]
+            for name in spec.revision.files.keys {
+                let asset = try? LibrarySnapshot.path(name, in: spec.folder)
+                fileMap[name] = asset.flatMap { revisionVerifier.fingerprint(of: $0) }
+            }
+            fingerprintsByMediaKey[ep.mediaKey] = fileMap
+        }
+        let signature = VerificationSignature(root: root, fingerprintsByMediaKey: fingerprintsByMediaKey)
+        if verificationTask != nil,
+           let active = activeVerificationSignature,
+           active.covers(signature) {
+            return
+        }
+
+        verificationTask?.cancel()
+        verificationGeneration &+= 1
+        let generation = verificationGeneration
+        activeVerificationSignature = signature
+        let workItems: [(id: String, mediaKey: String, spec: RevisionSpec)] = orderedPending.compactMap { ep in
+            guard let spec = revisionSpecsByKey[ep.mediaKey] else { return nil }
+            return (ep.id, ep.mediaKey, spec)
+        }
+        let verifier = revisionVerifier
+        verificationTask = Task.detached(priority: .utility) { [weak self] in
+            for item in workItems {
+                if Task.isCancelled { break }
+                do {
+                    let outcome = try Self.performVerification(
+                        episodeID: item.id,
+                        mediaKey: item.mediaKey,
+                        spec: item.spec,
+                        verifier: verifier,
+                        checkCancellation: true
+                    )
+                    if Task.isCancelled { break }
+                    await MainActor.run { [weak self] in
+                        guard let self else { return }
+                        _ = self.applyVerificationOutcome(outcome, expectedGeneration: generation)
+                    }
+                } catch is CancellationError {
+                    break
+                } catch {
+                    continue
+                }
+            }
+            await MainActor.run { [weak self] in
+                guard let self, self.verificationGeneration == generation else { return }
+                self.verificationTask = nil
+                self.activeVerificationSignature = nil
+            }
+        }
+    }
+
+    @discardableResult
+    private func applyVerificationOutcome(_ outcome: VerificationOutcome, expectedGeneration: UInt64?) -> Episode? {
+        if let expectedGeneration, expectedGeneration != verificationGeneration {
+            return nil
+        }
+        guard lastSnapshot?.root == outcome.root else { return nil }
+        guard let index = episodes.firstIndex(where: { $0.id == outcome.episodeID && $0.mediaKey == outcome.mediaKey }) else {
+            return nil
+        }
+        let old = episodes[index]
+        let changed = old.unavailableReason != outcome.unavailableReason
+            || old.revisionFiles != outcome.revisionFiles
+            || old.artworkFile != outcome.artworkFile
+        guard changed else { return old }
+
+        var updated = old
+        updated.unavailableReason = outcome.unavailableReason
+        updated.revisionFiles = outcome.revisionFiles
+        updated.artworkFile = outcome.artworkFile
+
+        var nextEpisodes = episodes
+        nextEpisodes[index] = updated
+        episodes = nextEpisodes
+        visibleByID[updated.id] = updated
+        if let snapshot = lastSnapshot, snapshot.root == outcome.root {
+            var snapshotEpisodes = snapshot.episodes
+            if let snapIdx = snapshotEpisodes.firstIndex(where: { $0.id == updated.id && $0.mediaKey == updated.mediaKey }) {
+                snapshotEpisodes[snapIdx] = updated
+                lastSnapshot = (snapshot.root, snapshotEpisodes)
+            }
+        }
+        let hasCloudWaiting = hasCloudFolder && nextEpisodes.contains { $0.unavailableReason != nil }
+        waitingOnCloud = hasCloudWaiting || nextEpisodes.contains { $0.downloading }
+        return updated
+    }
+
+    nonisolated private static func runSingleVerification(
+        episodeID: String,
+        mediaKey: String,
+        spec: RevisionSpec,
+        verifier: RevisionAssetVerifier
+    ) async -> VerificationOutcome? {
+        let detached = Task.detached(priority: .userInitiated) { () -> VerificationOutcome? in
+            do {
+                return try performVerification(
+                    episodeID: episodeID,
+                    mediaKey: mediaKey,
+                    spec: spec,
+                    verifier: verifier,
+                    checkCancellation: true
+                )
+            } catch is CancellationError {
+                return nil
+            } catch {
+                return nil
+            }
+        }
+        return await withTaskCancellationHandler {
+            await detached.value
+        } onCancel: {
+            detached.cancel()
+        }
+    }
+
+    nonisolated private static func performVerification(
+        episodeID: String,
+        mediaKey: String,
+        spec: RevisionSpec,
+        verifier: RevisionAssetVerifier,
+        checkCancellation: Bool
+    ) throws -> VerificationOutcome {
+        var verified = Set<String>()
+        for (name, digest) in spec.revision.files {
+            if checkCancellation { try Task.checkCancellation() }
+            let asset: URL
+            do {
+                asset = try LibrarySnapshot.path(name, in: spec.folder)
+            } catch {
+                continue
+            }
+            if !spec.localCopy && !LocalAudio.isPlayable(asset) {
+                continue
+            }
+            do {
+                try verifier.validate(asset, digest: digest, checkCancellation: checkCancellation)
+                verified.insert(name)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                continue
+            }
+        }
+        let unavailableReason: Episode.UnavailableReason?
+        if !verified.contains("output.mp3") {
+            unavailableReason = .audio
+        } else if !MediaRevision.requiredFiles.isSubset(of: verified) {
+            unavailableReason = .revision
+        } else {
+            unavailableReason = nil
+        }
+        let artworkFile: String?
+        if let declared = spec.declaredArtwork, verified.contains(declared) {
+            artworkFile = declared
+        } else {
+            artworkFile = nil
+        }
+        return VerificationOutcome(
+            episodeID: episodeID,
+            mediaKey: mediaKey,
+            root: spec.root,
+            unavailableReason: unavailableReason,
+            revisionFiles: verified,
+            artworkFile: artworkFile
+        )
     }
 
     /// The Documents catalog switch is serialized with reads and other commits
@@ -534,7 +911,14 @@ final class LibraryStore: ObservableObject {
         let repeated = try current?.canonicalData() == proposed
         let actual = before.map(LibrarySnapshot.digest)
         guard repeated || actual == expectedSHA256 else { throw LibrarySnapshotError.staleCatalog }
-        let resolved = try Self.resolve(snapshot, from: root, localCopy: true, verifier: RevisionAssetVerifier(), strict: true)
+        let resolved = try Self.resolve(
+            snapshot,
+            from: root,
+            localCopy: true,
+            verifier: RevisionAssetVerifier(),
+            strict: true,
+            mode: .full
+        ).episodes
         for episode in resolved {
             if let reference = episode.pendingTranscript {
                 _ = try PendingTranscript.read(id: episode.id, audioURL: episode.audioURL, reference: reference).get()
@@ -591,7 +975,7 @@ final class LibraryStore: ObservableObject {
                 message = "iCloud 资料库的授权失效了，请点「选择资料库」重新选中「中文播客私人库」。"
             }
         }
-        if let known = knownLibraryURL() {
+        if allowHostCloudDiscovery, let known = knownLibraryURL() {
             hold(known)
             return
         }
@@ -642,34 +1026,47 @@ final class LibraryStore: ObservableObject {
         scopeHeld = false
     }
 
-    static func loadEpisodes(from root: URL, localCopy: Bool) -> LoadedLibrary {
-        loadEpisodes(from: root, localCopy: localCopy, verifier: RevisionAssetVerifier())
+    static func loadEpisodes(from root: URL, localCopy: Bool, verification: AssetVerificationMode = .lightweight) -> LoadedLibrary {
+        loadEpisodesWithSpecs(from: root, localCopy: localCopy, verifier: RevisionAssetVerifier(), mode: verification).result
     }
 
-    private static func loadEpisodes(from root: URL, localCopy: Bool, verifier: RevisionAssetVerifier) -> LoadedLibrary {
+    private static func loadEpisodesWithSpecs(
+        from root: URL,
+        localCopy: Bool,
+        verifier: RevisionAssetVerifier,
+        mode: AssetVerificationMode
+    ) -> (result: LoadedLibrary, specsByKey: [String: RevisionSpec]) {
         do {
             let listing = try LibrarySnapshot.path("library.json", in: root)
             let fileManager = FileManager.default
             if !localCopy {
                 try? fileManager.startDownloadingUbiquitousItem(at: listing)
-                guard !CloudFile.isWaiting(listing) else { return LoadedLibrary(waiting: true) }
+                guard !CloudFile.isWaiting(listing) else { return (LoadedLibrary(waiting: true), [:]) }
             }
             let bytes = !localCopy && fileManager.isUbiquitousItem(at: listing)
                 ? readData(listing) : try? Data(contentsOf: listing)
-            guard let data = bytes else { return LoadedLibrary(waiting: !localCopy) }
+            guard let data = bytes else { return (LoadedLibrary(waiting: !localCopy), [:]) }
             let snapshot = try LibrarySnapshot(data, allowInvalidRevisions: true)
-            let episodes = try resolve(snapshot, from: root, localCopy: localCopy, verifier: verifier, strict: false)
-            let waiting = !localCopy && episodes.contains { $0.unavailableReason != nil }
-            return LoadedLibrary(episodes: episodes, waiting: waiting, accepted: true)
+            let resolved = try resolve(snapshot, from: root, localCopy: localCopy, verifier: verifier, strict: false, mode: mode)
+            let waiting = !localCopy && resolved.episodes.contains { $0.unavailableReason != nil }
+            return (LoadedLibrary(episodes: resolved.episodes, waiting: waiting, accepted: true), resolved.specsByKey)
         } catch {
-            return LoadedLibrary(waiting: !localCopy)
+            return (LoadedLibrary(waiting: !localCopy), [:])
         }
     }
 
-    private static func resolve(_ snapshot: LibrarySnapshot, from root: URL, localCopy: Bool,
-                                verifier: RevisionAssetVerifier, strict: Bool) throws -> [Episode] {
+    private static func resolve(
+        _ snapshot: LibrarySnapshot,
+        from root: URL,
+        localCopy: Bool,
+        verifier: RevisionAssetVerifier,
+        strict: Bool,
+        mode: AssetVerificationMode
+    ) throws -> (episodes: [Episode], specsByKey: [String: RevisionSpec]) {
+        let effectiveMode: AssetVerificationMode = strict ? .full : mode
         let fileManager = FileManager.default
-        return try snapshot.records.map { record -> Episode in
+        var specsByKey: [String: RevisionSpec] = [:]
+        let episodes = try snapshot.records.map { record -> Episode in
             guard let id = record.catalogID else { throw LibrarySnapshotError.invalidCatalog }
             let title = record.title?.trimmingCharacters(in: .whitespacesAndNewlines)
             let revision = record.mediaRevision
@@ -677,14 +1074,21 @@ final class LibraryStore: ObservableObject {
             var unavailableReason: Episode.UnavailableReason?
             var downloading = false
             var revisionFiles: Set<String>?
-            var artworkFile = EpisodeArtwork.file(record.artwork, kind: record.artworkKind)
+            let declaredArtwork = EpisodeArtwork.file(record.artwork, kind: record.artworkKind)
+            var artworkFile = declaredArtwork
+            var resolvedFolder: URL?
             do {
                 guard !snapshot.invalidRevisionIDs.contains(id) else { throw LibrarySnapshotError.invalidCatalog }
                 let folder = try LibrarySnapshot.path(revision?.path ?? "episodes/\(id)", in: root, directory: true)
+                resolvedFolder = folder
                 audioURL = try LibrarySnapshot.path("output.mp3", in: folder)
                 if let revision {
                     let verified = try revision.verifiedFiles(
-                        in: folder, downloading: !localCopy, verifier: verifier, allowMissing: !strict
+                        in: folder,
+                        downloading: !localCopy,
+                        verifier: verifier,
+                        allowMissing: !strict,
+                        mode: effectiveMode
                     )
                     revisionFiles = verified
                     if !verified.contains("output.mp3") {
@@ -735,7 +1139,7 @@ final class LibraryStore: ObservableObject {
                     return LocalAudio.isPlayable(url)
                 }
             }
-            return Episode(
+            let episode = Episode(
                 id: id,
                 title: title.flatMap { $0.isEmpty ? nil : $0 } ?? id,
                 show: show.flatMap { $0.isEmpty ? nil : $0 },
@@ -755,10 +1159,21 @@ final class LibraryStore: ObservableObject {
                 audioKind: record.audioKind,
                 hasChineseRenderSidecar: hasChineseRenderSidecar
             )
+            if unavailableReason == nil, let revision, let resolvedFolder, episode.mediaRevision != nil {
+                specsByKey[episode.mediaKey] = RevisionSpec(
+                    root: root,
+                    folder: resolvedFolder,
+                    localCopy: localCopy,
+                    revision: revision,
+                    declaredArtwork: declaredArtwork
+                )
+            }
+            return episode
         }.sorted { lhs, rhs in
             if lhs.createdAt != rhs.createdAt { return lhs.createdAt > rhs.createdAt }
             return lhs.id > rhs.id
         }
+        return (episodes, specsByKey)
     }
 
     private static func readData(_ url: URL) -> Data? {
@@ -1122,8 +1537,15 @@ extension LibraryStore {
                       (attributes[.referenceCount] as? NSNumber)?.intValue == 1 else {
                     throw LibrarySnapshotError.rejectedIngest
                 }
-                let bytes = try Data(contentsOf: file)
-                guard bytes.count == size, LibrarySnapshot.digest(bytes) == sha else {
+                let inodeBefore = attributes[.systemFileNumber] as? NSNumber
+                let modifiedBefore = attributes[.modificationDate] as? Date
+                let computed = try RevisionAssetVerifier.streamDigestAndSize(of: file)
+                let afterAttributes = try FileManager.default.attributesOfItem(atPath: file.path)
+                guard computed.byteCount == size,
+                      computed.digest == sha,
+                      (afterAttributes[.size] as? NSNumber)?.intValue == size,
+                      afterAttributes[.systemFileNumber] as? NSNumber == inodeBefore,
+                      afterAttributes[.modificationDate] as? Date == modifiedBefore else {
                     throw LibrarySnapshotError.incompleteRevision
                 }
             }
@@ -1143,9 +1565,10 @@ extension LibraryStore {
                 }
                 let file = try LibrarySnapshot.path(name, in: dest)
                 let attributes = try fm.attributesOfItem(atPath: file.path)
-                let bytes = try Data(contentsOf: file)
+                let computed = try RevisionAssetVerifier.streamDigestAndSize(of: file)
                 guard (attributes[.size] as? NSNumber)?.intValue == size,
-                      bytes.count == size, LibrarySnapshot.digest(bytes) == sha else {
+                      computed.byteCount == size,
+                      computed.digest == sha else {
                     throw LibrarySnapshotError.incompleteRevision
                 }
                 hashes[name] = sha
@@ -1169,8 +1592,8 @@ extension LibraryStore {
             if sourceAttrs[.systemFileNumber] as? NSNumber == destAttrs[.systemFileNumber] as? NSNumber {
                 throw LibrarySnapshotError.rejectedIngest
             }
-            let bytes = try Data(contentsOf: to)
-            guard bytes.count == size, LibrarySnapshot.digest(bytes) == sha else {
+            let computed = try RevisionAssetVerifier.streamDigestAndSize(of: to)
+            guard computed.byteCount == size, computed.digest == sha else {
                 throw LibrarySnapshotError.incompleteRevision
             }
             hashes[name] = sha
@@ -1307,25 +1730,30 @@ extension LibraryStore {
             }
             let previous = "episodes/\(id)"
             let folder = try LibrarySnapshot.path(previous, in: libraryRoot, directory: true)
-            var files: [String: Data] = [:]
+            var sourceURLs: [String: URL] = [:]
+            var fallbackJSONs: [String: Data] = [:]
+            var hashes: [String: String] = [:]
             for name in ["output.mp3", "document.json", "source-identity.json", "render-identity.json", "episode.json"] {
                 let url = try LibrarySnapshot.path(name, in: folder)
                 if FileManager.default.isReadableFile(atPath: url.path) {
-                    let data = try Data(contentsOf: url)
-                    files[name] = data
+                    sourceURLs[name] = url
                 }
             }
-            guard files["output.mp3"] != nil else { throw LibrarySnapshotError.incompleteRevision }
+            guard sourceURLs["output.mp3"] != nil else { throw LibrarySnapshotError.incompleteRevision }
             if let artwork = EpisodeArtwork.file(record.artwork, kind: record.artworkKind) {
                 let url = try LibrarySnapshot.path(artwork, in: folder)
                 guard LocalAudio.isPlayable(url) else { throw LibrarySnapshotError.incompleteRevision }
-                files[artwork] = try Data(contentsOf: url)
+                sourceURLs[artwork] = url
             }
-            if files["document.json"] == nil { files["document.json"] = Data("{}".utf8) }
-            if files["source-identity.json"] == nil { files["source-identity.json"] = Data("{}".utf8) }
-            if files["render-identity.json"] == nil { files["render-identity.json"] = Data("{}".utf8) }
-            if files["episode.json"] == nil { files["episode.json"] = Data("{}".utf8) }
-            let hashes = files.mapValues(LibrarySnapshot.digest)
+            for name in ["document.json", "source-identity.json", "render-identity.json", "episode.json"] where sourceURLs[name] == nil {
+                fallbackJSONs[name] = Data("{}".utf8)
+            }
+            for (name, url) in sourceURLs {
+                hashes[name] = try RevisionAssetVerifier.streamDigestAndSize(of: url).digest
+            }
+            for (name, data) in fallbackJSONs {
+                hashes[name] = LibrarySnapshot.digest(data)
+            }
             let fileLines = hashes.sorted(by: { $0.key < $1.key }).map { "  \"\($0.key)\": \"\($0.value)\"" }
             let revision = LibrarySnapshot.digest(Data(("{\n" + fileLines.joined(separator: ",\n") + "\n}\n").utf8))
             let destPartial = try LibrarySnapshot.path("objects/\(revision).partial", in: libraryRoot, directory: true)
@@ -1334,9 +1762,14 @@ extension LibraryStore {
             }
             try FileManager.default.createDirectory(at: destPartial, withIntermediateDirectories: true)
             var count = 0
-            for (name, data) in files {
+            for name in hashes.keys.sorted() {
                 if fault == .midInstall, count == 1 { throw LibrarySnapshotError.rejectedIngest }
-                try data.write(to: destPartial.appendingPathComponent(name), options: .atomic)
+                let dst = destPartial.appendingPathComponent(name)
+                if let src = sourceURLs[name] {
+                    try FileManager.default.copyItem(at: src, to: dst)
+                } else if let data = fallbackJSONs[name] {
+                    try data.write(to: dst, options: .atomic)
+                }
                 count += 1
             }
             if fault == .midInstall { throw LibrarySnapshotError.rejectedIngest }

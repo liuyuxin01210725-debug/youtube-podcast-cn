@@ -159,27 +159,52 @@ struct MediaRevision: Decodable {
         return LibrarySnapshot.digest(Data(manifest.utf8)) == sha256
     }
 
-    @MainActor
-    func verifiedFiles(in folder: URL, downloading: Bool, verifier: RevisionAssetVerifier,
-                       allowMissing: Bool) throws -> Set<String> {
+    func verifiedFiles(
+        in folder: URL,
+        downloading: Bool,
+        verifier: RevisionAssetVerifier,
+        allowMissing: Bool,
+        mode: AssetVerificationMode = .full,
+        checkCancellation: Bool = false
+    ) throws -> Set<String> {
         if downloading {
             try? FileManager.default.startDownloadingUbiquitousItem(at: folder)
         }
         var verified = Set<String>()
         for (name, digest) in files {
+            if checkCancellation { try Task.checkCancellation() }
             do {
                 let asset = try LibrarySnapshot.path(name, in: folder)
                 if downloading && !LocalAudio.isPlayable(asset) {
                     try? FileManager.default.startDownloadingUbiquitousItem(at: asset)
                 }
-                try verifier.validate(asset, digest: digest)
-                verified.insert(name)
+                switch mode {
+                case .lightweight:
+                    switch verifier.lightweightStatus(asset, digest: digest) {
+                    case .verified, .unverifiedCandidate:
+                        verified.insert(name)
+                    case .failed:
+                        if !allowMissing {
+                            throw LibrarySnapshotError.incompleteRevision
+                        }
+                    }
+                case .full:
+                    try verifier.validate(asset, digest: digest, checkCancellation: checkCancellation)
+                    verified.insert(name)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch where allowMissing {
                 continue
             }
         }
         return verified
     }
+}
+
+enum AssetVerificationMode {
+    case lightweight
+    case full
 }
 
 enum LibrarySnapshotError: Error, Equatable {
@@ -284,8 +309,24 @@ extension LibrarySnapshot {
     }
 }
 
-@MainActor
-final class RevisionAssetVerifier {
+final class RevisionAssetVerifier: @unchecked Sendable {
+    enum Verdict {
+        case verified
+        case failed
+    }
+
+    enum LightweightStatus {
+        case verified
+        case unverifiedCandidate
+        case failed
+    }
+
+    struct FileFingerprint: Equatable, Sendable {
+        let inode: UInt64
+        let size: UInt64
+        let modified: TimeInterval
+    }
+
     private struct Stamp: Equatable {
         let digest: String
         let inode: NSNumber
@@ -293,22 +334,132 @@ final class RevisionAssetVerifier {
         let modified: Date
     }
 
-    private var verified: [URL: Stamp] = [:]
+    private struct CachedEntry {
+        let stamp: Stamp
+        let verdict: Verdict
+    }
 
-    func validate(_ url: URL, digest: String) throws {
-        guard let before = stamp(url, digest: digest) else { throw LibrarySnapshotError.incompleteRevision }
-        if verified[url] == before { return }
+    private let lock = NSLock()
+    private var entries: [URL: CachedEntry] = [:]
+
+    #if DEBUG || os(macOS)
+    private var _hashComputeCount = 0
+    private var _hashedOnMainThread = false
+
+    var hashComputeCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _hashComputeCount
+    }
+
+    var hashedOnMainThread: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _hashedOnMainThread
+    }
+
+    func resetMetrics() {
+        lock.lock()
+        _hashComputeCount = 0
+        _hashedOnMainThread = false
+        lock.unlock()
+    }
+    #endif
+
+    static func streamDigestAndSize(
+        of url: URL,
+        chunkSize: Int = 1_048_576,
+        checkCancellation: Bool = false
+    ) throws -> (digest: String, byteCount: Int) {
+        if checkCancellation { try Task.checkCancellation() }
         let handle = try FileHandle(forReadingFrom: url)
         defer { try? handle.close() }
         var hash = SHA256()
-        while let chunk = try handle.read(upToCount: 1024 * 1024), !chunk.isEmpty {
-            hash.update(data: chunk)
+        var byteCount = 0
+        while true {
+            if checkCancellation { try Task.checkCancellation() }
+            let count: Int = try autoreleasepool {
+                guard let chunk = try handle.read(upToCount: chunkSize), !chunk.isEmpty else {
+                    return 0
+                }
+                hash.update(data: chunk)
+                return chunk.count
+            }
+            if count == 0 { break }
+            byteCount += count
         }
-        guard LibrarySnapshot.hex(hash.finalize()) == digest,
-              stamp(url, digest: digest) == before else {
+        return (LibrarySnapshot.hex(hash.finalize()), byteCount)
+    }
+
+    func lightweightStatus(_ url: URL, digest: String) -> LightweightStatus {
+        guard let before = stamp(url, digest: digest) else { return .failed }
+        let key = cacheKey(for: url)
+        lock.lock()
+        let cached = entries[key]
+        lock.unlock()
+        if let cached, cached.stamp == before {
+            switch cached.verdict {
+            case .verified: return .verified
+            case .failed: return .failed
+            }
+        }
+        return .unverifiedCandidate
+    }
+
+    func validate(_ url: URL, digest: String, checkCancellation: Bool = false) throws {
+        if checkCancellation { try Task.checkCancellation() }
+        guard let before = stamp(url, digest: digest) else {
             throw LibrarySnapshotError.incompleteRevision
         }
-        verified[url] = before
+        let key = cacheKey(for: url)
+        lock.lock()
+        let cached = entries[key]
+        lock.unlock()
+        if let cached, cached.stamp == before {
+            switch cached.verdict {
+            case .verified: return
+            case .failed: throw LibrarySnapshotError.incompleteRevision
+            }
+        }
+        #if DEBUG || os(macOS)
+        let isMain = Thread.isMainThread
+        lock.lock()
+        _hashComputeCount += 1
+        if isMain { _hashedOnMainThread = true }
+        lock.unlock()
+        #endif
+        let computed: (digest: String, byteCount: Int)
+        do {
+            computed = try Self.streamDigestAndSize(of: url, checkCancellation: checkCancellation)
+        } catch is CancellationError {
+            throw CancellationError()
+        }
+        let passed = computed.digest == digest && stamp(url, digest: digest) == before
+        lock.lock()
+        entries[key] = CachedEntry(stamp: before, verdict: passed ? .verified : .failed)
+        lock.unlock()
+        if !passed {
+            throw LibrarySnapshotError.incompleteRevision
+        }
+    }
+
+    private func cacheKey(for url: URL) -> URL {
+        URL(fileURLWithPath: url.path).standardizedFileURL
+    }
+
+    func fingerprint(of url: URL) -> FileFingerprint? {
+        let fresh = URL(fileURLWithPath: url.path)
+        guard LocalAudio.isPlayable(fresh),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: fresh.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let inode = attributes[.systemFileNumber] as? NSNumber,
+              let size = attributes[.size] as? NSNumber,
+              let modified = attributes[.modificationDate] as? Date else { return nil }
+        return FileFingerprint(
+            inode: inode.uint64Value,
+            size: size.uint64Value,
+            modified: modified.timeIntervalSinceReferenceDate
+        )
     }
 
     private func stamp(_ url: URL, digest: String) -> Stamp? {

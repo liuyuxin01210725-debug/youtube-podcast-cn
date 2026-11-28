@@ -23,6 +23,9 @@ struct LibraryView: View {
     @State private var filter: LibraryShelf.Chip = LibraryShelf.defaultChip
     @State private var searchText = ""
     @State private var searchPresented = false
+    @State private var didInitialLoad = false
+    @State private var wasInactiveOrBackground = false
+    @State private var pendingPlayTask: Task<Void, Never>?
     #if DEBUG
     @State private var handledSyntheticEpisodeLaunch = false
     #endif
@@ -97,6 +100,8 @@ struct LibraryView: View {
                 prompt: "标题、节目、嘉宾"
             )
             .onAppear {
+                guard !didInitialLoad else { return }
+                didInitialLoad = true
                 player.onBookProgress = { ref, seconds, duration, delta, ended in
                     Task { @MainActor in books.remember(ref, seconds: seconds, duration: duration, playedDelta: delta, ended: ended) }
                 }
@@ -109,16 +114,21 @@ struct LibraryView: View {
                     }
                     return newlyFinished
                 }
-                library.reload()
+                if !library.hasLoadedOnce {
+                    library.reload()
+                }
                 extracts.reloadAll(episodes: library.episodes)
                 sanitizeFilter()
             }
             .onChange(of: scenePhase) { _, phase in
                 if phase == .active {
+                    guard wasInactiveOrBackground else { return }
+                    wasInactiveOrBackground = false
                     library.reload()
                     extracts.reloadAll(episodes: library.episodes)
                     sanitizeFilter()
                 } else {
+                    wasInactiveOrBackground = true
                     player.checkpoint()
                 }
             }
@@ -535,26 +545,61 @@ struct LibraryView: View {
             path.append(episode)
             return
         }
-        if player.errorText != nil || ContinueListening.shouldReopenAtListenMark(
-            currentID: player.isCurrent(episode) ? episode.id : nil,
-            episodeID: episode.id,
-            playhead: player.current,
-            resumeAt: resumeAt,
-            clipInProgress: player.isClipPlayback
-        ) {
-            player.open(episode, resumeAt: resumeAt, force: true)
-        } else if player.isPlaying {
-            player.pause()
-        } else {
-            player.resume()
+        if library.isEpisodeVerified(episode) {
+            pendingPlayTask?.cancel()
+            pendingPlayTask = nil
+            if player.errorText != nil || ContinueListening.shouldReopenAtListenMark(
+                currentID: player.isCurrent(episode) ? episode.id : nil,
+                episodeID: episode.id,
+                playhead: player.current,
+                resumeAt: resumeAt,
+                clipInProgress: player.isClipPlayback
+            ) {
+                player.open(episode, resumeAt: resumeAt, force: true)
+            } else if player.isPlaying {
+                player.pause()
+            } else {
+                player.resume()
+            }
+            return
+        }
+        pendingPlayTask?.cancel()
+        pendingPlayTask = Task { @MainActor in
+            let verified = await library.verifyEpisodeNow(episode)
+            guard !Task.isCancelled, verified.unavailableReason == nil, verified.isPlayableNow else { return }
+            let latestResume = library.resumeSeconds(for: verified)
+            if player.errorText != nil || ContinueListening.shouldReopenAtListenMark(
+                currentID: player.isCurrent(verified) ? verified.id : nil,
+                episodeID: verified.id,
+                playhead: player.current,
+                resumeAt: latestResume,
+                clipInProgress: player.isClipPlayback
+            ) {
+                player.open(verified, resumeAt: latestResume, force: true)
+            } else if player.isPlaying {
+                player.pause()
+            } else {
+                player.resume()
+            }
         }
     }
 
     private func toggleMini(_ episode: Episode) {
         if player.isCurrent(episode) {
+            pendingPlayTask?.cancel()
+            pendingPlayTask = nil
             player.toggle()
-        } else {
+        } else if library.isEpisodeVerified(episode) {
+            pendingPlayTask?.cancel()
+            pendingPlayTask = nil
             player.open(episode, resumeAt: library.resumeSeconds(for: episode))
+        } else {
+            pendingPlayTask?.cancel()
+            pendingPlayTask = Task { @MainActor in
+                let verified = await library.verifyEpisodeNow(episode)
+                guard !Task.isCancelled, verified.unavailableReason == nil else { return }
+                player.open(verified, resumeAt: library.resumeSeconds(for: verified))
+            }
         }
     }
 

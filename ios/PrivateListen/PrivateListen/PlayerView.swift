@@ -13,6 +13,8 @@ struct PlayerView: View {
     @State private var isEditingListenNote = false
     @State private var originalPeek: OriginalPeek?
     @State private var pickRefusalMessage: String?
+    @State private var openVerifyTask: Task<Void, Never>?
+    @State private var viewActive = false
 
     init(episode: Episode, player: PlayerModel, opensPaused: Bool = false,
          onPlayedEpisodeExit: @escaping () -> Void = {}) {
@@ -284,6 +286,7 @@ struct PlayerView: View {
             }
         }
         .onAppear {
+            viewActive = true
             player.fullPlayerOpen = true
             if !isPassiveOpen && episode.unavailableReason == nil {
                 // A regular open clears a swipe-dismiss without writing ListenMark.
@@ -298,6 +301,9 @@ struct PlayerView: View {
             if !Task.isCancelled { reading = loaded }
         }
         .onDisappear {
+            viewActive = false
+            openVerifyTask?.cancel()
+            openVerifyTask = nil
             if player.isCurrent(episode), player.checkpoint() { onPlayedEpisodeExit() }
             player.fullPlayerOpen = false
         }
@@ -344,12 +350,28 @@ struct PlayerView: View {
     }
 
     private func openEpisode(force: Bool = false) {
-        player.open(
-            episode,
-            resumeAt: library.resumeSeconds(for: episode),
-            force: force,
-            autoplay: !library.isFinished(episode) && !isPassiveOpen
-        )
+        openVerifyTask?.cancel()
+        openVerifyTask = nil
+        let current = episode
+        if current.unavailableReason != nil || library.isEpisodeVerified(current) {
+            player.open(
+                current,
+                resumeAt: library.resumeSeconds(for: current),
+                force: force,
+                autoplay: !library.isFinished(episode) && !isPassiveOpen
+            )
+            return
+        }
+        openVerifyTask = Task { @MainActor in
+            let verified = await library.verifyEpisodeNow(current)
+            guard !Task.isCancelled, viewActive else { return }
+            player.open(
+                verified,
+                resumeAt: library.resumeSeconds(for: verified),
+                force: force || verified.unavailableReason != nil,
+                autoplay: !library.isFinished(verified) && !isPassiveOpen
+            )
+        }
     }
 }
 
