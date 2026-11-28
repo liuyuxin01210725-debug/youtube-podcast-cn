@@ -129,13 +129,20 @@ final class LibraryStore: ObservableObject {
     private let defaults: UserDefaults
     private let documentsDirectory: URL?
     private let allowHostCloudDiscovery: Bool
+    private let ossConfig: OSSConfig
+    private let ossPuller: OSSEpisodePuller
+    private var ossPullTask: Task<Void, Never>?
     /// In-process ingest lock. Must not live in UserDefaults: a crash would stick it.
     private var ingestBusy = false
 
     init(defaults: UserDefaults = .standard, loadLibraryOnInit: Bool = true,
-         documentsDirectory: URL? = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first) {
+         documentsDirectory: URL? = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+         ossConfig: OSSConfig? = nil,
+         ossPuller: OSSEpisodePuller? = nil) {
         self.defaults = defaults
         self.documentsDirectory = documentsDirectory
+        self.ossConfig = ossConfig ?? OSSConfig(defaults: defaults)
+        self.ossPuller = ossPuller ?? OSSEpisodePuller()
         let defaultDocs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
         self.allowHostCloudDiscovery = documentsDirectory?.standardizedFileURL == defaultDocs?.standardizedFileURL
         if let data = defaults.data(forKey: progressKey),
@@ -157,6 +164,10 @@ final class LibraryStore: ObservableObject {
             restore()
             reload()
         }
+    }
+
+    deinit {
+        ossPullTask?.cancel()
     }
 
     func acceptShare(url: URL, sourceApp: String?, contentType: String? = nil, expectedSpeakers: Int = 2) {
@@ -1279,21 +1290,229 @@ extension LibraryStore {
         } catch {
             recordActivationFailure("migrate-legacy", error: error)
         }
+        triggerOSSPullIfConfigured()
+    }
+
+    func waitForOSSPull() async {
+        while let task = ossPullTask {
+            await task.value
+        }
+    }
+
+    private func triggerOSSPullIfConfigured() {
+        guard ossConfig.isConfigured else { return }
+        guard folderURL == nil else { return }
+        guard documentsDirectory != nil else { return }
+        guard ossPullTask == nil else { return }
+        let fingerprint = ossConfig.fingerprint
+        guard ossPuller.shouldAttemptNow(configFingerprint: fingerprint) else { return }
+        guard let baseURL = ossConfig.bridgeBaseURL, let token = ossConfig.bridgeToken else { return }
+
+        var skipIDs = Set<String>()
+        var repairableAudioDigests: [String: String] = [:]
+        if let root = documentsLibraryURL(),
+           let listing = try? LibrarySnapshot.path("library.json", in: root),
+           let data = try? Data(contentsOf: listing),
+           let snapshot = try? LibrarySnapshot(data, allowInvalidRevisions: true) {
+            for record in snapshot.records {
+                guard let id = record.catalogID else { continue }
+                let folder = try? LibrarySnapshot.path(record.mediaRevision?.path ?? "episodes/\(id)", in: root, directory: true)
+                let audioURL = folder.flatMap { try? LibrarySnapshot.path("output.mp3", in: $0) }
+                if let audioURL, LocalAudio.isPlayable(audioURL) {
+                    skipIDs.insert(id)
+                } else if let rev = record.mediaRevision, let audioHash = rev.files["output.mp3"] {
+                    repairableAudioDigests[id] = audioHash
+                } else {
+                    skipIDs.insert(id)
+                }
+            }
+        }
+
+        let puller = ossPuller
+        ossPullTask = Task { [weak self] in
+            defer { self?.ossPullTask = nil }
+            let catalog: [OSSRemoteCatalogItem]
+            do {
+                catalog = try await puller.fetchCatalog(baseURL: baseURL, token: token)
+            } catch is CancellationError {
+                return
+            } catch {
+                puller.recordFailure(error, configFingerprint: fingerprint)
+                self?.recordActivationFailure("oss-pull", error: error)
+                return
+            }
+
+            puller.recordSuccess()
+            let candidates = catalog
+                .filter { !$0.declaresPendingTranscript && !skipIDs.contains($0.id) }
+                .prefix(puller.maxEpisodesPerActivation)
+
+            for item in candidates {
+                if Task.isCancelled { break }
+                do {
+                    let expectedAudio = repairableAudioDigests[item.id]
+                    let package = try await puller.pullEpisode(
+                        item: item,
+                        baseURL: baseURL,
+                        token: token,
+                        expectedAudioSHA256: expectedAudio
+                    )
+                    defer { try? FileManager.default.removeItem(at: package.cleanupRoot) }
+                    if Task.isCancelled { break }
+                    _ = try self?.commitOSSPulledEpisode(package)
+                } catch is CancellationError {
+                    break
+                } catch {
+                    self?.recordActivationFailure("oss-pull", error: error)
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    func commitOSSPulledEpisode(_ package: OSSPulledEpisodePackage) throws -> Bool {
+        try serialIngest {
+            guard folderURL == nil else { return false }
+            let libraryRoot = try ensureDocumentsLibrary()
+            let listing = try LibrarySnapshot.path("library.json", in: libraryRoot)
+            let fm = FileManager.default
+            let before: Data?
+            do {
+                before = try Data(contentsOf: listing)
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                before = nil
+            }
+            if before == nil {
+                for subdir in ["episodes", "objects"] {
+                    let dir = libraryRoot.appendingPathComponent(subdir, isDirectory: true)
+                    if let contents = try? fm.contentsOfDirectory(atPath: dir.path), !contents.isEmpty {
+                        throw LibrarySnapshotError.invalidCatalog
+                    }
+                }
+            }
+            let current = try before.map { try LibrarySnapshot($0) }
+            if let current,
+               let existingIndex = current.records.firstIndex(where: { $0.catalogID == package.id }) {
+                let existingRecord = current.records[existingIndex]
+                let existingFolder = try? LibrarySnapshot.path(
+                    existingRecord.mediaRevision?.path ?? "episodes/\(package.id)",
+                    in: libraryRoot,
+                    directory: true
+                )
+                let existingAudio = existingFolder.flatMap { try? LibrarySnapshot.path("output.mp3", in: $0) }
+                if let existingAudio, LocalAudio.isPlayable(existingAudio) {
+                    return false
+                }
+                if let localRevision = existingRecord.mediaRevision,
+                   let localAudioHash = localRevision.files["output.mp3"],
+                   localAudioHash == package.fileHashes["output.mp3"],
+                   let targetFolder = existingFolder {
+                    try installPulledObjectFiles(
+                        from: package.stagingFolder,
+                        into: targetFolder,
+                        expectedFiles: localRevision.files
+                    )
+                    reload()
+                    return true
+                }
+                return false
+            }
+
+            guard var incomingRow = try JSONSerialization.jsonObject(with: package.sanitizedRowData) as? [String: Any] else {
+                throw LibrarySnapshotError.invalidCatalog
+            }
+            let dest = try LibrarySnapshot.path("objects/\(package.revision)", in: libraryRoot, directory: true)
+            if fm.fileExists(atPath: dest.path) {
+                try verifyInstalledObjectFiles(in: dest, expectedFiles: package.fileHashes)
+            } else {
+                let partial = try LibrarySnapshot.path("objects/\(package.revision).partial", in: libraryRoot, directory: true)
+                if fm.fileExists(atPath: partial.path) {
+                    try fm.removeItem(at: partial)
+                }
+                try installPulledObjectFiles(from: package.stagingFolder, into: partial, expectedFiles: package.fileHashes)
+                try fm.moveItem(at: partial, to: dest)
+            }
+
+            incomingRow["id"] = package.id
+            incomingRow["file"] = "output.mp3"
+            incomingRow["media_revision"] = [
+                "sha256": package.revision,
+                "path": "objects/\(package.revision)",
+                "previous_path": "",
+                "resume_policy": "reset_unmapped",
+                "files": package.fileHashes,
+            ]
+
+            var proposedRows = current?.rows ?? []
+            proposedRows.append(incomingRow)
+            var object: [String: Any] = current?.object ?? [:]
+            object["episodes"] = proposedRows
+
+            let incoming = try LibrarySnapshot(try LibrarySnapshot.json(object))
+            let merged = try incoming.preservingExtensions(from: current)
+            let snapshot = try LibrarySnapshot(merged)
+            var book = snapshot.transactions
+            let generation = (current?.generation ?? 0) + 1
+            let parent = before.map(LibrarySnapshot.digest)
+            let txId = "oss-pull-\(package.id)-\(String(package.revision.prefix(12)))"
+            let requestDigest = LibrarySnapshot.digest(Data("\(txId)|\(package.revision)".utf8))
+            let body = try snapshot.stamped(generation: generation, parent: parent, transactions: [:])
+            let result = try LibrarySnapshot(body).bodyDigest()
+            book[txId] = CatalogTransaction(requestDigest: requestDigest, generation: generation, resultDigest: result)
+            let stamped = try snapshot.stamped(generation: generation, parent: parent, transactions: book)
+            let _ = try Self.commitSnapshot(stamped, expecting: parent, in: libraryRoot)
+            reload()
+            return true
+        }
+    }
+
+    private func verifyInstalledObjectFiles(in folder: URL, expectedFiles: [String: String]) throws {
+        for (name, sha) in expectedFiles {
+            let file = try LibrarySnapshot.path(name, in: folder)
+            let computed = try RevisionAssetVerifier.streamDigestAndSize(of: file)
+            guard computed.byteCount > 0, computed.digest == sha else {
+                throw LibrarySnapshotError.incompleteRevision
+            }
+        }
+    }
+
+    private func installPulledObjectFiles(
+        from sourceFolder: URL,
+        into destFolder: URL,
+        expectedFiles: [String: String]
+    ) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: destFolder, withIntermediateDirectories: true)
+        for (name, expectedSHA) in expectedFiles.sorted(by: { $0.key < $1.key }) {
+            let src = try LibrarySnapshot.path(name, in: sourceFolder)
+            let dst = try LibrarySnapshot.path(name, in: destFolder)
+            if fm.fileExists(atPath: dst.path) {
+                try fm.removeItem(at: dst)
+            }
+            try fm.copyItem(at: src, to: dst)
+            let computed = try RevisionAssetVerifier.streamDigestAndSize(of: dst)
+            guard computed.byteCount > 0, computed.digest == expectedSHA else {
+                throw LibrarySnapshotError.incompleteRevision
+            }
+        }
     }
 
     private func recordActivationFailure(_ operation: String, error: Error) {
         let nsError = error as NSError
+        let sanitizedDescription = (error is OSSClientError) ? "oss_client_error" : nsError.localizedDescription
         var entry: [String: Any] = [
             "operation": operation,
             "occurred_at": ISO8601DateFormatter().string(from: Date()),
             "domain": nsError.domain,
             "code": nsError.code,
-            "localized_description": nsError.localizedDescription,
+            "localized_description": sanitizedDescription,
         ]
         if let error = error as? LibrarySnapshotError {
             entry["error_case"] = String(describing: error)
         } else if let error = error as? PendingTranscript.ReadFailure {
             entry["error_case"] = String(describing: error)
+        } else if let error = error as? OSSClientError {
+            entry["error_case"] = error.diagnosticCode
         }
         do {
             guard let documentsDirectory else { throw LibrarySnapshotError.invalidPath }
