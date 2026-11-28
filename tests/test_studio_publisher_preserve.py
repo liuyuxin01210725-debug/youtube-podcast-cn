@@ -118,22 +118,24 @@ def test_rebuild_limits_metadata_to_the_identified_valid_episode(tmp_path):
     (root / 'linked').symlink_to(root / 'kept', target_is_directory=True)
     (root / 'invalid-record').mkdir()
     write_json(root / 'invalid-record' / 'episode.json', {**data, 'file': 'other.mp3'})
-    write_json(library / 'library.json', {'episodes': [
-        {'id': 'kept', 'episode_id': 'other', 'source_job_id': 'other', 'show': '只属于 kept'},
-        {'id': 'missing', 'source_job_id': 'other', 'show': '已删除'},
-        {'id': 'linked', 'show': '符号链接'},
-        {'id': 'invalid-record', 'show': '非法记录'},
-        {'id': None, 'episode_id': 'other', 'source_job_id': 'kept', 'lens_ids': ['nutrition']},
-    ]})
-
-    publisher.rebuild_library(library)
-
-    assert listed_episodes(library) == {
-        'kept': {**data, 'id': 'kept', 'episode_id': 'other', 'source_job_id': 'kept',
-                 'show': '只属于 kept', 'duration_sec': None, 'file': 'output.mp3'},
-        'other': {**data, 'id': 'other', 'episode_id': 'other', 'source_job_id': 'other',
-                  'lens_ids': ['nutrition'], 'duration_sec': None, 'file': 'output.mp3'},
+    catalog = {
+        'episodes': [
+            {'id': 'kept', 'episode_id': 'other', 'source_job_id': 'other', 'show': '只属于 kept'},
+            {'id': 'missing', 'source_job_id': 'other', 'show': '已删除'},
+            {'id': 'linked', 'show': '符号链接'},
+            {'id': 'invalid-record', 'show': '非法记录'},
+            {'id': None, 'episode_id': 'other', 'source_job_id': 'kept', 'lens_ids': ['nutrition']},
+        ]
     }
+    write_json(library / 'library.json', catalog)
+    before = (library / 'library.json').read_bytes()
+
+    # Rebuild would drop missing/invalid rows and shrink 5→2. That is no
+    # longer allowed: there is no authorized shrink entry, and a partial
+    # episodes/ tree must not rewrite a shorter catalog.
+    with pytest.raises(publisher.PublishError, match='少于'):
+        publisher.rebuild_library(library)
+    assert (library / 'library.json').read_bytes() == before
 
 
 @pytest.mark.parametrize('prior', [
@@ -168,18 +170,17 @@ def test_rebuild_refuses_unusable_existing_index_without_overwriting(tmp_path, p
 
 
 def test_rebuild_from_missing_index(tmp_path):
+    # Tighten legacy expectation: missing library.json in a non-empty directory must
+    # fail-closed instead of rebuilding from episodes/ (which may be partially synced).
     library = tmp_path / 'library'
     episode = library / 'episodes' / 'kept'
     episode.mkdir(parents=True)
     data = {'title': '仍在目录的节目', 'created_at': '2026-11-20T00:00:00+00:00'}
     write_json(episode / 'episode.json', data)
 
-    publisher.rebuild_library(library)
-
-    assert listed_episodes(library) == {
-        'kept': {**data, 'id': 'kept', 'source_job_id': 'kept',
-                 'duration_sec': None, 'file': 'output.mp3'},
-    }
+    with pytest.raises(publisher.PublishError, match='未核实为空'):
+        publisher.rebuild_library(library)
+    assert not (library / 'library.json').exists()
 
 
 @pytest.mark.parametrize('error', [PermissionError('offline read failure'), FileNotFoundError('lost after lstat')])

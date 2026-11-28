@@ -26,6 +26,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import push_staging_adapter as staging
+from library_write_guard import CatalogBaseline, build_remote_catalog_baseline, verify_catalog_transition
 from studio_original_pending import digest, file_digest, json_bytes, open_regular
 from studio_publish_icloud import (
     AUDIO_NAME,
@@ -354,10 +355,17 @@ def _listed_names(device_id: str, folder: str, runner) -> set[str] | None:
 def _verified_empty_library(device_id: str, runner) -> bool:
     names = _listed_names(device_id, DEVICE_LIBRARY, runner)
     if names is not None:
-        return names.isdisjoint({_INDEX, 'episodes', 'revisions', 'objects'})
+        return (
+            names.isdisjoint({_INDEX, 'episodes', 'revisions', 'objects'})
+            and not any(name.endswith('.icloud') for name in names)
+        )
     # Documents must be readable even when the library folder does not exist.
     documents = _listed_names(device_id, 'Documents', runner)
-    return documents is not None and LIBRARY_NAME.casefold() not in documents
+    return (
+        documents is not None
+        and LIBRARY_NAME.casefold() not in documents
+        and f'.{LIBRARY_NAME}.icloud'.casefold() not in documents
+    )
 
 
 def _backup_index(device_id: str, root: Path, runner, entry: dict) -> bytes | None:
@@ -644,6 +652,23 @@ def push_episodes(episode_dirs: list[Path | str] | None, library: Path, *, runne
         return _push_prepared(summary, delta, plan, work, runner, backup_root, atomic_commit)
 
 
+def _commit_device_catalog(
+    device_id: str,
+    merged: bytes,
+    baseline,
+    atomic_commit: AtomicCommit,
+    work: Path,
+    runner,
+) -> None:
+    verify_catalog_transition(baseline, merged, id_pattern=_JOB_ID)
+    error = atomic_commit(device_id, merged, baseline.old_index)
+    if error is not None:
+        raise ValueError(f'手机索引提交失败：{error}')
+    # A staging acknowledgement alone cannot prove the catalog
+    # actually became visible on this device.
+    _verify_device_catalog(device_id, merged, work, runner)
+
+
 def _push_prepared(summary, delta, plan, work, runner, backup_root, atomic_commit):
     if not devicectl_available():
         summary['reason'] = '这台机器没有 xcrun devicectl'
@@ -662,7 +687,21 @@ def _push_prepared(summary, delta, plan, work, runner, backup_root, atomic_commi
             continue
         try:
             snapshot = _backup_index(device['id'], backup_root, runner, entry)
-            phone, records = _validated_index(snapshot) if snapshot is not None else ({}, {})
+            if snapshot is None:
+                baseline = build_remote_catalog_baseline(
+                    None, verified_empty=True, id_pattern=_JOB_ID,
+                )
+                phone, records = {}, {}
+            else:
+                # Validate with the phone decoder first so existing D3
+                # error text stays intact; the shared fuse still gets a baseline.
+                phone, records = _validated_index(snapshot)
+                baseline = CatalogBaseline(
+                    old_index=snapshot,
+                    prior=phone,
+                    old_ids=frozenset(records),
+                    verified_empty=False,
+                )
             if atomic_commit is None:
                 entry['transaction'] = _stage_prepared(device['id'], records, delta, plan, work, runner)
                 entry['staged'] = True
@@ -675,12 +714,7 @@ def _push_prepared(summary, delta, plan, work, runner, backup_root, atomic_commi
                     if error is not None:
                         raise ValueError(f'{destination}：{error}')
                 _verify_device_asset(device['id'], destination, expected, work, runner)
-            error = atomic_commit(device['id'], merged, snapshot)
-            if error is not None:
-                raise ValueError(f'手机索引提交失败：{error}')
-            # A staging acknowledgement alone cannot prove the catalog
-            # actually became visible on this device.
-            _verify_device_catalog(device['id'], merged, work, runner)
+            _commit_device_catalog(device['id'], merged, baseline, atomic_commit, work, runner)
         except (OSError, ValueError, RecursionError, subprocess.SubprocessError) as error:
             entry['error'] = str(error)
         else:

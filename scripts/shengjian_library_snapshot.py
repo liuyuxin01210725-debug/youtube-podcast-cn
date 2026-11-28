@@ -13,11 +13,16 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
 import time
 from pathlib import Path
+
+from library_write_guard import CatalogWriteGuardError, decode_catalog_bytes
+
+_LIBRARY_ID_PATTERN = re.compile(r'^[A-Za-z0-9_-]{1,80}$')
 
 AUDIO_SUFFIXES = {'.mp3', '.m4a', '.wav', '.aac', '.caf', '.flac', '.ogg', '.aiff', '.aif'}
 SKIP_DIR_NAMES = {'objects', '.git', 'DerivedData'}
@@ -182,10 +187,36 @@ def load_manifest(snap: Path):
         raise SnapshotError(f'快照 manifest 不可读，拒绝恢复: {exc}') from exc
 
 
+def _verify_snapshot_library_catalog(snap: Path, manifest: dict) -> None:
+    snap_catalog = snap / 'roots' / 'library' / 'library.json'
+    expected_entry = next(
+        (
+            item for item in (manifest.get('files') or [])
+            if isinstance(item, dict) and item.get('root') == 'library' and item.get('rel') == 'library.json'
+        ),
+        None,
+    )
+    if expected_entry is not None:
+        if expected_entry.get('symlink') or not snap_catalog.is_file() or snap_catalog.is_symlink():
+            raise SnapshotError(f'快照内 library.json 缺失或无效，拒绝恢复: {snap}')
+        expected_sha = expected_entry.get('sha256')
+        if not isinstance(expected_sha, str) or _sha256(snap_catalog) != expected_sha:
+            raise SnapshotError(f'快照内 library.json 校验和不匹配，拒绝恢复: {snap}')
+    if snap_catalog.exists() or snap_catalog.is_symlink():
+        if snap_catalog.is_symlink() or not snap_catalog.is_file():
+            raise SnapshotError(f'快照内 library.json 格式无效，拒绝恢复: {snap}')
+        try:
+            decode_catalog_bytes(snap_catalog.read_bytes(), id_pattern=_LIBRARY_ID_PATTERN)
+        except (OSError, CatalogWriteGuardError) as exc:
+            raise SnapshotError(f'快照内 library.json 格式无效，拒绝恢复: {exc}') from exc
+
+
 def restore(snap, *, library=None, documents=None, preferences=None, extras=None, measure=True):
     snap = Path(snap)
     manifest = load_manifest(snap)
     roots = collect_roots(library=library, documents=documents, preferences=preferences, extras=extras)
+    if 'library' in roots:
+        _verify_snapshot_library_catalog(snap, manifest)
     # Bind restore targets to the same role names used at snapshot time.
     started = time.perf_counter()
     # Stage a complete replacement tree per root, then swap, so gen2 is not

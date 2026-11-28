@@ -351,21 +351,21 @@ class OriginalPendingTests(unittest.TestCase):
     def test_transcode_and_commit_failures_leave_existing_library_unchanged(self):
         before = snapshot(self.library)
         run, rename, replace = subprocess.run, os.rename, os.replace
-        write = self.intake.write_bytes
+        guarded = self.intake.atomic_write_guarded_catalog
         def transcode_failure(args, **kwargs):
             if "libmp3lame" in args:
                 raise subprocess.CalledProcessError(1, args)
             return run(args, **kwargs)
         for target, original in (("subprocess.run", transcode_failure),
                                  ("os.rename", rename), ("os.replace", replace),
-                                 ("studio_original_pending.write_bytes", write)):
+                                 ("studio_original_pending.atomic_write_guarded_catalog", guarded)):
             with self.subTest(target=target):
                 def fail(*args, **kwargs):
                     if target == "os.rename" and Path(args[1]) == self.episode:
                         raise OSError("injected episode rename error")
                     if target == "os.replace" and Path(args[1]) == self.catalog:
                         raise OSError("injected catalog replace error")
-                    if target.endswith(".write_bytes") and Path(args[0]).name == self.catalog.name:
+                    if target.endswith("atomic_write_guarded_catalog"):
                         raise OSError("injected catalog staging error")
                     return original(*args, **kwargs)
                 with patch(target, side_effect=fail), self.assertRaises(self.intake.IntakeError):

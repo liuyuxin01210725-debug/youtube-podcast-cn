@@ -18,6 +18,15 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from library_write_guard import (
+    CatalogWriteGuardError,
+    atomic_write_guarded_catalog,
+    decode_catalog_bytes,
+    load_local_catalog_baseline,
+)
+
+_CATALOG_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
+
 EPISODE_ID = "mostprise-69320d8b4ef12f9fe9f8e1fe"
 EPISODE_URL = "https://www.xiaoyuzhoufm.com/episode/69320d8b4ef12f9fe9f8e1fe"
 AUDIO = "mostprise-original.m4a"
@@ -262,15 +271,20 @@ def validate_coverage(source, playback, duration, units):
             "原音、MP3 或待核稿的时间覆盖不一致")
 
 
-def read_catalog(path):
-    from studio_publish_icloud import decode_library_index
-
+def _read_catalog_baseline(library):
     try:
-        raw = read_bytes(path)
-    except FileNotFoundError:
-        return {"episodes": []}, None
-    catalog, by_id = decode_library_index(raw.decode("utf-8"))
-    return catalog, by_id.get(EPISODE_ID)
+        baseline = load_local_catalog_baseline(Path(library), id_pattern=_CATALOG_ID, reader=read_bytes)
+    except CatalogWriteGuardError as error:
+        raise IntakeError(str(error)) from None
+    if baseline.old_index is None:
+        return {"episodes": []}, None, baseline
+    _, by_id = decode_catalog_bytes(baseline.old_index, id_pattern=_CATALOG_ID)
+    return baseline.prior, by_id.get(EPISODE_ID), baseline
+
+
+def read_catalog(path):
+    catalog, listed, _ = _read_catalog_baseline(Path(path).parent)
+    return catalog, listed
 
 
 def stage_catalog(catalog, record, staging):
@@ -283,7 +297,7 @@ def stage_catalog(catalog, record, staging):
 def package(inputs, library, bound):
     source, proofs, audio_sha, raw_sha, duration, asr, units = bound
     catalog_path = library / "library.json"
-    catalog, listed = read_catalog(catalog_path)
+    catalog, listed, baseline = _read_catalog_baseline(library)
     episodes = library / "episodes"
     if episodes.exists() or episodes.is_symlink():
         real_directory(episodes)
@@ -331,9 +345,21 @@ def package(inputs, library, bound):
         if listed is not None:
             return "already_present", dest
         # A process can stop after the episode rename and before the catalog rename.
-        with tempfile.TemporaryDirectory(prefix=".original-pending-", dir=library) as temporary:
-            staged_catalog = stage_catalog(catalog, record, Path(temporary))
-            os.replace(staged_catalog, catalog_path)
+        next_bytes = json_bytes({
+            **catalog,
+            "updated_at": datetime.now(UTC8).isoformat(timespec="seconds"),
+            "episodes": [*catalog["episodes"], record],
+        })
+        try:
+            atomic_write_guarded_catalog(
+                catalog_path,
+                next_bytes,
+                baseline=baseline,
+                id_pattern=_CATALOG_ID,
+                reader=read_bytes,
+            )
+        except CatalogWriteGuardError as error:
+            raise IntakeError(str(error)) from None
         return "catalog_recovered", dest
 
     with tempfile.TemporaryDirectory(prefix=".original-pending-", dir=library) as temporary:
@@ -372,18 +398,31 @@ def package(inputs, library, bound):
         write_bytes(payload / TRANSCRIPT, transcript)
         write_bytes(payload / "episode.json", json_bytes(record))
         write_bytes(payload / MANIFEST, json_bytes(manifest))
-        staged_catalog = stage_catalog(catalog, record, stage)
+        next_bytes = json_bytes({
+            **catalog,
+            "updated_at": datetime.now(UTC8).isoformat(timespec="seconds"),
+            "episodes": [*catalog["episodes"], record],
+        })
         created_episodes = not episodes.exists()
         if created_episodes:
             episodes.mkdir()
         try:
             os.rename(payload, dest)
             try:
-                os.replace(staged_catalog, catalog_path)
-            except OSError:
+                atomic_write_guarded_catalog(
+                    catalog_path,
+                    next_bytes,
+                    baseline=baseline,
+                    id_pattern=_CATALOG_ID,
+                    reader=read_bytes,
+                    allowed_temp_names=frozenset({stage.name}),
+                )
+            except (OSError, CatalogWriteGuardError) as error:
                 os.rename(dest, payload)
+                if isinstance(error, CatalogWriteGuardError):
+                    raise IntakeError(str(error)) from None
                 raise
-        except OSError:
+        except (OSError, IntakeError):
             if created_episodes:
                 episodes.rmdir()
             raise

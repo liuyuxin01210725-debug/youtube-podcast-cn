@@ -25,6 +25,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import studio_original_pending as original_pending
+from library_write_guard import (
+    CatalogBaseline,
+    CatalogWriteGuardError,
+    atomic_write_guarded_catalog,
+    decode_catalog_bytes,
+    ensure_no_evicted_library_placeholder,
+    load_local_catalog_baseline,
+)
 from studio_document import check_source_coverage
 from studio_edge_input import (EDGE_INPUT_VERSION, SILENCE_FRAMES, SILENCE_RATE, clean_tts_text,
                                speakable_tts, valid_edge_input)
@@ -684,30 +692,31 @@ def _read_library_bytes(listing: Path) -> bytes:
     return original_pending.read_bytes(listing)
 
 
-def _read_library_index(listing: Path) -> tuple[dict, dict[str, dict], bytes | None]:
+def _read_library_baseline(listing: Path) -> CatalogBaseline:
     try:
-        mode = listing.lstat().st_mode
-    except FileNotFoundError:
-        return {}, {}, None
-    except OSError:
-        raise PublishError('无法读取现有资料库索引') from None
+        return load_local_catalog_baseline(
+            listing.parent,
+            id_pattern=_JOB_ID,
+            reader=_read_library_bytes,
+            listing=listing,
+        )
+    except CatalogWriteGuardError as error:
+        raise PublishError(str(error)) from None
 
-    if not stat.S_ISREG(mode):
-        raise PublishError('现有资料库索引格式无效')
-    try:
-        raw = _read_library_bytes(listing)
-    except original_pending.IntakeError:
-        raise PublishError('现有资料库索引格式无效') from None
-    except OSError:
-        raise PublishError('无法读取现有资料库索引') from None
-    try:
-        prior, prior_by_id = decode_library_index(raw.decode('utf-8'))
-        return prior, prior_by_id, raw
-    except (UnicodeDecodeError, ValueError, RecursionError):
-        raise PublishError('现有资料库索引格式无效') from None
+
+def _read_library_index(listing: Path) -> tuple[dict, dict[str, dict], bytes | None]:
+    baseline = _read_library_baseline(listing)
+    if baseline.old_index is None:
+        return {}, {}, None
+    _, prior_by_id = decode_catalog_bytes(baseline.old_index, id_pattern=_JOB_ID)
+    return baseline.prior, prior_by_id, baseline.old_index
 
 
 def rebuild_library(library: Path) -> dict:
+    try:
+        ensure_no_evicted_library_placeholder(library)
+    except CatalogWriteGuardError as error:
+        raise PublishError(str(error)) from None
     library.mkdir(parents=True, exist_ok=True)
     with original_pending.library_lock(library):
         return _rebuild_library_locked(library)
@@ -715,7 +724,13 @@ def rebuild_library(library: Path) -> dict:
 
 def _rebuild_library_locked(library: Path) -> dict:
     listing = library / 'library.json'
-    prior, prior_by_id, old_index = _read_library_index(listing)
+    baseline = _read_library_baseline(listing)
+    if baseline.old_index is None:
+        prior, prior_by_id, old_index = {}, {}, None
+    else:
+        prior = baseline.prior
+        _, prior_by_id = decode_catalog_bytes(baseline.old_index, id_pattern=_JOB_ID)
+        old_index = baseline.old_index
     root = library / 'episodes'
     pending_id = original_pending.EPISODE_ID
     pending_dir = root / pending_id
@@ -735,7 +750,7 @@ def _rebuild_library_locked(library: Path) -> dict:
             record = _episode_record(episode_dir, prior_by_id.get(ident, {}))
             if record is not None:
                 records[ident] = record
-    return _write_snapshot(listing, prior, records, old_index=old_index)
+    return _write_snapshot(listing, prior, records, old_index=old_index, baseline=baseline)
 
 
 def _record_identity(item: dict) -> str | None:
@@ -748,10 +763,35 @@ def _write_snapshot(
     records: dict[str, dict],
     *,
     old_index: bytes | None = None,
+    baseline: CatalogBaseline | None = None,
+    allowed_temp_names: frozenset[str] = frozenset(),
     v2_write: bool = False,
     tx_id: str | None = None,
     request_digest: str | None = None,
 ):
+    resolved_baseline = baseline
+    if resolved_baseline is None:
+        if old_index is not None:
+            try:
+                resolved_prior, resolved_by_id = decode_catalog_bytes(old_index, id_pattern=_JOB_ID)
+            except CatalogWriteGuardError as error:
+                raise PublishError(str(error)) from None
+            resolved_baseline = CatalogBaseline(
+                old_index=old_index,
+                prior=resolved_prior,
+                old_ids=frozenset(resolved_by_id),
+                verified_empty=False,
+            )
+        else:
+            is_v2_missing = (
+                v2_write
+                or prior.get('schema') == LIBRARY_SCHEMA
+                or type(prior.get('generation')) is int
+            )
+            if is_v2_missing and bool(prior):
+                raise PublishError('缺少现有资料库索引基线字节，禁止写入 v2 目录快照')
+            raise PublishError('缺少现有资料库索引基线，拒绝写入')
+
     is_v2 = v2_write or prior.get('schema') == LIBRARY_SCHEMA or type(prior.get('generation')) is int
     if is_v2 and bool(prior) and old_index is None:
         raise PublishError('缺少现有资料库索引基线字节，禁止写入 v2 目录快照')
@@ -799,21 +839,19 @@ def _write_snapshot(
             }
             payload['transactions'] = txs
 
-    if old_index is not None:
-        if not (listing.exists() or listing.is_symlink()):
-            actual = None
-        else:
-            try:
-                actual = _read_library_bytes(listing)
-            except (OSError, original_pending.IntakeError):
-                raise PublishError('无法读取现有资料库索引') from None
-        if actual != old_index:
-            raise PublishError('资料库索引已变化，请重新核对再发布')
-    elif not prior and (listing.exists() or listing.is_symlink()):
-        raise PublishError('资料库索引已变化，请重新核对再发布')
-
-    atomic_write_json(listing, payload)
-    _sync_dir(listing.parent)
+    payload_bytes = (json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + '\n').encode('utf-8')
+    try:
+        atomic_write_guarded_catalog(
+            listing,
+            payload_bytes,
+            baseline=resolved_baseline,
+            id_pattern=_JOB_ID,
+            reader=_read_library_bytes,
+            allowed_temp_names=allowed_temp_names,
+            sync_dir=_sync_dir,
+        )
+    except CatalogWriteGuardError as error:
+        raise PublishError(str(error)) from None
     return payload
 
 
@@ -986,7 +1024,18 @@ def _revision_files(folder):
     return {entry.name: original_pending.file_digest(entry) for entry in sorted(folder.iterdir())}
 
 
-def _publish_revision(library, current, prior, records, record, stage, *, old_index):
+def _publish_revision(
+    library,
+    current,
+    prior,
+    records,
+    record,
+    stage,
+    *,
+    old_index,
+    baseline: CatalogBaseline | None = None,
+    allowed_temp_names: frozenset[str] = frozenset(),
+):
     ident = record['id']
     files = _revision_files(stage)
     revision = original_pending.digest(original_pending.json_bytes(files))
@@ -1031,7 +1080,15 @@ def _publish_revision(library, current, prior, records, record, stage, *, old_in
         'previous_path': previous_path,
         'resume_policy': 'reset_unmapped',
     }}
-    _write_snapshot(listing, prior, {**records, ident: row}, old_index=old_index, v2_write=True)
+    _write_snapshot(
+        listing,
+        prior,
+        {**records, ident: row},
+        old_index=old_index,
+        baseline=baseline,
+        allowed_temp_names=allowed_temp_names,
+        v2_write=True,
+    )
     return final, row
 
 
@@ -1086,7 +1143,10 @@ def publish_job(job_dir, library_root=None) -> dict:
         raise PublishError('任务目录里没有完整的 output.mp3')
     library = (Path(library_root).expanduser() if library_root else default_library_root()).resolve()
     try:
+        ensure_no_evicted_library_placeholder(library)
         library.mkdir(parents=True, exist_ok=True)
+    except CatalogWriteGuardError as error:
+        raise PublishError(str(error)) from None
     except OSError as error:
         raise PublishError(f'无法创建 iCloud 资料库：{error}') from error
     preflight = _require_audio_preflight(src, job)
@@ -1124,7 +1184,13 @@ def _copy_verified_revision_files(current: Path, stage: Path, expected_files: di
 def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
     job_id = job.name
     listing = library / 'library.json'
-    prior, records, old_index = _read_library_index(listing)
+    baseline = _read_library_baseline(listing)
+    if baseline.old_index is None:
+        prior, records, old_index = {}, {}, None
+    else:
+        prior = baseline.prior
+        _, records = decode_catalog_bytes(baseline.old_index, id_pattern=_JOB_ID)
+        old_index = baseline.old_index
     legacy = library / 'episodes' / job_id
     old_record = records.get(job_id, {})
     has_revision = 'media_revision' in old_record
@@ -1317,8 +1383,17 @@ def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
         _stage_cover(job, stage, record)
         atomic_write_json(stage / 'episode.json', record)
         if has_render or (existing and has_revision):
-            return _publish_revision(library, current if existing else None, prior, records, record, stage,
-                                     old_index=old_index)
+            return _publish_revision(
+                library,
+                current if existing else None,
+                prior,
+                records,
+                record,
+                stage,
+                old_index=old_index,
+                baseline=baseline,
+                allowed_temp_names=frozenset({stage.name}),
+            )
         legacy.parent.mkdir(parents=True, exist_ok=True)
         if not existing:
             stage.rename(legacy)
@@ -1331,13 +1406,17 @@ def _publish_job_locked(job, src, library, *, snap, receipt_sha=None):
                         entry.replace(legacy / entry.name)
                 if not keep_point_listen:
                     (legacy / POINT_LISTEN_FILE).unlink(missing_ok=True)
-            if old_index is None:
-                _rebuild_library_locked(library)
-            else:
-                row = _episode_record(legacy, records.get(job_id, {}))
-                if row is None:
-                    raise PublishError('发布的节目清单格式无效')
-                _write_snapshot(listing, prior, {**records, job_id: row}, old_index=old_index)
+            row = _episode_record(legacy, records.get(job_id, {}))
+            if row is None:
+                raise PublishError('发布的节目清单格式无效')
+            _write_snapshot(
+                listing,
+                prior,
+                {**records, job_id: row},
+                old_index=old_index,
+                baseline=baseline,
+                allowed_temp_names=frozenset({stage.name}),
+            )
         except Exception:
             if existing:
                 _restore_library_snapshot(snap, library)
